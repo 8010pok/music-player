@@ -1,0 +1,123 @@
+/*
+  テーマ定義（ダーク / ライト / システム連動）
+  ルート変数で全画面の色を一元管理する
+*/
+
+:root {
+  /* ダークテーマ（デフォルト） */
+  --bg: #0f1115;
+  --bg-elev: #161922;
+  --bg-elev-2: #1d2230;
+  --fg: #e8eaf0;
+  --fg-muted: #9aa0b0;
+  --fg-dim: #6b7080;
+  --accent: #ff5e7e;
+  --accent-2: #ffb86b;
+  --danger: #ff6b6b;
+  --success: #57d18a;
+  --border: #2a2f3d;
+  --border-strong: #3b4252;
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  --scrobble-bar: #57d18a;
+}
+
+/* 明示的にライトテーマ指定された場合 */
+:root[data-theme="light"] {
+  --bg: #f7f8fb;
+  --bg-elev: #ffffff;
+  --bg-elev-2: #eef1f6;
+  --fg: #1a1d24;
+  --fg-muted: #4a5060;
+  --fg-dim: #7a8090;
+  --accent: #d83963;
+  --accent-2: #ec8a23;
+  --danger: #d33;
+  --success: #2a9d63;
+  --border: #d8dde6;
+  --border-strong: #b8bfcd;
+  --shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --scrobble-bar: #2a9d63;
+}
+
+/* システム連動かつ OS がライトの場合 */
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] {
+    --bg: #f7f8fb;
+    --bg-elev: #ffffff;
+    --bg-elev-2: #eef1f6;
+    --fg: #1a1d24;
+    --fg-muted: #4a5060;
+    --fg-dim: #7a8090;
+    --accent: #d83963;
+    --accent-2: #ec8a23;
+    --danger: #d33;
+    --success: #2a9d63;
+    --border: #d8dde6;
+    --border-strong: #b8bfcd;
+    --shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+    --scrobble-bar: #2a9d63;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans",
+    "Noto Sans JP", "Yu Gothic", Meiryo, sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+  overscroll-behavior: none;
+  /* iPhone のセーフエリアを尊重 */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+input, select, textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--fg);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  outline: none;
+}
+
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

@@ -1,0 +1,10 @@
+# 既定: テキストは自動判定し、リポジトリ内は LF に正規化する
+#   (Windows で開発しても GitHub 上・clone 後は LF に揃え、改行差分のノイズを防ぐ)
+* text=auto eol=lf
+
+# バイナリ (改行変換・テキスト差分を行わない)
+*.png  binary
+*.ico  binary
+
+# SVG は XML テキストとして扱う
+*.svg  text

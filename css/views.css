@@ -1,0 +1,2308 @@
+/*
+  各ビュー固有のスタイル
+  - 再生 / ライブラリ / 統計 / 設定
+*/
+
+/* ===== 再生ビュー ===== */
+.player-view {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.player-art-wrap {
+  position: relative; /* 歌詞オーバーレイ(absolute)の基準 */
+  width: min(320px, 80vw);
+  aspect-ratio: 1 / 1;
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--bg-elev-2);
+  box-shadow: var(--shadow);
+}
+
+.player-art {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.player-meta {
+  text-align: center;
+  width: 100%;
+  max-width: 480px;
+}
+
+.player-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  word-break: break-word;
+}
+
+.player-artist {
+  margin: 4px 0 0;
+  color: var(--fg-muted);
+  font-size: 13px;
+  word-break: break-word;
+}
+
+.player-album {
+  margin: 2px 0 0;
+  color: var(--fg-dim);
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.player-seek {
+  width: 100%;
+  max-width: 480px;
+}
+
+.seek-bar {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+}
+
+.seek-bar::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.seek-bar::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: pointer;
+  border: none;
+}
+
+.seek-time {
+  display: flex;
+  justify-content: space-between;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--fg-muted);
+  margin-top: 4px;
+}
+
+/* メインコントロール: 1行バー(シャッフル/前/再生/次/リピート)を中央寄せ */
+.player-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 480px;
+}
+
+/* メイン操作ボタンを大きく押しやすく(最低 44px を満たす 54px) */
+.player-controls .icon-btn {
+  width: 54px;
+  height: 54px;
+}
+
+/* 中央の再生ボタンは円形アクセント FAB で主役化 */
+.player-controls .icon-btn.big {
+  width: 68px;
+  height: 68px;
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(255, 94, 126, 0.45);
+}
+.player-controls .icon-btn.big:hover { filter: brightness(1.05); }
+.player-controls .icon-btn.big:active { transform: scale(0.96); }
+
+/* 補助操作: 15秒戻る / Love / 15秒進む */
+.player-secondary {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+}
+.player-secondary .icon-btn {
+  width: 52px;
+  height: 52px;
+}
+
+/* ===== 独自 SVG アイコン(再生画面コントロール) ===== */
+.player-view .icon-btn .ic {
+  width: 26px;
+  height: 26px;
+  display: block;
+  fill: currentColor;
+  pointer-events: none;
+}
+.player-view .player-controls .icon-btn.big .ic { width: 30px; height: 30px; }
+.player-view .player-secondary .icon-btn .ic { width: 24px; height: 24px; }
+
+/* 再生 / 一時停止 アイコンの出し分け(is-playing) */
+.player-view #btn-play .ic-pause { display: none; }
+.player-view #btn-play.is-playing .ic-play { display: none; }
+.player-view #btn-play.is-playing .ic-pause { display: block; }
+
+/* リピート / 単曲リピート アイコンの出し分け(is-one) */
+.player-view #btn-repeat .ic-repeat-one { display: none; }
+.player-view #btn-repeat.is-one .ic-repeat { display: none; }
+.player-view #btn-repeat.is-one .ic-repeat-one { display: block; }
+
+/* Love ハート: OFF=輪郭 / ON(is-active)=塗り */
+.player-view #btn-love .ic-heart { fill: none; stroke: currentColor; stroke-width: 2; }
+.player-view #btn-love.is-active .ic-heart { fill: currentColor; stroke: none; }
+
+/* ===== 歌詞オーバーレイ(アート枠に重ねる。表示制御は P3 で配線) ===== */
+.player-lyrics-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  background: rgba(15, 17, 21, 0.82);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  padding: 18px 14px;
+}
+.player-lyrics-overlay[hidden] { display: none; }
+.lyrics-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  text-align: center;
+}
+.lyrics-line {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+  word-break: break-word;
+  transition: color 0.2s, transform 0.2s;
+}
+.lyrics-line.is-active {
+  color: var(--accent);
+  font-weight: 700;
+  transform: scale(1.04);
+}
+.lyrics-line.is-synced { cursor: pointer; }
+.lyrics-empty {
+  color: var(--fg-dim);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* 歌詞⇄ジャケット切替ボタン(アート右上) */
+.lyrics-toggle {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(15, 17, 21, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.lyrics-toggle[hidden] { display: none; }
+.lyrics-toggle.is-active { color: var(--accent); border-color: var(--accent); }
+
+/*
+  再生モード文言（なし / シャッフル / キューリピート / 単曲リピート /
+  シャッフル＋キューリピート）。
+  - シャッフル/リピートボタンのすぐ下に小さめのピル状で表示
+  - 邪魔にならないよう、デフォルトは控えめ、有効モード時はアクセント色で強調
+*/
+.playback-mode {
+  display: inline-block;
+  align-self: center;
+  margin: 4px auto 0;
+  padding: 3px 12px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--fg-muted);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.playback-mode.is-active {
+  color: var(--accent);
+  background: rgba(255, 94, 126, 0.10);
+  border-color: var(--accent);
+}
+
+/* スクロブル進捗バー */
+.scrobble-progress {
+  width: 100%;
+  max-width: 480px;
+}
+
+.scrobble-progress-bar {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.scrobble-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--scrobble-bar);
+  transition: width 0.25s;
+}
+
+.scrobble-progress-label {
+  font-size: 11px;
+  color: var(--fg-muted);
+  margin-top: 4px;
+  text-align: center;
+}
+
+/* ===== 再生速度コントロール ===== */
+.playback-rate-wrap {
+  width: 100%;
+  max-width: 480px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.rate-row {
+  display: grid;
+  grid-template-columns: 80px 1fr 56px;
+  gap: 8px;
+  align-items: center;
+}
+.rate-label {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.rate-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  outline: none;
+}
+.rate-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: pointer;
+}
+.rate-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  background: var(--accent);
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+}
+.rate-value {
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  font-weight: 600;
+}
+.rate-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.rate-quick .btn-mini {
+  padding: 4px 10px;
+  font-size: 11px;
+  background: var(--bg-elev-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.rate-quick .btn-mini:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.pitch-preserve {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.pitch-preserve input { transform: scale(0.9); }
+
+/* ===== 曲の情報 トグル (再生画面) ===== */
+.track-info-wrap {
+  width: 100%;
+  max-width: 480px;
+}
+.btn-info-toggle {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+.btn-info-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.track-info-body {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.track-info-body[hidden] { display: none; }
+
+.info-section + .info-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+.info-section h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.info-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  table-layout: fixed;
+}
+.info-table th {
+  width: 40%;
+  text-align: left;
+  font-weight: 500;
+  color: var(--fg-muted);
+  padding: 3px 6px 3px 0;
+  vertical-align: top;
+}
+.info-table td {
+  padding: 3px 0;
+  color: var(--fg);
+  word-break: break-word;
+}
+
+/* ビジュアライザ */
+.visualizer-wrap {
+  width: 100%;
+  max-width: 480px;
+  height: 80px;
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  gap: 8px;
+  align-items: center;
+}
+
+.visualizer-meters {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  height: 100%;
+}
+
+.meter {
+  flex: 1;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  position: relative;
+}
+
+.meter-fill {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(to right, var(--success), var(--accent-2), var(--danger));
+  transition: width 0.05s linear;
+}
+
+#visualizer-canvas {
+  /*
+    canvas はデフォルトで attr(width)/attr(height) からの intrinsic aspect-ratio
+    を持つため、CSS 側で width:100% を指定すると aspect-ratio が優先されて
+    height:100% が無視され、親 .visualizer-wrap の枠を縦にはみ出してしまう
+    (= 直後の要素 .playback-rate-wrap の上に被さって見える現象)。
+    grid item の収縮を許可する min-height:0 / min-width:0 と、
+    aspect-ratio を解除しつつ、親枠の高さ(80px等)に確実に納める。
+  */
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-height: 100%;
+  aspect-ratio: 0 / 0;
+  display: block;
+  background: var(--bg-elev-2);
+  border-radius: 6px;
+}
+
+/* canvas が万一 wrap からはみ出しても隣接要素に被らせない保険 */
+.visualizer-wrap {
+  overflow: hidden;
+}
+
+/* ===== ライブラリビュー ===== */
+
+/* 「音源ファイルを追加」セクション（旧ドロップゾーンを置き換え） */
+.library-add {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  margin-bottom: 12px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.library-add-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.library-add-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.library-add-buttons .btn {
+  flex: 1;
+  min-height: 40px;
+}
+
+.library-rescan-row {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.library-rescan-row .btn {
+  font-size: 12px;
+  padding: 6px 10px;
+}
+.rescan-progress {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.library-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.library-toolbar input[type="search"],
+.library-toolbar select {
+  flex: 1 1 auto;
+  min-width: 100px;
+}
+
+.library-stats {
+  font-size: 11px;
+  color: var(--fg-muted);
+  margin-bottom: 8px;
+}
+
+.track-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.track-row {
+  display: grid;
+  grid-template-columns: 40px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/*
+  手動並び替え時はハンドルがアートワークの左に追加されるため、
+  4 列のグリッドに変更する（ハンドル / アート / 情報 / アクション）。
+*/
+.track-row.is-manual {
+  grid-template-columns: 38px 40px 1fr auto;
+}
+
+.track-row.is-playing {
+  border-color: var(--accent);
+  background: var(--bg-elev-2);
+}
+
+.track-row.is-disabled {
+  opacity: 0.5;
+}
+
+.track-art {
+  width: 40px;
+  height: 40px;
+  border-radius: 4px;
+  background: var(--bg-elev-2);
+  object-fit: cover;
+}
+
+.track-info {
+  min-width: 0;
+}
+
+.track-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.track-sub {
+  font-size: 11px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.track-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+/* Loved (♥) 表示 */
+.track-loved {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--accent);
+  user-select: none;
+}
+/* loved が無い行でもアクションのレイアウトを揃えるためのスペーサ */
+.track-loved-spacer {
+  display: inline-block;
+  width: 28px;
+  height: 28px;
+}
+
+/* 並び替えハンドル（手動並び替えモード時のみ表示）
+   - iPhone でも確実に視認・タップできるよう、十分大きく、背景を持たせる */
+.drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  margin-right: 2px;
+  border-radius: 8px;
+  background: var(--bg-elev-2);
+  color: var(--accent);
+  border: 1px solid var(--border-strong);
+  font-size: 22px;
+  line-height: 1;
+  font-weight: 700;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;       /* iOS の長押しメニューを抑止 */
+  touch-action: none;                /* スクロール等の既定ジェスチャを抑止 */
+  /* タッチ時の視覚フィードバック */
+  transition: transform 0.05s ease, background 0.1s ease;
+}
+.drag-handle:hover {
+  background: var(--bg-elev);
+}
+.drag-handle:active {
+  cursor: grabbing;
+  background: var(--accent);
+  color: #fff;
+  transform: scale(0.95);
+}
+
+/* 手動並び替えモードのときは「並び替え可能」感を出すため
+   背景をわずかに変えてアフォーダンスを強める */
+.track-row.is-manual {
+  background: var(--bg-elev-2);
+}
+
+/* 並び替え中のプレースホルダ・ドラッグ中の行 */
+.drag-placeholder {
+  opacity: 0.6;
+}
+.track-row.is-dragging {
+  opacity: 0.92;
+  box-shadow: var(--shadow);
+  background: var(--bg-elev-2);
+  border-color: var(--accent);
+}
+
+.empty-state {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--fg-muted);
+}
+
+.drop-zone {
+  border: 2px dashed var(--border-strong);
+  border-radius: 12px;
+  padding: 24px;
+  text-align: center;
+  color: var(--fg-muted);
+  margin-bottom: 12px;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.drop-zone.is-dragover {
+  border-color: var(--accent);
+  background: var(--bg-elev-2);
+}
+
+/* ===== 統計ビュー ===== */
+.stats-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.stats-header .stats-tabs { margin-bottom: 0; }
+.stats-refresh {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.stats-last-fetched {
+  font-size: 10px;
+  color: var(--fg-muted);
+}
+.stats-refresh .btn-mini {
+  padding: 4px 10px;
+  font-size: 11px;
+  background: var(--bg-elev-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.stats-refresh .btn-mini:disabled {
+  opacity: 0.5;
+}
+
+/* クイックデータカード (ダッシュボード) */
+.quick-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.quick-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.quick-label {
+  font-size: 11px;
+  color: var(--fg-muted);
+  margin-bottom: 4px;
+}
+.quick-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1.1;
+}
+.quick-value small {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg-muted);
+  margin-left: 2px;
+}
+.quick-sub {
+  font-size: 11px;
+  color: var(--fg-muted);
+  margin-top: 4px;
+}
+
+/* 今週サマリー / 比較合計 行レイアウト */
+.week-summary { padding-top: 4px; }
+.week-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.week-stat { text-align: center; }
+.week-stat-num {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--accent);
+}
+.week-stat-num small {
+  font-size: 11px;
+  color: var(--fg-muted);
+  font-weight: 500;
+}
+.week-stat-num.week-top {
+  font-size: 14px;
+  word-break: break-word;
+}
+.week-stat-label {
+  font-size: 10px;
+  color: var(--fg-muted);
+  margin-top: 2px;
+}
+
+/* 比較バッジ (↑↓→★) */
+.compare-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  height: 24px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 999px;
+  background: var(--bg-elev-2);
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+}
+.compare-badge.is-up    { color: #fff; background: var(--success); border-color: var(--success); }
+.compare-badge.is-down  { color: #fff; background: var(--danger);  border-color: var(--danger); }
+.compare-badge.is-new   { color: #fff; background: var(--accent);  border-color: var(--accent); }
+.compare-badge.is-same  { color: var(--fg-muted); }
+
+.compare-fallen-title {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+/* 比較タブ内の stats-item は compare-badge 用に列を追加 */
+.compare-content .stats-item {
+  grid-template-columns: 24px 36px 1fr auto auto;
+}
+
+/* 狭い iPhone (SE / Pro 等) では 5 列が詰まって badge が見切れるので、
+   アート列を縮めて gap・padding も削減する */
+@media (max-width: 413px) {
+  .compare-content .stats-item {
+    grid-template-columns: 18px 32px 1fr auto auto;
+    gap: 5px;
+    padding: 5px;
+  }
+  .compare-content .stats-item img,
+  .compare-content .stats-item .stats-art-fallback {
+    width: 32px;
+    height: 32px;
+  }
+}
+
+/* 新しい発見セクション */
+.compare-discoveries-section { margin-top: 8px; }
+.compare-discoveries-section h4 {
+  margin: 6px 0 4px;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+/* 振り返り (Rewind) タブ */
+.rewind-origin-block {
+  display: grid;
+  /* 80px(画像) + 残り。テキスト列を minmax(0,1fr) にして長い名前で枠を超えないようにする。 */
+  grid-template-columns: 80px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+.rewind-origin-block img {
+  width: 80px;
+  height: 80px;
+  border-radius: 8px;
+  background: var(--bg-elev-2);
+  object-fit: cover;
+}
+.rewind-origin-year { font-size: 20px; font-weight: 700; color: var(--accent); }
+.rewind-origin-text { font-size: 11px; color: var(--fg-muted); }
+/* 「あなたの始まり」のアーティスト名。長い名前は枠内で折り返す。 */
+.rewind-origin-name { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; word-break: break-word; }
+.rewind-origin-count { font-size: 12px; color: var(--fg-muted); margin-top: 2px; }
+
+.rewind-year-grid {
+  display: grid;
+  /* minmax(0,1fr): 既定の 1fr(=minmax(auto,1fr)) は列の最小幅が中身依存になり、
+     長いアルバム/アーティスト名で列が枠を超えて広がる(grid blowout)。
+     最小幅 0 を許可して列幅を等分に固定し、中身は列内で折り返させる。 */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.rewind-year-grid h4 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  color: var(--accent);
+}
+.rewind-list {
+  list-style: decimal inside;
+  padding: 0;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.rewind-list li {
+  /* 各年トップ3。長いアルバム/アーティスト名は省略せず枠内で折り返す。
+     white-space:normal を明示し(親からの nowrap 継承にも耐える)、
+     overflow-wrap:anywhere で空白の無い長い語(英字の連なり等)も折り返し可能にする。 */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.rewind-list .r-name { color: var(--fg); }
+.rewind-list .r-cnt { color: var(--fg-muted); font-size: 10px; margin-left: 4px; }
+.rewind-year-total {
+  text-align: right;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+@media (max-width: 480px) {
+  .rewind-year-grid {
+    /* モバイルは1列。単一でも minmax(0,1fr) で中身による横はみ出しを防ぐ。 */
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Listening DNA タグ表示 */
+.listening-dna {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0;
+}
+.dna-tag {
+  display: inline-block;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(255, 94, 126, 0.12);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+}
+
+/* クリック可能な行 (アーティスト→類似アーティストモーダル) */
+.stats-item.is-clickable {
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.stats-item.is-clickable:hover {
+  background: var(--bg-elev);
+}
+
+/* 時間タブの 2 カラム (時間帯・平日週末) */
+.time-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+@media (max-width: 480px) {
+  .time-grid { grid-template-columns: 1fr; }
+}
+
+/* ===== Now Playing カード（ダッシュボード最上部） ===== */
+.now-playing-card {
+  background: linear-gradient(135deg, rgba(255, 94, 126, 0.18), rgba(87, 209, 138, 0.10));
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  position: relative;
+  overflow: hidden;
+}
+.now-playing-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+}
+.now-playing-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: var(--accent);
+  border-radius: 50%;
+  animation: np-pulse 1.6s ease-in-out infinite;
+  box-shadow: 0 0 6px var(--accent);
+}
+@keyframes np-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.7); }
+}
+.now-playing-content {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 12px;
+  align-items: center;
+}
+.now-playing-art {
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  background: var(--bg-elev-2);
+  object-fit: cover;
+}
+.now-playing-text { min-width: 0; }
+.now-playing-title {
+  font-size: 15px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.now-playing-artist {
+  font-size: 12px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+
+/* ===== タブ別ロード中表示 ===== */
+.stats-loading {
+  text-align: center;
+  padding: 64px 20px 80px;
+  color: var(--fg);
+}
+.stats-loading-icon {
+  font-size: 56px;
+  display: inline-block;
+  line-height: 1;
+  animation: stats-loading-pulse 1.4s ease-in-out infinite;
+}
+.stats-loading-msg {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 18px 0 8px;
+}
+.stats-loading-sub {
+  font-size: 12px;
+  color: var(--fg-muted);
+  line-height: 1.6;
+  max-width: 440px;
+  margin: 0 auto;
+}
+@keyframes stats-loading-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.92); }
+}
+
+.stats-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  /* スクロール可能であることを視覚的に示すため、右端に薄いフェードを重ねる。
+     狭い画面 (iPhone SE 等) で 6 タブ全てが収まらず「振り返り/時間/Loved」
+     タブの存在に気付かれない問題への対策。
+     パフォーマンス影響を避けるため mask-image (合成効果) で実装。 */
+  -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 24px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 24px), transparent 100%);
+  /* スクロール量に応じてフェード位置を変えるのは複雑なので、常に右端フェードを表示。
+     最後のタブまでスクロールするとフェードは見た目上消える (タブが端まで届くため)。 */
+  -webkit-overflow-scrolling: touch;
+}
+.stats-tabs::-webkit-scrollbar { display: none; }
+
+.stats-tab {
+  padding: 6px 12px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.stats-tab.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.stats-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.stats-card h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+
+.stats-profile {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 12px;
+  align-items: center;
+}
+
+.stats-profile img {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--bg-elev-2);
+}
+
+.stats-profile .scrobble-count {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.stats-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stats-item {
+  display: grid;
+  grid-template-columns: 24px 36px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px;
+  background: var(--bg-elev-2);
+  border-radius: 6px;
+}
+
+.stats-item .rank {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.stats-item img {
+  width: 36px;
+  height: 36px;
+  border-radius: 4px;
+}
+
+/* 画像がない場合のフォールバック (頭文字を表示)。
+   Last.fm API はアーティスト画像を 2020 年以降提供しておらず、
+   Weekly Chart API も画像を返さないため、これらの行で使われる。 */
+.stats-art-fallback {
+  width: 36px;
+  height: 36px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 600;
+  font-size: 14px;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+/* 振り返りタブ「あなたの始まり」の画像枠 (もう少し大きめ) */
+.rewind-origin-block .stats-art-fallback {
+  width: 64px;
+  height: 64px;
+  font-size: 24px;
+  border-radius: 6px;
+}
+
+/* プロフィール画像フォールバック（Last.fm プロフィール写真未設定時） */
+.stats-profile .stats-art-fallback {
+  width: 64px;
+  height: 64px;
+  font-size: 24px;
+  border-radius: 50%;
+}
+
+/* Now Playing アートワークフォールバック */
+.now-playing-content .stats-art-fallback {
+  width: 56px;
+  height: 56px;
+  font-size: 20px;
+  border-radius: 8px;
+}
+
+.stats-item .name {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stats-item .count {
+  font-size: 11px;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-elev) 0%, var(--bg-elev-2) 50%, var(--bg-elev) 100%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s linear infinite;
+  border-radius: 6px;
+}
+
+@keyframes skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.skeleton-line {
+  height: 12px;
+  margin: 4px 0;
+}
+
+.chart-wrap {
+  position: relative;
+  width: 100%;
+  height: 220px;
+}
+
+.heatmap {
+  display: grid;
+  grid-template-columns: 36px repeat(24, 1fr);
+  gap: 1px;
+  font-size: 9px;
+  color: var(--fg-dim);
+}
+
+.heatmap-cell {
+  aspect-ratio: 1 / 1;
+  background: var(--bg-elev-2);
+  border-radius: 2px;
+}
+
+/* ===== 統計拡張 (ジャンル / 世界と自分 / トレンド / Loved改修 等) ===== */
+
+/* 汎用ミニプログレスバー (踏破率 / メインストリーム度 / 聴破率) */
+.mini-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.mini-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  border-radius: 3px;
+  transition: width 0.25s;
+}
+
+/* ジャンル DNA タグクラウド */
+.tag-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: baseline;
+  margin-top: 10px;
+  justify-content: center;
+}
+.tag-cloud-item {
+  color: var(--fg);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.tag-cloud-item small { color: var(--fg-muted); font-size: 0.7em; }
+
+/* ジャンル踏破率 / 国別照合の行 */
+.conquest-row { margin-bottom: 14px; }
+.conquest-row:last-child { margin-bottom: 0; }
+.conquest-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+.conquest-tag { font-size: 13px; font-weight: 600; }
+.conquest-num { font-size: 11px; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.conquest-unheard { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.conquest-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--fg);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  text-decoration: none;
+}
+.conquest-chip:hover { border-color: var(--accent); color: var(--accent); }
+
+/* メインストリーム度 */
+.mainstream-score {
+  font-size: 40px;
+  font-weight: 700;
+  color: var(--accent);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.mainstream-score small { font-size: 18px; }
+.mainstream-diag {
+  text-align: center;
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-top: 4px;
+}
+
+/* バッジ (ツアー中 / レア曲) */
+.badge-ontour,
+.badge-rare {
+  display: inline-block;
+  padding: 1px 7px;
+  font-size: 10px;
+  border-radius: 999px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.badge-ontour {
+  color: var(--accent);
+  background: rgba(255, 94, 126, 0.12);
+  border: 1px solid var(--accent);
+}
+.badge-rare {
+  color: var(--accent-2);
+  background: rgba(255, 184, 107, 0.12);
+  border: 1px solid var(--accent-2);
+}
+
+/* Now Playing カードの世界統計 */
+.np-extra {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+}
+.np-sep { color: var(--fg-dim); }
+.np-tags { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px; }
+.np-tag {
+  padding: 1px 8px;
+  font-size: 10px;
+  color: var(--fg-muted);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+/* 30日トレンド スパークライン */
+.trend-sparkline {
+  width: 100%;
+  height: 60px;
+  display: block;
+}
+.trend-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--fg-muted);
+  margin-top: 4px;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+}
+
+/* タイムトラベル */
+.tt-select {
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.tt-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.tt-grid h4 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--accent);
+}
+@media (max-width: 480px) {
+  .tt-grid { grid-template-columns: 1fr; }
+}
+
+/* Loved タブ拡張 */
+.anniversary-card { border-color: var(--accent); }
+.anniversary-row { font-size: 13px; line-height: 1.7; }
+.loved-year-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--border);
+  font-size: 12px;
+}
+.loved-year-row:last-child { border-bottom: none; }
+.loved-year { font-weight: 700; color: var(--accent); min-width: 42px; }
+.loved-year-artists { flex: 1; color: var(--fg); word-break: break-word; }
+.loved-year-total { color: var(--fg-muted); white-space: nowrap; }
+.similar-seed { margin-bottom: 12px; }
+.similar-seed:last-child { margin-bottom: 0; }
+.similar-seed-head {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: var(--fg);
+}
+
+/* アルバム聴破率モーダル */
+.album-completion { margin-bottom: 10px; }
+.album-completion-label {
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 6px;
+  text-align: center;
+}
+.album-completion-sub {
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-align: center;
+  margin-top: 2px;
+}
+.album-track-unheard { color: var(--fg-dim); }
+
+/* ===== ウェルカム / インストール案内ビュー ===== */
+.welcome-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 640px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.welcome-hero {
+  text-align: center;
+  padding: 16px 0 8px;
+}
+
+.welcome-icon {
+  width: 96px;
+  height: 96px;
+  border-radius: 22px;
+  box-shadow: var(--shadow);
+}
+
+.welcome-title {
+  margin: 12px 0 4px;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.welcome-tagline {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+
+.welcome-installed-note {
+  margin: 10px auto 0;
+  display: inline-block;
+  padding: 6px 12px;
+  font-size: 12px;
+  background: rgba(87, 209, 138, 0.12);
+  border: 1px solid var(--success);
+  border-radius: 999px;
+  color: var(--success);
+}
+
+.welcome-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px 16px;
+}
+
+.welcome-card h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.welcome-card h3 {
+  margin: 12px 0 6px;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.welcome-card ol,
+.welcome-card ul {
+  margin: 0;
+  padding-left: 22px;
+  line-height: 1.6;
+}
+
+.welcome-card li {
+  margin: 2px 0;
+  font-size: 13px;
+}
+
+.welcome-features li {
+  margin: 4px 0;
+}
+
+.welcome-features b {
+  color: var(--accent);
+}
+
+.welcome-note {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  line-height: 1.6;
+}
+
+.welcome-hint {
+  margin: 6px 0 4px;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.welcome-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.welcome-platform {
+  padding: 6px 0 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.welcome-platform:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+/* ===== プレイリスト一覧 ===== */
+
+.playlists-view {
+  display: flex;
+  flex-direction: column;
+}
+
+.playlist-create-row {
+  display: flex;
+  gap: 8px;
+}
+.playlist-create-row input {
+  flex: 1;
+  min-height: 40px;
+}
+.playlist-create-row .btn {
+  min-height: 40px;
+  white-space: nowrap;
+}
+
+/* プレイリスト一覧の行はアートワーク列を持たない 3 カラム */
+.track-row.playlist-row {
+  grid-template-columns: 38px 1fr auto;
+}
+.track-row.playlist-row.is-manual {
+  grid-template-columns: 38px 1fr auto;
+}
+
+/* ===== プレイリスト詳細 / 追加 共通 ===== */
+
+.playlist-detail-view,
+.playlist-add-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.playlist-header {
+  display: grid;
+  grid-template-columns: 40px 1fr 40px;
+  gap: 10px;
+  align-items: center;
+  padding: 4px 0 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.playlist-header-info {
+  min-width: 0;
+}
+
+.playlist-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.playlist-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.playlist-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.playlist-actions .btn {
+  width: 100%;
+  min-height: 40px;
+  /* 長いラベル（「🔁 リピート ON」など）が折り返さずに収まるように */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ===== プレイリスト追加画面: タブ ===== */
+
+.playlist-add-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.playlist-add-tabs .add-tab {
+  flex: 1;
+  padding: 8px 12px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.playlist-add-tabs .add-tab.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* 追加状態を示すチップ（+ / ✓） */
+.add-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--fg-muted);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  user-select: none;
+}
+
+.add-check.is-added {
+  color: #fff;
+  background: var(--success);
+  border-color: var(--success);
+}
+
+/* アーティスト/アルバムのアイコン枠 */
+.track-art.group-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  background: var(--bg-elev-2);
+}
+
+/* 追加画面の検索フィールド */
+.playlist-add-search {
+  margin: 0;
+}
+.playlist-add-search input[type="search"] {
+  width: 100%;
+  min-height: 36px;
+}
+
+/* 「現在再生中のプレイリスト」バナー（ライブラリ上部） */
+.now-playing-from {
+  padding: 8px 12px;
+  background: rgba(255, 94, 126, 0.10);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--accent);
+  margin-bottom: 10px;
+}
+.now-playing-from[hidden] { display: none; }
+.now-playing-from .np-link {
+  color: var(--accent);
+  text-decoration: underline;
+  font-weight: 700;
+}
+
+/* 詳細画面の「このプレイリストを再生中」バッジ */
+.playlist-now-playing {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 3px 10px;
+  background: rgba(255, 94, 126, 0.12);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--accent);
+}
+.playlist-now-playing[hidden] { display: none; }
+
+/* 一覧で再生中のプレイリスト行のタイトル横スピーカー */
+.np-pulse {
+  margin-right: 4px;
+  font-size: 12px;
+}
+
+/* 一覧で「再生中」のプレイリスト行のハイライト */
+.track-row.playlist-row.is-playing {
+  border-color: var(--accent);
+  background: var(--bg-elev-2);
+}
+
+/* ===== 設定ビュー ===== */
+.settings-section {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+
+.settings-section h2 {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+
+.settings-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-row:last-child {
+  border-bottom: none;
+}
+
+.settings-row .label {
+  font-size: 13px;
+}
+
+.settings-row .help {
+  display: block;
+  font-size: 11px;
+  color: var(--fg-muted);
+  margin-top: 2px;
+}
+
+/* ============ 「MUSIC-PLAYERの使い方」展開セクション ============ */
+.help-toggle-btn {
+  width: 100%;
+  text-align: left;
+  font-weight: 600;
+  font-size: 14px;
+  padding: 10px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.help-content {
+  margin-top: 12px;
+  padding: 8px 0 4px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--fg);
+  /* 長い英数字 (URL や identifier) が狭い画面で横溢れしないよう折り返す */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.usage-help .usage-intro {
+  margin: 0 0 8px;
+  color: var(--fg);
+}
+
+.usage-help h3 {
+  margin: 18px 0 6px;
+  padding-bottom: 4px;
+  font-size: 15px;
+  color: var(--accent);
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-help h3:first-of-type {
+  margin-top: 4px;
+}
+
+.usage-help h4 {
+  margin: 12px 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.usage-help p {
+  margin: 4px 0 6px;
+}
+
+.usage-help ul {
+  margin: 4px 0 8px;
+  padding-left: 20px;
+}
+
+.usage-help li {
+  margin: 3px 0;
+}
+
+.usage-help li ul {
+  margin: 2px 0 4px;
+}
+
+.usage-help code {
+  background: var(--bg-base);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  color: var(--accent);
+  /* 長い code 内容も折り返す (溢れ防止) */
+  white-space: normal;
+  word-break: break-all;
+}
+
+.usage-help b {
+  color: var(--fg);
+}
+
+.usage-help .usage-note {
+  margin: 4px 0;
+  font-size: 11px;
+  color: var(--fg-muted);
+  font-style: italic;
+}
+
+.usage-help .usage-warn {
+  background: rgba(255, 184, 107, 0.08);
+  border-left: 3px solid var(--accent-2);
+  padding: 6px 10px;
+  margin: 6px 0 8px;
+  font-size: 12px;
+  border-radius: 4px;
+}
+
+.warn-box {
+  background: rgba(255, 184, 107, 0.08);
+  border: 1px solid var(--accent-2);
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 12px;
+  margin-bottom: 10px;
+  color: var(--fg);
+}
+
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.switch .slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: var(--border-strong);
+  border-radius: 22px;
+  transition: 0.2s;
+}
+
+.switch .slider::before {
+  content: "";
+  position: absolute;
+  height: 18px;
+  width: 18px;
+  left: 2px;
+  top: 2px;
+  background: #fff;
+  border-radius: 50%;
+  transition: 0.2s;
+}
+
+.switch input:checked + .slider {
+  background: var(--accent);
+}
+
+.switch input:checked + .slider::before {
+  transform: translateX(18px);
+}
+
+/* ===== EQ / オーディオエフェクト ===== */
+.eq-sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* 設定画面のオーディオ詳細セクション内 サブセクション見出し */
+.fx-row-header {
+  margin-top: 14px;
+  margin-bottom: 4px;
+  padding-bottom: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+  border-bottom: 1px dashed var(--border);
+}
+.fx-row-header:first-child { margin-top: 6px; }
+
+.eq-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 50px;
+  gap: 10px;
+  align-items: center;
+}
+
+.eq-label {
+  font-size: 12px;
+  color: var(--fg-muted);
+  /* 90px 列に収まらない長いラベル（例: "Bass Boost (~100Hz)"）を
+     省略記号で切り詰める。min-width: 0 で grid item の縮小を許可。 */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.eq-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  outline: none;
+}
+
+.eq-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.eq-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  background: var(--accent);
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+}
+
+.eq-value {
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+/* =====================================================
+   iPhone Plus / Pro Max 系 (414–719px) のサイズ調整
+   - 標準 iPhone (≤ 393px) では `width: min(320px, 80vw)` で
+     アートが 80vw 側に当たって ≈ 300–314px になり画面比率 80%
+   - Plus / Pro Max (414+ px) では 320px に貼り付き画面比率が
+     70% 前後まで落ち、画面サイズに対しアートが小さく見える
+   - そこで 414–719px の範囲だけアートの上限を 360px に拡大する。
+     タブレット (≥ 720px) は別ルールで対応済み。
+   - iPhone 標準 (≤ 413px) には影響しない (デグレなし)
+   ===================================================== */
+@media (min-width: 414px) and (max-width: 719px) {
+  .player-art-wrap {
+    /* 80vh も加えて iPhone SE landscape (568×320) など縦が極端に
+       短い場合でもアートが画面高さを超えて見切れないようにする */
+    width: min(360px, 80vw, 80vh);
+  }
+}
+
+/* iPhone 標準 (≤ 413px) でも landscape など縦短時の保険として
+   80vh で上限を設ける (元の min(320, 80vw) は維持しつつ vh を加える)。
+   portrait (例 375×812) では 80vh=650 で影響なく、元と完全一致。 */
+@media (max-width: 413px) {
+  .player-art-wrap {
+    width: min(320px, 80vw, 80vh);
+  }
+}
+
+/* =====================================================
+   iPhone SE 1st gen (320×568) 向け超小型画面対応
+   現行レイアウト: メインバー(shuffle/prev/play/next/repeat)+補助行(back15/love/fwd15)
+   の2段構成。アートが大きいと scroll=0 で下段(補助行や再生モードピル)が
+   ボトムナビに隠れる。アートを 220px に縮小し gap を 10px に詰めることで、
+   補助行・再生モードピルがボトムナビより上に収まる(概算: 補助行下端≈y472、
+   再生モードピル下端≈y504、ボトムナビ上端≈y518)。
+   - max-height: 580px: SE 1st gen portrait(568) のみ対象
+   - max-width: 413px: 標準 iPhone 幅以下のみ
+   - SE 2/3 gen (375×667) や Android (360×640+) には影響しない
+   ===================================================== */
+@media (max-height: 580px) and (max-width: 413px) {
+  .player-art-wrap {
+    width: min(220px, 70vw, 65vh);
+  }
+  .player-view { gap: 10px; }
+}
+
+/* =====================================================
+   スマートフォン横向き（幅 720px 未満のランドスケープ）
+   - 縦高が 420px 前後しかないため 80vh でもアートが大きすぎ、
+     メイン再生コントロールがボトムナビの下に隠れてしまう。
+   - 35vh に引き締めることで 667×375 等の一般的な iPhone 横向きで
+     コントロール(y≈259–315)がナビ(y≈321)より上に収まる。
+   - max-height: 380px の超小型横向き（SE 1st gen 等）は
+     さらに縮小してプレイボタンがナビに隠れないようにする。
+   - min-width: 720px のタブレットランドスケープは別ルールで対応済み。
+   ===================================================== */
+@media (max-width: 719px) and (orientation: landscape) {
+  .player-art-wrap {
+    width: min(35vh, 220px);
+  }
+  .player-view { gap: 6px; }
+  /* 縦が短いので大きくした基準ボタンを引き締め、コントロールがナビに重ならないようにする */
+  .player-controls { gap: 10px; }
+  .player-controls .icon-btn.big { width: 52px; height: 52px; }
+  .player-controls .icon-btn,
+  .player-secondary .icon-btn { width: 46px; height: 46px; }
+  .player-secondary { gap: 14px; }
+  .player-view .player-controls .icon-btn.big .ic { width: 26px; height: 26px; }
+  .player-view .icon-btn .ic { width: 22px; height: 22px; }
+}
+
+/* iPhone SE 1st gen 横向き (568×320) など高さ 380px 以下 */
+@media (max-width: 719px) and (orientation: landscape) and (max-height: 380px) {
+  .player-art-wrap {
+    width: min(28vh, 160px);
+  }
+  .player-view { gap: 4px; }
+  .player-title  { font-size: 13px; }
+  .player-artist { font-size: 11px; }
+  /* アルバム名は超小型横向きでは省略 */
+  .player-album  { display: none; }
+  /* プレイボタンと補助ボタンを縮小して収まりやすくする */
+  .player-controls .icon-btn.big {
+    width: 44px;
+    height: 44px;
+  }
+  .player-controls .icon-btn,
+  .player-secondary .icon-btn { width: 40px; height: 40px; }
+  .player-view .player-controls .icon-btn.big .ic { width: 24px; height: 24px; }
+  .player-view .icon-btn .ic { width: 20px; height: 20px; }
+}
+
+/* =====================================================
+   タブレット (iPad mini / iPad / iPad Air) 向け調整
+   iPhone (< 720px) には影響しないよう min-width 720px 以上限定。
+   音声再生・MediaSession 等のロジックには手を入れないため、
+   ここはレイアウト / タイポグラフィ / ヒットエリアの調整のみ。
+   ===================================================== */
+@media (min-width: 720px) {
+  /* --- 再生ビュー --- */
+  .player-art-wrap {
+    /* ランドスケープなど縦が短い時にアートが画面を埋めて
+       メタ・シーク・コントロール・ビジュアライザが画面外に
+       押し出されないよう、高さ依存の上限 (50vh) も加える */
+    width: min(420px, 60vw, 50vh);
+  }
+  .player-meta,
+  .player-seek,
+  .scrobble-progress,
+  .visualizer-wrap {
+    max-width: 560px;
+  }
+  .player-title { font-size: 22px; }
+  .player-artist { font-size: 14px; }
+  .player-album { font-size: 13px; }
+
+  .seek-bar { height: 6px; }
+  .seek-bar::-webkit-slider-thumb { width: 18px; height: 18px; }
+  .seek-bar::-moz-range-thumb { width: 18px; height: 18px; }
+  .seek-time { font-size: 12px; }
+
+  .visualizer-wrap { height: 100px; }
+  .scrobble-progress-label { font-size: 12px; }
+  .playback-mode { font-size: 12px; padding: 4px 14px; }
+
+  /* メイン操作ボタンを大きく（タブレットでは余裕があるのでヒットエリアを拡大） */
+  .player-controls { gap: 18px; }
+  .player-controls .icon-btn.big {
+    width: 74px;
+    height: 74px;
+  }
+  .player-controls .icon-btn {
+    width: 58px;
+    height: 58px;
+  }
+  .player-secondary { gap: 20px; }
+  .player-secondary .icon-btn {
+    width: 56px;
+    height: 56px;
+  }
+  .player-view .player-controls .icon-btn .ic { width: 28px; height: 28px; }
+  .player-view .player-controls .icon-btn.big .ic { width: 34px; height: 34px; }
+  .player-view .player-secondary .icon-btn .ic { width: 26px; height: 26px; }
+
+  /* --- ライブラリ / プレイリスト共通 トラック行 --- */
+  .track-row {
+    grid-template-columns: 48px 1fr auto;
+    padding: 10px;
+    gap: 12px;
+  }
+  .track-row.is-manual {
+    grid-template-columns: 44px 48px 1fr auto;
+  }
+  /* プレイリスト一覧は アート列が無いので 3 列を維持 */
+  .track-row.playlist-row,
+  .track-row.playlist-row.is-manual {
+    grid-template-columns: 44px 1fr auto;
+  }
+  .track-art {
+    width: 48px;
+    height: 48px;
+  }
+  .track-title { font-size: 15px; }
+  .track-sub { font-size: 12px; }
+
+  .library-add-title { font-size: 14px; }
+  .library-stats { font-size: 12px; }
+
+  /* --- プレイリスト詳細 アクションボタン --- */
+  .playlist-actions {
+    gap: 10px;
+    max-width: 720px;
+  }
+  .playlist-actions .btn {
+    min-height: 48px;
+    font-size: 14px;
+  }
+  .playlist-title { font-size: 18px; }
+  .playlist-sub { font-size: 12px; }
+  .playlist-now-playing { font-size: 12px; padding: 4px 12px; }
+
+  /* --- プレイリスト追加画面 タブ --- */
+  .playlist-add-tabs .add-tab {
+    padding: 10px 14px;
+    font-size: 13px;
+  }
+
+  /* --- 統計ビュー --- */
+  .stats-card { padding: 14px 16px; }
+  .stats-card h3 { font-size: 14px; }
+  .stats-item { padding: 8px; }
+  .stats-item .name { font-size: 13px; }
+  .stats-item .count { font-size: 12px; }
+  .stats-profile { grid-template-columns: 80px 1fr; }
+  .stats-profile img { width: 80px; height: 80px; }
+  .stats-profile .stats-art-fallback { width: 80px; height: 80px; font-size: 30px; }
+  .stats-profile .scrobble-count { font-size: 26px; }
+  .chart-wrap { height: 280px; }
+
+  /* --- 設定 --- */
+  .settings-section { padding: 16px; }
+  .settings-section h2 { font-size: 15px; }
+  .settings-row .label { font-size: 14px; }
+  .settings-row .help { font-size: 12px; }
+  .help-toggle-btn { font-size: 15px; padding: 12px 14px; }
+  .help-content { font-size: 14px; }
+  .usage-help h3 { font-size: 16px; }
+  .usage-help h4 { font-size: 14px; }
+
+  /* --- ウェルカム --- */
+  .welcome-icon { width: 120px; height: 120px; border-radius: 26px; }
+  .welcome-title { font-size: 28px; }
+  .welcome-tagline { font-size: 14px; }
+  .welcome-card { padding: 18px 20px; }
+  .welcome-card h2 { font-size: 17px; }
+  .welcome-card h3 { font-size: 14px; }
+  .welcome-card li { font-size: 14px; }
+  .welcome-note { font-size: 13px; }
+}
+
+/* 大画面 (iPad Pro 12.9" や iPad Pro 11" 含む) — さらに余裕がある場合の上振れ */
+@media (min-width: 1024px) {
+  .player-art-wrap {
+    /* ここも縦短のランドスケープを考慮し 55vh を上限に */
+    width: min(480px, 45vw, 55vh);
+  }
+  .player-meta,
+  .player-seek,
+  .scrobble-progress,
+  .visualizer-wrap {
+    max-width: 640px;
+  }
+  .player-title { font-size: 24px; }
+  .visualizer-wrap { height: 110px; }
+}
+
+/* 縦が短いランドスケープ (iPad mini / Air のランドスケープ等)
+   アートが大きすぎてビジュアライザや再生モード表示まで画面外に
+   押し出されないよう、上下の余白とアートサイズを引き締める。
+   メディアクエリは min-width: 720px との両立を意識して指定。 */
+@media (min-width: 720px) and (orientation: landscape) and (max-height: 1100px) {
+  .player-view { gap: 8px; }
+  .player-art-wrap {
+    /* 1024x768 等の iPad ランドスケープで全要素を 1 画面内に収めるには
+       アートを 35vh 程度 (≈ 270px) まで抑える必要がある */
+    width: min(35vh, 300px);
+  }
+  .player-meta,
+  .player-seek,
+  .scrobble-progress,
+  .visualizer-wrap {
+    max-width: 520px;
+  }
+  .player-title { font-size: 18px; margin-top: 2px; }
+  .player-artist { font-size: 12px; margin-top: 2px; }
+  .player-album { font-size: 11px; margin-top: 1px; }
+  .visualizer-wrap { height: 60px; }
+  .player-controls .icon-btn.big {
+    width: 52px;
+    height: 52px;
+  }
+  .player-controls .icon-btn,
+  .player-secondary .icon-btn {
+    width: 40px;
+    height: 40px;
+  }
+  /* 縮小したボタンに見合う SVG アイコンサイズ(font-size はSVG化で無効なため指定しない) */
+  .player-view .player-controls .icon-btn.big .ic { width: 26px; height: 26px; }
+  .player-view .icon-btn .ic { width: 22px; height: 22px; }
+  .playback-mode { font-size: 11px; padding: 2px 10px; }
+  .scrobble-progress-label { font-size: 11px; }
+}
+
+/* =====================================================
+   スマートフォン横向き(高さ ≤ 520px)の統一レイアウト調整
+   - 大型 iPhone(横向きは幅 ≥720px・高さ 390–430px)や横向き Android
+     (例 800×360)は、上の min-width:720px ランドスケープ規則
+     (iPad 想定 = 高さ 744px 以上)に吸われてアートが大きすぎ、メイン
+     再生コントロール(前/再生/次)が scroll=0 でボトムナビの裏に
+     隠れてしまう(見切れ)。高さ ≤380px の SE 系だけが既存規則で救済され、
+     390–430px 帯と幅≥720px の短い横向きが取りこぼされていた。
+   - 高さ基準(≤520px)で「全スマホの横向き」を確実に捕捉し、アートと
+     余白・ボタンを詰めて主要コントロールをナビより上に収める。
+   - iPad の横向き(高さ 744px 以上)・全機種の縦向きには影響しない。
+   - 変更は CSS レイアウトのみ。音声 / MediaSession / ロック画面の
+     ロジックには一切干渉しない。
+   - 本ファイル末尾に置くことで、上の各ランドスケープ規則より後勝ちで
+     アート/余白/ボタンサイズを上書きする。
+   ===================================================== */
+@media (orientation: landscape) and (max-height: 520px) {
+  .player-view { gap: 4px; }
+  /* アートは縦方向の主因。20vh に抑えて 360–430px 高のいずれでも
+     主要コントロールがボトムナビより上に余裕を持って収まるようにする
+     (360→約72px / 390→約78px / 430→約86px)。横向きではアートは
+     サムネイル扱いとし、シーク/コントロールの視認性を優先する。 */
+  .player-art-wrap { width: min(20vh, 200px); }
+  /* アルバム名は横向き短画面では省略して縦を節約(タイトル/アーティストは残す) */
+  .player-album { display: none; }
+  .player-controls { gap: 12px; }
+  .player-controls .icon-btn.big { width: 50px; height: 50px; }
+  .player-controls .icon-btn,
+  .player-secondary .icon-btn { width: 42px; height: 42px; }
+  .player-secondary { gap: 14px; }
+  .player-view .player-controls .icon-btn.big .ic { width: 26px; height: 26px; }
+  .player-view .icon-btn .ic { width: 22px; height: 22px; }
+}

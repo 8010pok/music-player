@@ -1,0 +1,458 @@
+/*
+  全体レイアウト（ヘッダー / ビュー / ミニプレイヤー / ボトムナビ）
+*/
+
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  /* iOS の Visual Viewport を考慮（100vh の問題） */
+  min-height: 100dvh;
+}
+
+/* ===== ヘッダー ===== */
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+}
+
+.app-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  /* 狭い iPhone ではタイトルが右側ピルを圧迫しないよう、必要時に縮める */
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-pill {
+  min-height: 22px;
+  padding: 2px 10px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  background: var(--bg-elev-2);
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  /* 「未送信スクロブル 1234 件」のように長文化してもヘッダーを押し広げず
+     収まりきらない場合は省略表示する */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 50vw;
+}
+
+.status-pill.is-ok { color: var(--success); }
+.status-pill.is-err { color: var(--danger); }
+
+/* ヘッダー右側のピル群（認証状態 + 統計進捗） */
+.header-pills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  /* タイトルとの flex 競合で必要に応じて縮められるように */
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-end;
+  /* 画面が狭い場合は折り返さずスクロール（最低限の保護） */
+  max-width: 75vw;
+  overflow: hidden;
+}
+
+/* 統計データ取得中のバックグラウンド進捗（ヘッダー） */
+.stats-progress-pill {
+  min-height: 22px;
+  padding: 2px 10px;
+  font-size: 11px;
+  color: var(--accent);
+  background: rgba(255, 94, 126, 0.12);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  white-space: nowrap;
+  /* 長いラベル（"📊 集計中 (45/120)" など）が溢れないように */
+  max-width: 50vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+}
+.stats-progress-pill[hidden] { display: none; }
+
+@media (max-width: 413px) {
+  /* 小型 iPhone (SE / Pro など) ではヘッダー全体を圧縮:
+     タイトル文字も少し小さくして、ピル領域を最大限確保する */
+  .app-header { padding: 10px 10px; gap: 6px; }
+  .app-title { font-size: 14px; letter-spacing: 0.02em; }
+  .header-pills { gap: 4px; max-width: 70vw; }
+  .status-pill { font-size: 10px; padding: 2px 8px; max-width: 45vw; }
+  .stats-progress-pill { font-size: 10px; padding: 2px 8px; max-width: 40vw; }
+}
+
+/* ===== メインビュー ===== */
+.view-root {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 14px 12px;
+  overflow-y: auto;
+  /* ボトムナビ + ミニプレイヤーの高さ分の余白 */
+  padding-bottom: calc(72px + 64px + env(safe-area-inset-bottom));
+}
+
+/*
+  再生画面ではミニプレイヤーを非表示にする (router が body[data-route="player"] を付与)。
+  ミニプレイヤー分の余白 (64px) も不要になるので padding-bottom を縮める。
+  これで再生速度 UI 等が画面外に押し出されたり、スクロールしてもミニプレイヤーの
+  後ろに隠れる現象を解消する。
+*/
+body[data-route="player"] .view-root {
+  padding-bottom: calc(64px + 16px + env(safe-area-inset-bottom));
+}
+
+.view-section {
+  margin-bottom: 16px;
+}
+
+.section-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+
+/* ===== ボトムナビ ===== */
+.bottom-nav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  padding: 6px 0 calc(6px + env(safe-area-inset-bottom));
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 6px 0;
+  font-size: 11px;
+  color: var(--fg-muted);
+  transition: color 0.15s;
+}
+
+.nav-item.is-active {
+  color: var(--accent);
+}
+
+.nav-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.nav-label {
+  font-size: 10px;
+}
+
+/* ===== ミニプレイヤー ===== */
+.mini-player {
+  position: fixed;
+  left: 8px;
+  right: 8px;
+  bottom: calc(64px + env(safe-area-inset-bottom));
+  z-index: 90;
+  display: grid;
+  grid-template-columns: 48px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+/* HTML の hidden 属性を尊重（display: grid に上書きされないように） */
+.mini-player[hidden] {
+  display: none;
+}
+
+/*
+  再生画面ではミニプレイヤーを常に非表示にする (フルプレイヤーの下部に
+  再生速度・ピッチ維持等の UI を表示するための領域を確保するため)。
+  JS の hidden 制御と二重にすることでルート切替直後の表示フラッシュも防ぐ。
+*/
+body[data-route="player"] .mini-player {
+  display: none !important;
+}
+
+.mini-art {
+  width: 48px;
+  height: 48px;
+  border-radius: 6px;
+  background: var(--bg-elev);
+  object-fit: cover;
+}
+
+.mini-meta {
+  min-width: 0;
+}
+
+.mini-title, .mini-artist {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mini-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mini-artist {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.mini-controls {
+  display: flex;
+  gap: 4px;
+}
+
+.icon-btn {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 16px;
+  color: var(--fg);
+  background: transparent;
+}
+
+.icon-btn:hover {
+  background: var(--bg-elev);
+}
+
+/*
+  is-active 状態の強調表示
+  emoji ボタン（🔀 / 🔁 / ♡）は OS 既定の絵文字グラフィックで描画されるため
+  単純な color 変更では視覚的にほぼ変化しない。
+  そのため背景・縁取り・小さなインジケータドットで「ON」状態を明示する。
+*/
+.icon-btn.is-active {
+  color: var(--accent);
+  background: rgba(255, 94, 126, 0.18);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+  position: relative;
+}
+
+.icon-btn.is-active::after {
+  content: "";
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* ===== トースト ===== */
+.toast-root {
+  position: fixed;
+  left: 50%;
+  bottom: calc(140px + env(safe-area-inset-bottom));
+  z-index: 200;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.toast {
+  padding: 8px 14px;
+  background: var(--bg-elev-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  animation: toast-in 0.2s ease;
+}
+
+.toast.is-err { border-color: var(--danger); }
+.toast.is-ok { border-color: var(--success); }
+
+@keyframes toast-in {
+  from { transform: translateY(8px); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+
+/* ===== モーダル ===== */
+.modal-root {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 16px;
+}
+
+/*
+  HTML の hidden 属性を尊重する（display: flex に上書きされないように）。
+  これが無いと .modal-root が常に全画面を覆い、iOS の座標ベースの
+  タップヒットテストで全てのタップを吸い込んでしまう（実機でタップが
+  効かないバグの原因になる）。
+*/
+.modal-root[hidden] {
+  display: none;
+}
+
+.modal {
+  width: 100%;
+  max-width: 440px;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 18px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+
+.modal h2 {
+  margin: 0 0 10px;
+  font-size: 16px;
+}
+
+.modal .modal-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.modal label {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.modal .modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.btn {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev-2);
+  color: var(--fg);
+  font-size: 13px;
+}
+
+.btn:hover { background: var(--bg-elev); }
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.btn.primary:hover { filter: brightness(1.05); }
+.btn.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ===== レスポンシブ：タブレット以上 ===== */
+@media (min-width: 720px) {
+  .view-root {
+    padding: 16px 24px;
+    padding-bottom: calc(72px + 72px + env(safe-area-inset-bottom));
+  }
+  /* タブレットでも再生画面はミニプレイヤー非表示なので padding を縮める */
+  body[data-route="player"] .view-root {
+    padding-bottom: calc(72px + 16px + env(safe-area-inset-bottom));
+  }
+  body { font-size: 14px; }
+
+  /* ボトムナビ: 画面全幅だとタブレットでは間延びするので、中央寄せ・最大幅 720px。
+     iPhone (<720px) は従来どおり画面全幅。 */
+  .bottom-nav {
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    max-width: 720px;
+    width: 100%;
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    border-top-left-radius: 12px;
+    border-top-right-radius: 12px;
+  }
+  .nav-icon { font-size: 22px; }
+  .nav-label { font-size: 11px; }
+
+  /* ミニプレイヤー: ボトムナビと同じ幅で中央寄せ */
+  .mini-player {
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    max-width: 720px;
+    width: calc(100% - 16px);
+  }
+
+  /* アイコンボタン: タブレットでは少し大きくしてタップしやすく */
+  .icon-btn {
+    width: 40px;
+    height: 40px;
+    font-size: 18px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .view-root {
+    max-width: 1100px;
+    margin: 0 auto;
+    width: 100%;
+  }
+  /* 大画面でもナビ・ミニプレイヤーは中央寄せ最大720pxを維持
+     （min-width: 720px の指定を上書きしないよう同等値で再宣言） */
+  .mini-player {
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    max-width: 720px;
+    width: calc(100% - 16px);
+  }
+}

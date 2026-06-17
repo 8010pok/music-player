@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#0f1115" />
+  <meta name="description" content="ローカル音源を再生し、Last.fmにスクロブル・自分の統計を表示する統合PWA" />
+
+  <!--
+    [推奨ハードニング] Content-Security-Policy (多層防御)。出力は escapeHtml 済みだが、CSP を入れると
+    XSS の被害を更に限定できる。下記は本アプリの実 fetch/読込先に合わせた起点案。導入時は必ずプレビューで
+    全機能(再生=media blob / アートワーク=img blob+data+Last.fm CDN / 統計取得=connect ws.audioscrobbler.com /
+    Chart.js=script jsdelivr / Worker=worker self / インライン style 属性)を検証してから有効化すること
+    (誤指定は表示・再生・取得を黙って壊す)。未検証のまま有効化しないため現状はコメントとして残す:
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self' https://ws.audioscrobbler.com; worker-src 'self'; manifest-src 'self'; base-uri 'self'">
+  -->
+
+  <!-- iOS PWA 対応 -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="MUSIC-PLAYER" />
+  <!--
+    iOS / iPadOS のホーム画面追加用アイコン
+    - sizes 指定で iPhone / iPad / iPad Pro それぞれに最適な解像度が使われる
+    - sizes 無しの apple-touch-icon は最後のフォールバック (180×180)
+  -->
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon-180.png" />
+  <link rel="apple-touch-icon" sizes="167x167" href="icons/apple-touch-icon-167.png" />
+  <link rel="apple-touch-icon" sizes="152x152" href="icons/apple-touch-icon-152.png" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+
+  <link rel="manifest" href="manifest.json" />
+
+  <!-- PC ブラウザ用 favicon (タブ・ブックマーク) -->
+  <link rel="icon" type="image/svg+xml" href="icons/icon.svg" />
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png" />
+  <link rel="shortcut icon" href="icons/favicon.ico" />
+
+  <title>MUSIC-PLAYER</title>
+
+  <link rel="stylesheet" href="css/theme.css" />
+  <link rel="stylesheet" href="css/layout.css" />
+  <link rel="stylesheet" href="css/views.css" />
+</head>
+<body>
+  <!-- ============================================================
+       常駐オーディオ要素：iOS バックグラウンド再生の生命線。
+       絶対にビューと一緒に再生成しないこと。
+       AudioContext を音声経路に挟むとロック画面で停止するため、
+       これは独立した最上位ノードとして DOM に常駐させる。
+       ============================================================ -->
+  <audio id="audio-el" preload="metadata" playsinline></audio>
+
+  <!-- 全体ヘッダー（タイトル + 状態表示 + 統計取得進捗） -->
+  <header class="app-header" role="banner">
+    <h1 class="app-title">MUSIC-PLAYER</h1>
+    <div class="header-pills">
+      <div class="stats-progress-pill" id="stats-progress-pill" aria-live="polite" hidden></div>
+      <div class="status-pill" id="status-pill" aria-live="polite"></div>
+    </div>
+  </header>
+
+  <!-- メインビュー領域：ルーターがここに各ビューを挿入 -->
+  <main id="view-root" class="view-root" role="main"></main>
+
+  <!-- ミニプレイヤー：再生画面以外のタブで再生情報を表示 -->
+  <section id="mini-player" class="mini-player" hidden aria-label="ミニプレイヤー">
+    <img id="mini-art" class="mini-art" alt="" />
+    <div class="mini-meta">
+      <div id="mini-title" class="mini-title">—</div>
+      <div id="mini-artist" class="mini-artist">—</div>
+    </div>
+    <div class="mini-controls">
+      <button id="mini-prev" class="icon-btn" aria-label="前の曲">⏮</button>
+      <button id="mini-play" class="icon-btn" aria-label="再生/停止">▶</button>
+      <button id="mini-next" class="icon-btn" aria-label="次の曲">⏭</button>
+    </div>
+  </section>
+
+  <!-- ボトムナビゲーション（モバイルファースト） -->
+  <nav class="bottom-nav" role="navigation" aria-label="メインメニュー">
+    <a href="#/player" class="nav-item" data-route="player">
+      <span class="nav-icon">▶</span><span class="nav-label">再生</span>
+    </a>
+    <a href="#/library" class="nav-item" data-route="library">
+      <span class="nav-icon">♫</span><span class="nav-label">ライブラリ</span>
+    </a>
+    <a href="#/playlists" class="nav-item" data-route="playlists">
+      <span class="nav-icon">📋</span><span class="nav-label">リスト</span>
+    </a>
+    <a href="#/stats" class="nav-item" data-route="stats">
+      <span class="nav-icon">📊</span><span class="nav-label">統計</span>
+    </a>
+    <a href="#/settings" class="nav-item" data-route="settings">
+      <span class="nav-icon">⚙</span><span class="nav-label">設定</span>
+    </a>
+  </nav>
+
+  <!-- トースト通知領域 -->
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+
+  <!-- モーダル領域 -->
+  <div id="modal-root" class="modal-root" hidden></div>
+
+  <!--
+    Chart.js (統計画面で使用、SW でキャッシュ可能)
+    crossorigin="anonymous": CDN へのクレデンシャル(Cookie等)送信を防ぐ
+    referrerpolicy="no-referrer": Referer ヘッダから本サイトURL を CDN に漏らさない
+    バージョンを 4.4.4 にピン留めして、CDN 上でファイル差し替えが起きても URL は変わらないようにしている
+    ※ SRI(integrity 属性)は未付与。改ざん検知を強化するなら jsdelivr の SRI ハッシュ
+      (sha384-…)を integrity に付与する(初回のみ正値の取得が必要。誤ハッシュは読込失敗を招くため別途対応)。
+  -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"
+          crossorigin="anonymous"
+          referrerpolicy="no-referrer"
+          defer></script>
+
+  <!-- エントリポイント -->
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

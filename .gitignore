@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Node（将来ビルドツール導入時のため）
+node_modules/
+package-lock.json
+
+# Local backups
+*.bak
+
+# Claude Code（ローカルのプレビュー/ツール設定。機密ではないが環境依存のため除外）
+.claude/
+
+# 検証用の一時HTML（GitHub公開不要）
+verify-*.html
