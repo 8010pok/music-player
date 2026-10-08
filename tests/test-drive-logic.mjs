@@ -13,12 +13,24 @@ import {
   isDriveTrackId,
   driveFileIdFromTrackId,
   trackIdFromDriveFileId,
+  parseGoogleApiError,
 } from "../js/gdrive/drive-service.js";
 
 let passed = 0;
 function test(name, fn) {
   try {
     fn();
+    passed++;
+    console.log(`  ✓ ${name}`);
+  } catch (e) {
+    console.error(`  ✗ ${name}`);
+    throw e;
+  }
+}
+
+async function asyncTest(name, fn) {
+  try {
+    await fn();
     passed++;
     console.log(`  ✓ ${name}`);
   } catch (e) {
@@ -81,6 +93,56 @@ test("Drive API クエリ文字列が正しく音声形式をフィルタする"
   const userSearch = "Test'Song\\1";
   const clean = userSearch.replace(/['\\]/g, "");
   strictEqual(clean, "TestSong1");
+});
+
+console.log("=== Google Drive API エラー詳細解析 (403 対応) ===");
+
+await asyncTest("parseGoogleApiError: API 未有効化時の 403 エラーを検出し、有効化手順を促すメッセージを返す", async () => {
+  const mockRes = {
+    status: 403,
+    statusText: "Forbidden",
+    json: async () => ({
+      error: {
+        code: 403,
+        message: "Google Drive API has not been used in project 12345 before or it is disabled. Enable it by visiting...",
+        details: [{ reason: "SERVICE_DISABLED" }]
+      }
+    })
+  };
+  const msg = await parseGoogleApiError(mockRes, "Driveエラー");
+  ok(msg.includes("Google Drive API が有効化されていません (403 SERVICE_DISABLED)"));
+  ok(msg.includes("Google Cloud Console"));
+});
+
+await asyncTest("parseGoogleApiError: 権限不足時の 403 エラーを検出し、OAuth 同意画面の確認を促す", async () => {
+  const mockRes = {
+    status: 403,
+    statusText: "Forbidden",
+    json: async () => ({
+      error: {
+        code: 403,
+        message: "The caller does not have permission",
+      }
+    })
+  };
+  const msg = await parseGoogleApiError(mockRes, "Driveエラー");
+  ok(msg.includes("Google Drive API アクセス拒否 (403 Forbidden)"));
+  ok(msg.includes("テストユーザー"));
+});
+
+await asyncTest("parseGoogleApiError: 通常の API エラーを正しくフォーマットする", async () => {
+  const mockRes = {
+    status: 404,
+    statusText: "Not Found",
+    json: async () => ({
+      error: {
+        code: 404,
+        message: "File not found: abc",
+      }
+    })
+  };
+  const msg = await parseGoogleApiError(mockRes, "Driveエラー");
+  strictEqual(msg, "Driveエラー (404): File not found: abc");
 });
 
 console.log("============================================================");

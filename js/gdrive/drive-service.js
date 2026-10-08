@@ -110,6 +110,52 @@ export async function isDriveConnected() {
 }
 
 /**
+ * Google Drive API のエラーレスポンスから詳細なエラーメッセージを抽出
+ * @param {Response} res
+ * @param {string} [defaultMsg]
+ * @returns {Promise<string>}
+ */
+export async function parseGoogleApiError(res, defaultMsg = "Google API エラー") {
+  try {
+    const data = await res.json();
+    const gError = data?.error;
+    if (gError) {
+      const msg = gError.message || "";
+      const reason = gError.errors?.[0]?.reason || gError.details?.[0]?.reason || "";
+
+      // 403: Google Drive API がプロジェクトで有効化されていない場合
+      if (
+        res.status === 403 &&
+        (msg.includes("has not been used in project") ||
+          msg.includes("disabled") ||
+          reason === "SERVICE_DISABLED" ||
+          reason === "accessNotConfigured")
+      ) {
+        return (
+          `Google Drive API が有効化されていません (403 SERVICE_DISABLED)。\n` +
+          `Google Cloud Console で「Google Drive API」を有効にする必要があります。\n` +
+          `(${msg})`
+        );
+      }
+
+      // 403: 権限不足またはテストユーザー制限
+      if (res.status === 403) {
+        return (
+          `Google Drive API アクセス拒否 (403 Forbidden):\n` +
+          `${msg || "権限がありません。"}\n` +
+          `Google Cloud Console の「OAuth 同意画面」でテストユーザーに自分のアカウントが登録されているか、Google Drive API が有効化されているか確認してください。`
+        );
+      }
+
+      return `${defaultMsg} (${res.status}): ${msg || res.statusText}`;
+    }
+  } catch (_) {
+    // レスポンスが JSON ではない場合
+  }
+  return `${defaultMsg}: ${res.status} ${res.statusText || ""}`.trim();
+}
+
+/**
  * トークンの有効性とユーザー情報をテスト
  * @param {string} token
  * @returns {Promise<{ ok: boolean, user?: object, quota?: object, error?: string }>}
@@ -124,7 +170,8 @@ export async function testConnection(token) {
       if (res.status === 401) {
         return { ok: false, error: "アクセストークンが無効または期限切れです (401)" };
       }
-      return { ok: false, error: `Google API エラー: ${res.status} ${res.statusText}` };
+      const errorMsg = await parseGoogleApiError(res, "Google Drive 接続テスト失敗");
+      return { ok: false, error: errorMsg };
     }
     const data = await res.json();
     return {
@@ -233,7 +280,8 @@ export async function listDriveAudioFiles({ query = "", pageToken = null, pageSi
       await disconnectDrive();
       throw new Error("認証の有効期限が切れました。再度接続してください。");
     }
-    throw new Error(`Google Drive API エラー: ${res.status} ${res.statusText}`);
+    const errMsg = await parseGoogleApiError(res, "Google Drive API エラー");
+    throw new Error(errMsg);
   }
 
   const data = await res.json();
@@ -263,7 +311,8 @@ export async function fetchDriveAudioBlob(fileId, { onProgress } = {}) {
       await disconnectDrive();
       throw new Error("Google Drive の認証期限が切れました (401)。再接続してください。");
     }
-    throw new Error(`Google Drive ダウンロード失敗: ${res.status} ${res.statusText}`);
+    const errMsg = await parseGoogleApiError(res, "Google Drive ダウンロード失敗");
+    throw new Error(errMsg);
   }
 
   // プログレス監視付きのダウンロード
@@ -661,7 +710,33 @@ export async function openDriveImportModal({ onImported } = {}) {
       const res = await listDriveAudioFiles({ query: q });
       renderFiles(res.files);
     } catch (err) {
-      fileListEl.innerHTML = `<div style="padding: 24px; text-align: center; color: var(--err); font-size: 12px;">取得エラー: ${escapeHtml(err.message)}</div>`;
+      const is403 = String(err.message).includes("403");
+      fileListEl.innerHTML = `
+        <div style="padding: 16px; text-align: left; background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 8px; font-size: 12px; line-height: 1.6;">
+          <div style="color: var(--err, #ff453a); font-weight: bold; margin-bottom: 8px; font-size: 13px;">
+            ⚠️ ファイル一覧の取得に失敗しました
+          </div>
+          <div style="white-space: pre-wrap; color: var(--fg); margin-bottom: 12px;">${escapeHtml(err.message)}</div>
+          ${
+            is403
+              ? `<div style="background: rgba(10, 132, 255, 0.08); border: 1px solid rgba(10, 132, 255, 0.3); border-radius: 6px; padding: 10px; margin-bottom: 12px; font-size: 11px; line-height: 1.6;">
+              <strong style="color: var(--accent);">🛠 解決手順 (Google Cloud Console):</strong><br/>
+              1. <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener noreferrer" style="color: var(--accent); text-decoration: underline; font-weight: bold;">Google Drive API 有効化ページ</a> をブラウザで開く<br/>
+              2. Client ID を作成したプロジェクトが選択されていることを確認<br/>
+              3. <strong>【有効にする】</strong> ボタンをクリック<br/>
+              4. 反映に数十秒かかる場合があるため、少し待ってから下の【再試行】ボタンを押してください。
+            </div>`
+              : ""
+          }
+          <button class="btn primary" id="btn-drive-retry" style="width: 100%; font-size: 12px; padding: 8px;">🔄 もう一度読み込む (再試行)</button>
+        </div>
+      `;
+      const retryBtn = fileListEl.querySelector("#btn-drive-retry");
+      if (retryBtn) {
+        retryBtn.addEventListener("click", () => {
+          loadFiles(searchInput ? searchInput.value : "");
+        });
+      }
     }
   };
 
