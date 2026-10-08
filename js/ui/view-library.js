@@ -35,8 +35,8 @@ let filterText = "";
 let sortKey = "manual-asc";
 let showDisabled = true;
 
-// ライブラリタブ状態: "tracks" | "albums" | "artists"
-let activeTab = "tracks";
+// ライブラリタブ状態: "artists" | "albums" | "tracks" (デフォルト: アーティスト)
+let activeTab = "artists";
 let albumFilterText = "";
 let albumSortKey = "title-asc";
 let artistFilterText = "";
@@ -68,12 +68,12 @@ export async function mount(root) {
   // mount 開始時に必ずクリアする。
   resetDragState();
 
-  // URL クエリからタブ復元
+  // URL クエリからタブ復元 (デフォルト: artists)
   const tabMatch = location.hash.match(/\btab=([a-z]+)/);
   if (tabMatch && ["tracks", "albums", "artists"].includes(tabMatch[1])) {
     activeTab = tabMatch[1];
   } else {
-    activeTab = "tracks";
+    activeTab = "artists";
   }
   albumFilterText = "";
   albumSortKey = "title-asc";
@@ -253,11 +253,11 @@ function render() {
       <!-- 「現在再生中のプレイリスト」バナー -->
       <div class="now-playing-from" id="np-banner" hidden></div>
 
-      <!-- Apple Music スタイル ライブラリタブ -->
+      <!-- Apple Music スタイル ライブラリタブ (アーティスト / アルバム / 曲) -->
       <div class="library-tabs-bar" role="tablist">
-        <button class="library-tab-btn ${activeTab === "tracks" ? "is-active" : ""}" data-tab="tracks" role="tab">曲</button>
-        <button class="library-tab-btn ${activeTab === "albums" ? "is-active" : ""}" data-tab="albums" role="tab">アルバム</button>
         <button class="library-tab-btn ${activeTab === "artists" ? "is-active" : ""}" data-tab="artists" role="tab">アーティスト</button>
+        <button class="library-tab-btn ${activeTab === "albums" ? "is-active" : ""}" data-tab="albums" role="tab">アルバム</button>
+        <button class="library-tab-btn ${activeTab === "tracks" ? "is-active" : ""}" data-tab="tracks" role="tab">曲</button>
       </div>
 
       <!-- タブ 1: 曲 -->
@@ -286,6 +286,8 @@ function render() {
           <input type="search" id="lib-search" placeholder="検索: 曲タイトルなどを入力" />
           <select id="lib-sort">
             <option value="manual-asc">手動並び替え</option>
+            <option value="year-desc">リリース年 (新しい順)</option>
+            <option value="year-asc">リリース年 (古い順)</option>
             <option value="title-asc">タイトル(昇順)</option>
             <option value="title-desc">タイトル(降順)</option>
             <option value="artist-asc">アーティスト(昇順)</option>
@@ -555,6 +557,22 @@ function cssEscape(s) {
 function getComparator(key) {
   switch (key) {
     case "manual-asc":   return (a, b) => orderOf(a) - orderOf(b);
+    case "year-desc":
+      // リリース年 (新しい順): 降順。年が同じならトラック番号・タイトル昇順
+      return (a, b) => {
+        const ya = parseInt(a.year, 10) || 0;
+        const yb = parseInt(b.year, 10) || 0;
+        if (yb !== ya) return yb - ya;
+        return (a.title || "").localeCompare(b.title || "", "ja");
+      };
+    case "year-asc":
+      // リリース年 (古い順): 昇順。未設定(0)は末尾へ
+      return (a, b) => {
+        const ya = parseInt(a.year, 10) || 99999;
+        const yb = parseInt(b.year, 10) || 99999;
+        if (ya !== yb) return ya - yb;
+        return (a.title || "").localeCompare(b.title || "", "ja");
+      };
     case "title-asc":    return (a, b) => (a.title || "").localeCompare(b.title || "", "ja");
     case "title-desc":   return (a, b) => (b.title || "").localeCompare(a.title || "", "ja");
     case "artist-asc":   return (a, b) => (a.artist || "").localeCompare(b.artist || "", "ja");

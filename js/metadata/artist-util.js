@@ -5,7 +5,7 @@
  * - 副作用のない純粋関数として実装（単体テスト容易性を確保）
  */
 
-import { getAlbumArtist, groupTracksIntoAlbums, normalizeAlbumText } from "./album-util.js";
+import { getAlbumArtist, groupTracksIntoAlbums, normalizeAlbumText, sortAlbums } from "./album-util.js";
 
 /**
  * アーティスト識別比較用テキスト正規化
@@ -60,8 +60,8 @@ export function groupTracksIntoArtists(tracks) {
 
   const result = [];
   for (const artist of map.values()) {
-    // アルバム一覧を抽出
-    artist.albums = groupTracksIntoAlbums(artist.tracks);
+    // アルバム一覧を抽出 (リリース年・新しい順にデフォルト整列)
+    artist.albums = sortAlbums(groupTracksIntoAlbums(artist.tracks), "year-desc");
     artist.albumCount = artist.albums.length;
     artist.trackCount = artist.tracks.length;
 

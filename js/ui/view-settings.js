@@ -26,6 +26,7 @@ import { cancel as cancelStatsService, reset as resetStatsService, startIfNeeded
 import { toast, confirm, promptForm, escapeHtml, escapeAttr } from "./components.js";
 import { releaseAllArtwork } from "./artwork-cache.js";
 import { isDriveConnected, disconnectDrive, openDriveImportModal } from "../gdrive/drive-service.js";
+import { shareOrDownloadLibrary, importLibraryData } from "../store/sync-service.js";
 // 属性値のエスケープは escapeHtml で代用 (quote/&/</> をエスケープ)
 // escapeAttr は components.js から import 済み
 import {
@@ -494,6 +495,41 @@ export async function mount(root) {
     toast(refs.gdriveAutoCacheChk.checked ? "再生時自動キャッシュを有効にしました" : "再生時自動キャッシュを無効にしました", "ok");
   });
 
+  // ===== 端末間ライブラリ同期 (iPad ↔ iPhone) =====
+  refs.btnSyncExport?.addEventListener("click", async () => {
+    try {
+      toast("ライブラリを書き出し中…", "info");
+      const res = await shareOrDownloadLibrary();
+      if (res.shared) {
+        toast("AirDrop / 共有で送信しました", "ok");
+      } else if (res.downloaded) {
+        toast("ライブラリ同期ファイルを保存しました", "ok");
+      }
+    } catch (e) {
+      toast(`書き出し失敗: ${e.message}`, "err");
+    }
+  });
+
+  refs.btnSyncImport?.addEventListener("click", () => {
+    refs.syncFileInput?.click();
+  });
+
+  refs.syncFileInput?.addEventListener("change", async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      toast("ライブラリを同期中…", "info");
+      const text = await file.text();
+      const res = await importLibraryData(text);
+      toast(`${res.tracksCount} 曲、${res.playlistsCount} 件のプレイリストを同期・復元しました`, "ok");
+      remount();
+    } catch (err) {
+      toast(`読み込みエラー: ${err.message}`, "err");
+    } finally {
+      if (refs.syncFileInput) refs.syncFileInput.value = "";
+    }
+  });
+
   function remount() {
     // remount でも購読を一度クリアして mount 内で再登録する
     // (mount 冒頭の clearViewSubscriptions() でも実行されるが、
@@ -674,6 +710,29 @@ function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices, dr
             <div class="help">Google Drive の曲を再生した際、音源を端末（IndexedDB）に保存して次回以降オフラインで即座に再生できるようにします</div>
           </div>
           <label class="switch"><input type="checkbox" id="gdrive-autocache-chk" ${pub.gdriveAutoCache !== false ? "checked" : ""} /><span class="slider"></span></label>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h2>📱 端末間ライブラリ同期 (iPad ↔ iPhone)</h2>
+        <div class="settings-row">
+          <div>
+            <div class="label">ライブラリを書き出す (iPad → iPhone)</div>
+            <div class="help">曲一覧、Google Drive 接続情報、プレイリスト、お気に入り、編集メタデータを書き出します。AirDrop や iCloud ドライブで別の端末にそのまま共有できます。</div>
+          </div>
+          <div>
+            <button class="btn primary" id="btn-sync-export" style="white-space:nowrap;">📤 書き出す</button>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="label">ライブラリを読み込む (復元 / 同期)</div>
+            <div class="help">AirDrop や iCloud で受信した同期ファイル (.json) を選択して取り込みます。Google Drive 音源はそのまま即座にストリーミング＆キャッシュ再生可能です。</div>
+          </div>
+          <div>
+            <button class="btn" id="btn-sync-import" style="white-space:nowrap;">📥 読み込む</button>
+            <input type="file" id="sync-file-input" accept=".json,application/json" style="display:none;" />
+          </div>
         </div>
       </div>
 
@@ -896,6 +955,9 @@ function collect(root) {
     btnGdriveConnect: root.querySelector("#btn-gdrive-connect"),
     btnGdriveDisconnect: root.querySelector("#btn-gdrive-disconnect"),
     gdriveAutoCacheChk: root.querySelector("#gdrive-autocache-chk"),
+    btnSyncExport: root.querySelector("#btn-sync-export"),
+    btnSyncImport: root.querySelector("#btn-sync-import"),
+    syncFileInput: root.querySelector("#sync-file-input"),
     scrobbleChk: root.querySelector("#scrobble-chk"),
     nowPlayingChk: root.querySelector("#nowplaying-chk"),
     btnHelpToggle: root.querySelector("#btn-help-toggle"),

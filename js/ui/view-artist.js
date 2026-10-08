@@ -9,6 +9,7 @@
 
 import { getAllTracks } from "../store/library-db.js";
 import { groupTracksIntoArtists } from "../metadata/artist-util.js";
+import { sortAlbums } from "../metadata/album-util.js";
 import { setQueueAndPlay, setShuffleMode } from "../player/audio-engine.js";
 import { appState } from "../state.js";
 import { getArtworkUrl } from "./artwork-cache.js";
@@ -64,6 +65,15 @@ export async function mount(root) {
       go("album", { key });
     }
   });
+
+  // アルバム並び替え (リリース順・タイトル順)
+  const albumSortSelect = root.querySelector("#artist-album-sort");
+  if (albumSortSelect) {
+    albumSortSelect.addEventListener("change", () => {
+      const sorted = sortAlbums(artist.albums, albumSortSelect.value);
+      refs.albumGrid.innerHTML = renderAlbumCards(sorted);
+    });
+  }
 
   // 曲一覧クリック委譲
   refs.trackList.addEventListener("click", (e) => onTrackClick(e, root));
@@ -122,8 +132,15 @@ function render(art) {
         <button class="btn" id="btn-artist-play-shuffle">🔀 シャッフル再生</button>
       </div>
 
-      <!-- アルバム一覧セクション -->
-      <div class="artist-section-title">アルバム (${art.albumCount})</div>
+      <!-- アルバム一覧セクション (リリース順 / タイトル順) -->
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 18px; margin-bottom: 8px;">
+        <div class="artist-section-title" style="margin: 0;">アルバム (${art.albumCount})</div>
+        <select id="artist-album-sort" style="font-size: 11px; padding: 3px 8px; border-radius: 6px; background: var(--bg-surface, var(--bg-elev)); color: var(--fg); border: 1px solid var(--border-color, var(--border)); cursor: pointer;">
+          <option value="year-desc">リリース順 (新しい順)</option>
+          <option value="year-asc">リリース順 (古い順)</option>
+          <option value="title-asc">アルバム名 (昇順)</option>
+        </select>
+      </div>
       <div class="album-grid" id="artist-album-grid" role="list">
         ${renderAlbumCards(art.albums)}
       </div>

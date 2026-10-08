@@ -158,6 +158,28 @@ export function initAudioEngine({ onNowPlaying, onScrobble } = {}) {
     console.warn("[audio-engine] audio error", e, audioEl.error);
   });
 
+  // === 再生安定化ウォッチドッグ (iOS / モバイル ストール・バッファ待ちからの自動復旧) ===
+  let stallRecoveryTimer = null;
+  const onStallOrWaiting = () => {
+    if (state.userPausedExplicitly || !appState.get().isPlaying || state.transitioning) return;
+    if (stallRecoveryTimer) clearTimeout(stallRecoveryTimer);
+    stallRecoveryTimer = setTimeout(() => {
+      if (state.userPausedExplicitly || !appState.get().isPlaying || state.transitioning) return;
+      if (audioEl.paused && audioEl.readyState >= 2) {
+        console.warn("[audio-engine] ストール状態から再生を自動復帰します");
+        audioEl.play().catch((err) => console.warn("[audio-engine] ストール復帰失敗", err));
+      }
+    }, 2500);
+  };
+  audioEl.addEventListener("waiting", onStallOrWaiting);
+  audioEl.addEventListener("stalled", onStallOrWaiting);
+  audioEl.addEventListener("playing", () => {
+    if (stallRecoveryTimer) {
+      clearTimeout(stallRecoveryTimer);
+      stallRecoveryTimer = null;
+    }
+  });
+
   audioEl.volume = clampVolume(audioEl.volume);
 
   // 起動時に EQ 設定（有効化時のみ初期化）と保存済みエフェクトを全て反映

@@ -3,12 +3,49 @@
   - 再生 / ライブラリ / 統計 / 設定
 */
 
-/* ===== 再生ビュー ===== */
+/* ===== 画面遷移アニメーション（滑らかなページ切り替え） ===== */
+.view-root > * {
+  animation: pageViewEnter 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: transform, opacity;
+}
+
+@keyframes pageViewEnter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ===== 再生ビュー（Apple Music風 スムーズなスライドアップ） ===== */
 .player-view {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 14px;
+  animation: playerViewSlideUp 0.28s cubic-bezier(0.16, 1, 0.3, 1) both !important;
+  will-change: transform, opacity;
+}
+
+@keyframes playerViewSlideUp {
+  0% {
+    opacity: 0;
+    transform: translateY(30px) scale(0.97);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .view-root > *,
+  .player-view {
+    animation: none !important;
+  }
 }
 
 .player-art-wrap {
