@@ -17,6 +17,10 @@ import { toast, confirm, escapeHtml, escapeAttr } from "./components.js";
 import { appState } from "../state.js";
 import { go } from "../router.js";
 import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
+import { editTrackMetadata } from "./metadata-editor.js";
+import { openDriveImportModal } from "../gdrive/drive-service.js";
+import { groupTracksIntoAlbums, sortAlbums } from "../metadata/album-util.js";
+import { groupTracksIntoArtists, sortArtists } from "../metadata/artist-util.js";
 
 // ファイル拡張子の許可リスト
 const ALLOW_EXT = /\.(mp3|m4a|m4b|aac|mp4|flac|ogg|oga|opus|wav|webm)$/i;
@@ -30,6 +34,14 @@ let filterText = "";
 // デフォルトは手動並び替え（曲を追加した順 = addedAt にフォールバック）
 let sortKey = "manual-asc";
 let showDisabled = true;
+
+// ライブラリタブ状態: "tracks" | "albums" | "artists"
+let activeTab = "tracks";
+let albumFilterText = "";
+let albumSortKey = "title-asc";
+let artistFilterText = "";
+let artistSortKey = "name-asc";
+
 // ドラッグ並び替え用の一時状態
 let dragState = null;
 // 現在マウント中のライブラリ画面の refs。取込/再スキャンの後追い完了処理やトグル書込の
@@ -55,6 +67,18 @@ export async function mount(root) {
   // 残ってドラッグハンドルが「見えない」現象が起きる可能性がある。
   // mount 開始時に必ずクリアする。
   resetDragState();
+
+  // URL クエリからタブ復元
+  const tabMatch = location.hash.match(/\btab=([a-z]+)/);
+  if (tabMatch && ["tracks", "albums", "artists"].includes(tabMatch[1])) {
+    activeTab = tabMatch[1];
+  } else {
+    activeTab = "tracks";
+  }
+  albumFilterText = "";
+  albumSortKey = "title-asc";
+  artistFilterText = "";
+  artistSortKey = "name-asc";
 
   root.innerHTML = render();
   const refs = collectRefs(root);
@@ -83,6 +107,71 @@ export async function mount(root) {
     toast("ライブラリの読込に失敗しました。画面を開き直してください", "err");
   }
 
+  // タブ切替
+  refs.tabBtns.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tab = btn.dataset.tab;
+      if (!tab || tab === activeTab) return;
+      activeTab = tab;
+      refs.tabBtns.forEach((b) => b.classList.toggle("is-active", b.dataset.tab === activeTab));
+      if (refs.panelTracks) refs.panelTracks.hidden = activeTab !== "tracks";
+      if (refs.panelAlbums) refs.panelAlbums.hidden = activeTab !== "albums";
+      if (refs.panelArtists) refs.panelArtists.hidden = activeTab !== "artists";
+
+      const newHash = `#/library?tab=${activeTab}`;
+      if (location.hash !== newHash) {
+        history.replaceState(null, "", newHash);
+      }
+
+      if (activeTab === "albums") renderAlbums(refs);
+      if (activeTab === "artists") renderArtists(refs);
+    });
+  });
+
+  // アルバム検索 & ソート & カードクリック
+  if (refs.albumSearch) {
+    refs.albumSearch.addEventListener("input", () => {
+      albumFilterText = refs.albumSearch.value.trim().toLowerCase();
+      renderAlbums(refs);
+    });
+  }
+  if (refs.albumSort) {
+    refs.albumSort.addEventListener("change", () => {
+      albumSortKey = refs.albumSort.value;
+      renderAlbums(refs);
+    });
+  }
+  if (refs.albumGrid) {
+    refs.albumGrid.addEventListener("click", (e) => {
+      const card = e.target.closest(".album-card");
+      if (card && card.dataset.key) {
+        go("album", { key: card.dataset.key });
+      }
+    });
+  }
+
+  // アーティスト検索 & ソート & 行クリック
+  if (refs.artistSearch) {
+    refs.artistSearch.addEventListener("input", () => {
+      artistFilterText = refs.artistSearch.value.trim().toLowerCase();
+      renderArtists(refs);
+    });
+  }
+  if (refs.artistSort) {
+    refs.artistSort.addEventListener("change", () => {
+      artistSortKey = refs.artistSort.value;
+      renderArtists(refs);
+    });
+  }
+  if (refs.artistList) {
+    refs.artistList.addEventListener("click", (e) => {
+      const row = e.target.closest(".artist-row");
+      if (row && row.dataset.name) {
+        go("artist", { name: row.dataset.name });
+      }
+    });
+  }
+
   // 入力結線
   // onFiles は冒頭で FileList を同期コピー(Array.from)してから await するため、呼び出し直後に
   //   value をクリアしても取込に影響しない。クリアしないと同一ファイルの再選択で change が
@@ -91,6 +180,16 @@ export async function mount(root) {
   refs.folderInput.addEventListener("change", (e) => { onFiles(refs, e.target.files); e.target.value = ""; });
   refs.addBtn.addEventListener("click", () => refs.fileInput.click());
   refs.addFolderBtn.addEventListener("click", () => refs.folderInput.click());
+  if (refs.addGdriveBtn) {
+    refs.addGdriveBtn.addEventListener("click", () => {
+      openDriveImportModal({
+        onImported: async () => {
+          await reloadTracks(activeRefs || refs);
+          await refreshStorage(activeRefs || refs);
+        },
+      });
+    });
+  }
   if (refs.rescanBtn) refs.rescanBtn.addEventListener("click", () => rescanMeta(refs));
 
   // 検索
@@ -154,45 +253,88 @@ function render() {
       <!-- 「現在再生中のプレイリスト」バナー -->
       <div class="now-playing-from" id="np-banner" hidden></div>
 
-      <div class="library-add">
-        <div class="library-add-title">音源ファイルを追加</div>
-        <div class="library-add-buttons">
-          <button class="btn primary" id="btn-add">ファイル</button>
-          <button class="btn primary" id="btn-add-folder">フォルダ</button>
-        </div>
-        <input type="file" id="file-input" multiple
-               accept=".mp3,.m4a,.m4b,.aac,.mp4,.flac,.ogg,.oga,.opus,.wav,.webm,audio/*"
-               style="display:none" />
-        <input type="file" id="folder-input" multiple webkitdirectory directory
-               style="display:none" />
-        <div class="library-rescan-row">
-          <button class="btn" id="btn-rescan-meta" title="保存済み全曲のファイルを再パースしてメタデータを更新します">
-            📋 メタデータ再スキャン
-          </button>
-          <span id="rescan-progress" class="rescan-progress"></span>
-        </div>
+      <!-- Apple Music スタイル ライブラリタブ -->
+      <div class="library-tabs-bar" role="tablist">
+        <button class="library-tab-btn ${activeTab === "tracks" ? "is-active" : ""}" data-tab="tracks" role="tab">曲</button>
+        <button class="library-tab-btn ${activeTab === "albums" ? "is-active" : ""}" data-tab="albums" role="tab">アルバム</button>
+        <button class="library-tab-btn ${activeTab === "artists" ? "is-active" : ""}" data-tab="artists" role="tab">アーティスト</button>
       </div>
 
-      <div class="library-toolbar">
-        <input type="search" id="lib-search" placeholder="検索: 曲タイトルなどを入力" />
-        <select id="lib-sort">
-          <option value="manual-asc">手動並び替え</option>
-          <option value="title-asc">タイトル(昇順)</option>
-          <option value="title-desc">タイトル(降順)</option>
-          <option value="artist-asc">アーティスト(昇順)</option>
-          <option value="artist-desc">アーティスト(降順)</option>
-          <option value="playCount-desc">再生回数が多い順</option>
-          <option value="loved-desc">♥ お気に入り (Love)</option>
-        </select>
-        <label class="settings-row" style="border:none;padding:0;display:flex;gap:6px;align-items:center;">
-          <input type="checkbox" id="show-disabled" checked />
-          <span>🔇 一時的な再生無効も表示</span>
-        </label>
+      <!-- タブ 1: 曲 -->
+      <div class="library-tab-panel" id="panel-tracks" ${activeTab !== "tracks" ? "hidden" : ""}>
+        <div class="library-add">
+          <div class="library-add-title">音源ファイルを追加</div>
+          <div class="library-add-buttons">
+            <button class="btn primary" id="btn-add">ファイル</button>
+            <button class="btn primary" id="btn-add-folder">フォルダ</button>
+            <button class="btn" id="btn-add-gdrive" title="Google Drive から音源を追加">☁ Google Drive</button>
+          </div>
+          <input type="file" id="file-input" multiple
+                 accept=".mp3,.m4a,.m4b,.aac,.mp4,.flac,.ogg,.oga,.opus,.wav,.webm,audio/*"
+                 style="display:none" />
+          <input type="file" id="folder-input" multiple webkitdirectory directory
+                 style="display:none" />
+          <div class="library-rescan-row">
+            <button class="btn" id="btn-rescan-meta" title="保存済み全曲のファイルを再パースしてメタデータを更新します">
+              📋 メタデータ再スキャン
+            </button>
+            <span id="rescan-progress" class="rescan-progress"></span>
+          </div>
+        </div>
+
+        <div class="library-toolbar">
+          <input type="search" id="lib-search" placeholder="検索: 曲タイトルなどを入力" />
+          <select id="lib-sort">
+            <option value="manual-asc">手動並び替え</option>
+            <option value="title-asc">タイトル(昇順)</option>
+            <option value="title-desc">タイトル(降順)</option>
+            <option value="artist-asc">アーティスト(昇順)</option>
+            <option value="artist-desc">アーティスト(降順)</option>
+            <option value="playCount-desc">再生回数が多い順</option>
+            <option value="loved-desc">♥ お気に入り (Love)</option>
+          </select>
+          <label class="settings-row" style="border:none;padding:0;display:flex;gap:6px;align-items:center;">
+            <input type="checkbox" id="show-disabled" checked />
+            <span>🔇 一時的な再生無効も表示</span>
+          </label>
+        </div>
+
+        <div class="library-stats" id="lib-stats"></div>
+
+        <ul class="track-list" id="track-list"></ul>
       </div>
 
-      <div class="library-stats" id="lib-stats"></div>
+      <!-- タブ 2: アルバム -->
+      <div class="library-tab-panel" id="panel-albums" ${activeTab !== "albums" ? "hidden" : ""}>
+        <div class="library-toolbar">
+          <input type="search" id="album-search" placeholder="アルバム・アーティスト・年を検索" autocomplete="off" />
+          <select id="album-sort">
+            <option value="title-asc">アルバム名 (昇順)</option>
+            <option value="title-desc">アルバム名 (降順)</option>
+            <option value="artist-asc">アーティスト名 (昇順)</option>
+            <option value="year-desc">リリース年 (新しい順)</option>
+            <option value="year-asc">リリース年 (古い順)</option>
+            <option value="recent">最近追加した順</option>
+          </select>
+        </div>
+        <div class="library-stats" id="album-stats"></div>
+        <div class="album-grid" id="album-grid" role="list"></div>
+      </div>
 
-      <ul class="track-list" id="track-list"></ul>
+      <!-- タブ 3: アーティスト -->
+      <div class="library-tab-panel" id="panel-artists" ${activeTab !== "artists" ? "hidden" : ""}>
+        <div class="library-toolbar">
+          <input type="search" id="artist-search" placeholder="アーティスト名を検索" autocomplete="off" />
+          <select id="artist-sort">
+            <option value="name-asc">名前 (昇順)</option>
+            <option value="name-desc">名前 (降順)</option>
+            <option value="tracks-desc">曲数が多い順</option>
+            <option value="albums-desc">アルバム数が多い順</option>
+          </select>
+        </div>
+        <div class="library-stats" id="artist-stats"></div>
+        <ul class="artist-list" id="artist-list" role="list"></ul>
+      </div>
     </section>
   `;
 }
@@ -200,10 +342,16 @@ function render() {
 function collectRefs(root) {
   return {
     npBanner: root.querySelector("#np-banner"),
+    tabBtns: Array.from(root.querySelectorAll(".library-tab-btn")),
+    panelTracks: root.querySelector("#panel-tracks"),
+    panelAlbums: root.querySelector("#panel-albums"),
+    panelArtists: root.querySelector("#panel-artists"),
+    // 曲タブ
     fileInput: root.querySelector("#file-input"),
     folderInput: root.querySelector("#folder-input"),
     addBtn: root.querySelector("#btn-add"),
     addFolderBtn: root.querySelector("#btn-add-folder"),
+    addGdriveBtn: root.querySelector("#btn-add-gdrive"),
     rescanBtn: root.querySelector("#btn-rescan-meta"),
     rescanProgress: root.querySelector("#rescan-progress"),
     search: root.querySelector("#lib-search"),
@@ -211,12 +359,24 @@ function collectRefs(root) {
     showDisabledChk: root.querySelector("#show-disabled"),
     libStats: root.querySelector("#lib-stats"),
     list: root.querySelector("#track-list"),
+    // アルバムタブ
+    albumSearch: root.querySelector("#album-search"),
+    albumSort: root.querySelector("#album-sort"),
+    albumStats: root.querySelector("#album-stats"),
+    albumGrid: root.querySelector("#album-grid"),
+    // アーティストタブ
+    artistSearch: root.querySelector("#artist-search"),
+    artistSort: root.querySelector("#artist-sort"),
+    artistStats: root.querySelector("#artist-stats"),
+    artistList: root.querySelector("#artist-list"),
   };
 }
 
 async function reloadTracks(refs) {
   tracksCache = await getAllTracks();
   renderList(refs);
+  renderAlbums(refs);
+  renderArtists(refs);
 }
 
 function renderList(refs) {
@@ -246,6 +406,94 @@ function renderList(refs) {
   refs.libStats.textContent = `${list.length} / ${tracksCache.length} 曲${storageInfo}`;
 }
 
+function renderAlbums(refs) {
+  if (!refs || !refs.albumGrid) return;
+  const allAlbums = groupTracksIntoAlbums(tracksCache);
+  let list = allAlbums.slice();
+  if (albumFilterText) {
+    list = list.filter((a) => {
+      const t = (a.title || "").toLowerCase();
+      const art = (a.albumArtist || "").toLowerCase();
+      const yr = (a.year || "").toLowerCase();
+      return t.includes(albumFilterText) || art.includes(albumFilterText) || yr.includes(albumFilterText);
+    });
+  }
+  list = sortAlbums(list, albumSortKey);
+
+  if (list.length === 0) {
+    refs.albumGrid.innerHTML = `
+      <div class="empty-state" style="grid-column: 1 / -1;">
+        ${allAlbums.length === 0 ? "ライブラリにアルバムがありません。" : "該当するアルバムが見つかりません。"}
+      </div>
+    `;
+    if (refs.albumStats) refs.albumStats.textContent = `0 / ${allAlbums.length} アルバム`;
+    return;
+  }
+
+  if (refs.albumStats) refs.albumStats.textContent = `${list.length} / ${allAlbums.length} アルバム`;
+  refs.albumGrid.innerHTML = list.map((a) => {
+    const artUrl = a.artworkTrack ? getArtworkUrl(a.artworkTrack) : null;
+    const artImg = artUrl
+      ? `<img class="album-card-art" src="${escapeAttr(artUrl)}" alt="${escapeAttr(a.title)}" loading="lazy" decoding="async" />`
+      : `<div class="album-card-art album-card-placeholder">💿</div>`;
+
+    const metaParts = [];
+    if (a.year) metaParts.push(a.year);
+    metaParts.push(`${a.trackCount}曲`);
+    const metaStr = metaParts.join(" • ");
+
+    return `
+      <div class="album-card" data-key="${escapeAttr(a.key)}" role="button" tabindex="0" aria-label="${escapeAttr(a.title)} - ${escapeAttr(a.albumArtist)}">
+        <div class="album-card-art-wrap">${artImg}</div>
+        <div class="album-card-info">
+          <div class="album-card-title" title="${escapeAttr(a.title)}">${escapeHtml(a.title)}</div>
+          <div class="album-card-artist" title="${escapeAttr(a.albumArtist)}">${escapeHtml(a.albumArtist)}</div>
+          <div class="album-card-meta">${escapeHtml(metaStr)}</div>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderArtists(refs) {
+  if (!refs || !refs.artistList) return;
+  const allArtists = groupTracksIntoArtists(tracksCache);
+  let list = allArtists.slice();
+  if (artistFilterText) {
+    list = list.filter((a) => (a.name || "").toLowerCase().includes(artistFilterText));
+  }
+  list = sortArtists(list, artistSortKey);
+
+  if (list.length === 0) {
+    refs.artistList.innerHTML = `
+      <li class="empty-state">
+        ${allArtists.length === 0 ? "ライブラリにアーティストがいません。" : "該当するアーティストが見つかりません。"}
+      </li>
+    `;
+    if (refs.artistStats) refs.artistStats.textContent = `0 / ${allArtists.length} アーティスト`;
+    return;
+  }
+
+  if (refs.artistStats) refs.artistStats.textContent = `${list.length} / ${allArtists.length} アーティスト`;
+  refs.artistList.innerHTML = list.map((a) => {
+    const artUrl = a.artworkTrack ? getArtworkUrl(a.artworkTrack) : null;
+    const avatar = artUrl
+      ? `<img class="artist-row-avatar" src="${escapeAttr(artUrl)}" alt="${escapeAttr(a.name)}" loading="lazy" decoding="async" />`
+      : `<div class="artist-row-avatar artist-avatar-placeholder">👤</div>`;
+
+    return `
+      <li class="artist-row" data-name="${escapeAttr(a.name)}" role="button" tabindex="0">
+        <div class="artist-row-avatar-wrap">${avatar}</div>
+        <div class="artist-row-info">
+          <div class="artist-row-name">${escapeHtml(a.name)}</div>
+          <div class="artist-row-meta">${a.albumCount}枚のアルバム • ${a.trackCount}曲</div>
+        </div>
+        <span class="artist-row-arrow" aria-hidden="true">›</span>
+      </li>
+    `;
+  }).join("");
+}
+
 function rowHtml(t, cur) {
   const playing = cur && cur.id === t.id;
   const enabled = t.enabled !== false;
@@ -270,6 +518,10 @@ function rowHtml(t, cur) {
   const lovedMark = loved
     ? `<span class="track-loved" title="Loved" aria-label="Loved">♥</span>`
     : `<span class="track-loved-spacer" aria-hidden="true"></span>`;
+  const isGdrive = t.source === "gdrive" || (t.id && t.id.startsWith("gd-"));
+  const gdriveMark = isGdrive
+    ? `<span class="source-badge gdrive-badge" title="Google Drive 音源">☁</span>`
+    : ``;
   // 一時無効/有効はスピーカーアイコン
   const toggleIcon = enabled ? "🔊" : "🔇";
   const toggleTitle = enabled ? "一時的に再生無効にする" : "再生を再び有効にする";
@@ -278,11 +530,12 @@ function rowHtml(t, cur) {
       ${handle}
       ${artImg}
       <div class="track-info">
-        <div class="track-title">${escapeHtml(t.title || "(無題)")}</div>
+        <div class="track-title">${gdriveMark}${escapeHtml(t.title || "(無題)")}</div>
         <div class="track-sub">${escapeHtml(sub)}</div>
       </div>
       <div class="track-actions">
         ${lovedMark}
+        <button class="icon-btn" data-act="edit" title="曲の情報を編集">✏</button>
         <button class="icon-btn" data-act="toggle" title="${toggleTitle}">${toggleIcon}</button>
         <button class="icon-btn" data-act="delete" title="削除">🗑</button>
       </div>
@@ -348,6 +601,13 @@ async function onListClick(e, refs) {
   const act = btn.dataset.act;
   const t = tracksCache.find((x) => x.id === id);
   if (!t) return;
+
+  if (act === "edit") {
+    await editTrackMetadata(t, () => {
+      renderList(refs);
+    });
+    return;
+  }
 
   if (act === "toggle") {
     // === iOS タップ反応性 (実機フィードバック対応) ===
@@ -688,6 +948,7 @@ async function playEnabledFrom(track) {
 function setBulkButtonsDisabled(refs, disabled) {
   if (refs.addBtn) refs.addBtn.disabled = disabled;
   if (refs.addFolderBtn) refs.addFolderBtn.disabled = disabled;
+  if (refs.addGdriveBtn) refs.addGdriveBtn.disabled = disabled;
   if (refs.rescanBtn) refs.rescanBtn.disabled = disabled;
 }
 
@@ -790,6 +1051,7 @@ async function ingestFile(file) {
     composer: meta.composer || (existing && existing.composer) || "",
     discNo: meta.discNo || (existing && existing.discNo) || "",
     bpm: meta.bpm || (existing && existing.bpm) || "",
+    audioProps: meta.audioProps || (existing && existing.audioProps) || null,
     duration: duration || 0,
     mime: meta.mime || mimeFromName(file.name),
     format: meta.format || formatFromName(file.name) || "unknown",
@@ -880,18 +1142,19 @@ async function rescanMeta(refs) {
         if (!blob) { failed++; continue; }
         const file = new File([blob], t.originalName || (t.title || "audio") + "." + (t.format || ""), { type: t.mime || blob.type || "" });
         const meta = await extractMetadata(file);
-        // メタ項目を上書き (ユーザ管理項目は維持)
+        // メタ項目を上書き (ユーザ編集済み項目・ユーザ管理項目は維持)
         const patch = {
-          title: meta.title || t.title,
-          artist: meta.artist || t.artist,
-          album: meta.album ?? t.album,
-          albumArtist: meta.albumArtist ?? t.albumArtist,
-          year: meta.year ?? t.year,
-          genre: meta.genre ?? t.genre,
-          trackNo: meta.trackNo ?? t.trackNo,
-          composer: meta.composer ?? t.composer,
-          discNo: meta.discNo ?? t.discNo,
-          bpm: meta.bpm ?? t.bpm,
+          title: t.userEdited ? t.title : (meta.title || t.title),
+          artist: t.userEdited ? t.artist : (meta.artist || t.artist),
+          album: t.userEdited ? t.album : (meta.album ?? t.album),
+          albumArtist: t.userEdited ? t.albumArtist : (meta.albumArtist ?? t.albumArtist),
+          year: t.userEdited ? t.year : (meta.year ?? t.year),
+          genre: t.userEdited ? t.genre : (meta.genre ?? t.genre),
+          trackNo: t.userEdited ? t.trackNo : (meta.trackNo ?? t.trackNo),
+          composer: t.userEdited ? t.composer : (meta.composer ?? t.composer),
+          discNo: t.userEdited ? t.discNo : (meta.discNo ?? t.discNo),
+          bpm: t.userEdited ? t.bpm : (meta.bpm ?? t.bpm),
+          audioProps: meta.audioProps || t.audioProps || null,
           duration: meta.duration || t.duration,
           mime: meta.mime || t.mime,
           format: meta.format || t.format,

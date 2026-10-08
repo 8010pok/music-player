@@ -38,6 +38,9 @@ async function loadView(name) {
     case "welcome":      return import("./ui/view-welcome.js");
     case "player":       return import("./ui/view-player.js");
     case "library":      return import("./ui/view-library.js");
+    case "albums":       return import("./ui/view-albums.js");
+    case "album":        return import("./ui/view-album.js");
+    case "artist":       return import("./ui/view-artist.js");
     case "playlists":    return import("./ui/view-playlists.js");
     case "playlist":     return import("./ui/view-playlist.js");
     case "playlist-add": return import("./ui/view-playlist-add.js");
@@ -162,6 +165,18 @@ async function main() {
     const m = await loadView("library");
     return m.mount(root);
   });
+  register("albums", async (root) => {
+    // 下のアルバムタブ廃止に伴い、ライブラリ内のアルバムタブへ自動誘導
+    go("library", { tab: "albums" });
+  });
+  register("album", async (root) => {
+    const m = await loadView("album");
+    return m.mount(root);
+  });
+  register("artist", async (root) => {
+    const m = await loadView("artist");
+    return m.mount(root);
+  });
   register("playlists", async (root) => {
     const m = await loadView("playlists");
     return m.mount(root);
@@ -208,7 +223,16 @@ async function main() {
   // 8. Service Worker 登録
   if ("serviceWorker" in navigator) {
     try {
-      await navigator.serviceWorker.register("./sw.js");
+      const reg = await navigator.serviceWorker.register("./sw.js");
+      // 新バージョンの存在を即時チェック
+      reg.update();
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        // 新しい Service Worker がページを制御したら最新キャッシュを反映
+        if (!window.__swReloaded) {
+          window.__swReloaded = true;
+          window.location.reload();
+        }
+      });
     } catch (e) {
       console.warn("SW 登録失敗", e);
     }

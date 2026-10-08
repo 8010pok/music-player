@@ -7,7 +7,7 @@
  * バージョンを上げると古いキャッシュは破棄される。
  */
 
-const CACHE_VERSION = "v1.0.0";
+const CACHE_VERSION = "v1.2.2";
 const STATIC_CACHE = `static-${CACHE_VERSION}`;
 const API_CACHE = `api-${CACHE_VERSION}`;
 const IMG_CACHE = `img-${CACHE_VERSION}`;
@@ -27,11 +27,14 @@ const PRECACHE_URLS = [
   "./js/store/library-db.js",
   "./js/store/queue-db.js",
   "./js/store/settings.js",
+  "./js/gdrive/drive-service.js",
   "./js/player/audio-engine.js",
   "./js/player/visualizer.js",
   "./js/player/eq.js",
   "./js/metadata/index.js",
   "./js/metadata/util.js",
+  "./js/metadata/album-util.js",
+  "./js/metadata/artist-util.js",
   "./js/metadata/parse-mp3.js",
   "./js/metadata/parse-m4a.js",
   "./js/metadata/parse-flac.js",
@@ -53,9 +56,13 @@ const PRECACHE_URLS = [
   "./js/workers/stats-worker.js",
   "./js/ui/components.js",
   "./js/ui/artwork-cache.js",
+  "./js/ui/metadata-editor.js",
   "./js/ui/view-welcome.js",
   "./js/ui/view-player.js",
   "./js/ui/view-library.js",
+  "./js/ui/view-albums.js",
+  "./js/ui/view-album.js",
+  "./js/ui/view-artist.js",
   "./js/ui/view-playlists.js",
   "./js/ui/view-playlist.js",
   "./js/ui/view-playlist-add.js",
@@ -126,6 +133,15 @@ self.addEventListener("fetch", (event) => {
     url.hostname.includes("audioscrobbler")
   ) {
     event.respondWith(cacheFirst(req, IMG_CACHE, 300));
+    return;
+  }
+
+  // Google API や外部認証は SW でキャッシュせず直接通信
+  if (
+    url.hostname.endsWith("googleapis.com") ||
+    url.hostname.endsWith("google.com") ||
+    url.hostname.endsWith("gstatic.com")
+  ) {
     return;
   }
 

@@ -18,6 +18,7 @@ import { setLoved } from "../lastfm/scrobble.js";
 import { formatTime, toast, escapeHtml } from "./components.js";
 import { getBlob, updateTrack } from "../store/library-db.js";
 import { getArtworkUrl } from "./artwork-cache.js";
+import { editTrackMetadata } from "./metadata-editor.js";
 
 /**
  * 独自コントロール用の inline SVG アイコン群。
@@ -324,6 +325,24 @@ export async function mount(root) {
     });
   }
 
+  // Flacbox風スペックカード & Apple Musicバッジのタップで詳細アコーディオンを開閉
+  if (refs.flacboxSpecCard) {
+    refs.flacboxSpecCard.addEventListener("click", () => {
+      if (refs.infoToggle) {
+        refs.infoToggle.click();
+        refs.infoToggle.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+    });
+  }
+  if (refs.appleAudioBadge) {
+    refs.appleAudioBadge.addEventListener("click", () => {
+      if (refs.infoToggle) {
+        refs.infoToggle.click();
+        refs.infoToggle.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+    });
+  }
+
   // Love 操作の多重実行防止フラグ。setLoved(API)/updateTrack(IDB) 完了まで
   // 連打を無視する(同じ古い t.loved から二重に同方向トグルするのを防ぐ)。
   let loveInFlight = false;
@@ -404,6 +423,9 @@ function render() {
         <h2 class="player-title" id="player-title">—</h2>
         <p class="player-artist" id="player-artist">—</p>
         <p class="player-album" id="player-album"></p>
+        <div class="apple-audio-badge-wrap" id="apple-badge-wrap" hidden>
+          <span class="apple-audio-badge" id="apple-audio-badge" title="タップでオーディオ詳細を表示">LOSSLESS</span>
+        </div>
       </div>
 
       <div class="player-seek">
@@ -429,6 +451,16 @@ function render() {
 
       <!-- 再生モード表示（5 パターンを文言で明示） -->
       <div class="playback-mode" id="playback-mode" aria-live="polite">再生モード: なし</div>
+
+      <!-- Flacbox風 オーディオスペック表示 (画面下部) -->
+      <div class="flacbox-spec-card" id="flacbox-spec-card" hidden title="タップでオーディオ詳細を表示">
+        <div class="flacbox-badge" id="flacbox-badge">FLAC</div>
+        <div class="flacbox-info">
+          <div class="flacbox-quality" id="flacbox-quality">—</div>
+          <div class="flacbox-bitrate" id="flacbox-bitrate">—</div>
+        </div>
+        <span class="flacbox-arrow" aria-hidden="true">›</span>
+      </div>
 
       <div class="scrobble-progress">
         <div class="scrobble-progress-bar">
@@ -519,7 +551,114 @@ function collectRefs(root) {
     pitchChk: root.querySelector("#pitch-chk"),
     infoToggle: root.querySelector("#btn-info-toggle"),
     infoBody: root.querySelector("#track-info-body"),
+    appleBadgeWrap: root.querySelector("#apple-badge-wrap"),
+    appleAudioBadge: root.querySelector("#apple-audio-badge"),
+    flacboxSpecCard: root.querySelector("#flacbox-spec-card"),
+    flacboxBadge: root.querySelector("#flacbox-badge"),
+    flacboxQuality: root.querySelector("#flacbox-quality"),
+    flacboxBitrate: root.querySelector("#flacbox-bitrate"),
   };
+}
+
+const audioPropsCache = new Map();
+
+function fmtKHz(hz) {
+  if (!hz) return "";
+  return (hz / 1000).toFixed(hz % 1000 === 0 ? 0 : 1) + " kHz";
+}
+
+function fmtBitrate(kbps) {
+  if (!kbps) return "";
+  return (typeof kbps === "number" ? kbps.toLocaleString() : kbps) + " kbps";
+}
+
+function fmtChannels(n) {
+  if (n === 1) return "モノラル (1ch)";
+  if (n === 2) return "ステレオ (2ch)";
+  return n ? `${n}ch` : "ステレオ";
+}
+
+async function updateAudioQualityDisplay(refs, t) {
+  if (!refs.flacboxSpecCard || !refs.appleBadgeWrap) return;
+  if (!t) {
+    refs.flacboxSpecCard.hidden = true;
+    refs.appleBadgeWrap.hidden = true;
+    return;
+  }
+
+  const format = (t.format || "").toUpperCase() || "AUDIO";
+
+  const renderBadge = (props) => {
+    const codec = (props && props.codec) || format;
+    const isLossless = format === "FLAC" || format === "ALAC" || format === "WAV" || codec === "FLAC" || codec === "ALAC";
+    const isHiRes = isLossless && props && ((props.sampleRate && props.sampleRate > 48000) || (props.bitDepth && props.bitDepth > 16));
+
+    // Apple Music スタイル オーディオバッジ (FLAC • Lossless • 16-bit / 44.1 kHz 等)
+    const badgeParts = [format];
+    if (isHiRes) {
+      badgeParts.push("Hi-Res Lossless");
+    } else if (isLossless) {
+      badgeParts.push("Lossless");
+    }
+    if (props && props.bitDepth && props.sampleRate) {
+      badgeParts.push(`${props.bitDepth}-bit / ${fmtKHz(props.sampleRate)}`);
+    } else if (props && props.sampleRate) {
+      if (!isLossless && props.bitrate) {
+        badgeParts.push(fmtBitrate(props.bitrate));
+      }
+      badgeParts.push(fmtKHz(props.sampleRate));
+    } else if (!isLossless && props && props.bitrate) {
+      badgeParts.push(fmtBitrate(props.bitrate));
+    }
+    const appleText = badgeParts.join(" • ");
+    if (refs.appleAudioBadge) refs.appleAudioBadge.textContent = appleText;
+    if (refs.appleBadgeWrap) refs.appleBadgeWrap.hidden = false;
+
+    // Flacbox スペックカード
+    if (refs.flacboxBadge) refs.flacboxBadge.textContent = format;
+
+    let qualityStr = "";
+    if (props && (props.bitDepth || props.sampleRate)) {
+      qualityStr = `${props.bitDepth ? props.bitDepth + "-bit / " : ""}${fmtKHz(props.sampleRate)}`;
+    } else if (isLossless) {
+      qualityStr = "Lossless Audio";
+    } else {
+      qualityStr = format;
+    }
+    if (refs.flacboxQuality) refs.flacboxQuality.textContent = qualityStr;
+
+    let bitrateStr = "";
+    const br = (props && props.bitrate) || (t.fileSize && t.duration > 0 ? Math.round((t.fileSize * 8) / t.duration / 1000) : null);
+    const ch = props ? fmtChannels(props.channels) : "ステレオ";
+    if (br) {
+      bitrateStr = `${typeof br === "number" ? br.toLocaleString() : br} kbps • ${ch}`;
+    } else {
+      bitrateStr = `${ch}`;
+    }
+    if (refs.flacboxBitrate) refs.flacboxBitrate.textContent = bitrateStr;
+    if (refs.flacboxSpecCard) refs.flacboxSpecCard.hidden = false;
+  };
+
+  // 即時反映（キャッシュまたは既存プロパティ）
+  let ap = t.audioProps || audioPropsCache.get(t.id) || null;
+  renderBadge(ap);
+
+  // 未取得の場合は Blob から取得して更新
+  if (!ap) {
+    try {
+      const blob = await getBlob(t.id);
+      if (blob) {
+        const fileLike = new File([blob], t.originalName || (t.title || "audio") + "." + (t.format || ""), { type: t.mime || blob.type || "" });
+        const meta = await extractMetadata(fileLike);
+        if (meta && meta.audioProps) {
+          audioPropsCache.set(t.id, meta.audioProps);
+          if (appState.get().currentTrack?.id === t.id) {
+            renderBadge(meta.audioProps);
+          }
+        }
+      }
+    } catch {}
+  }
 }
 
 function updateUI(refs, s) {
@@ -537,6 +676,9 @@ function updateUI(refs, s) {
     refs.scrobbleFill.style.width = "0%";
     refs.scrobbleLabel.textContent = "—";
     refs.loveBtn.classList.remove("is-active");
+    if (refs.appleBadgeWrap) refs.appleBadgeWrap.hidden = true;
+    if (refs.flacboxSpecCard) refs.flacboxSpecCard.hidden = true;
+    refs._lastQualityTrackId = null;
     // 曲が無くてもシャッフル/リピートの設定状態をアイコンに反映する
     // (下の再生モードラベルと整合させる。曲未選択で再生画面を開いた際の食い違い防止)
     refs.shuffleBtn.classList.toggle("is-active", !!s.shuffleMode);
@@ -554,6 +696,11 @@ function updateUI(refs, s) {
   refs.title.textContent = t.title || "(無題)";
   refs.artist.textContent = t.artist || "(不明)";
   refs.album.textContent = t.album || "";
+
+  if (refs._lastQualityTrackId !== t.id) {
+    refs._lastQualityTrackId = t.id;
+    updateAudioQualityDisplay(refs, t);
+  }
 
   // アートワーク URL は ID キャッシュ経由で取得（URL再生成しないため
   // 更新ごとの一瞬の画像消えやリーク・読込失敗を避けられる）
@@ -691,6 +838,14 @@ async function loadTrackInfo(refs, isAlive = () => true) {
     if (appState.get().currentTrack?.id !== t.id) return;
     if (!refs.infoBody) return;
     refs.infoBody.innerHTML = renderTrackInfo(t, meta);
+    const editBtn = refs.infoBody.querySelector("#btn-player-edit-meta");
+    if (editBtn) {
+      editBtn.addEventListener("click", () => {
+        editTrackMetadata(t, () => {
+          if (isAlive()) loadTrackInfo(refs, isAlive);
+        });
+      });
+    }
   } catch (e) {
     if (!isAlive()) return;
     // await 中に曲が変わっていたら、この(旧曲の)エラー描画で新曲の情報を上書きしない
@@ -734,16 +889,16 @@ function renderTrackInfo(track, meta) {
     ["再生時間", meta.duration ? formatDuration(meta.duration) : dash],
   ];
   const rowsMeta = [
-    ["タイトル", fmt(meta.title)],
-    ["アーティスト", fmt(meta.artist)],
-    ["アルバム", fmt(meta.album)],
-    ["アルバムアーティスト", fmt(meta.albumArtist)],
-    ["作曲者", fmt(meta.composer)],
-    ["年", fmt(meta.year)],
-    ["ジャンル", fmt(meta.genre)],
-    ["トラック番号", fmt(meta.trackNo)],
-    ["ディスク番号", fmt(meta.discNo)],
-    ["BPM", fmt(meta.bpm)],
+    ["タイトル", fmt(track.title || meta.title)],
+    ["アーティスト", fmt(track.artist || meta.artist)],
+    ["アルバム", fmt(track.album || meta.album)],
+    ["アルバムアーティスト", fmt(track.albumArtist || meta.albumArtist)],
+    ["作曲者", fmt(track.composer || meta.composer)],
+    ["年", fmt(track.year || meta.year)],
+    ["ジャンル", fmt(track.genre || meta.genre)],
+    ["トラック番号", fmt(track.trackNo || meta.trackNo)],
+    ["ディスク番号", fmt(track.discNo || meta.discNo)],
+    ["BPM", fmt(track.bpm || meta.bpm)],
   ];
 
   const renderSection = (title, rows) => `
@@ -754,9 +909,15 @@ function renderTrackInfo(track, meta) {
       </table>
     </div>
   `;
+  const editBtnHtml = `
+    <div style="margin-top: 12px; text-align: center;">
+      <button class="btn primary" id="btn-player-edit-meta" style="width: 100%; min-height: 38px;">✏ メタデータを編集</button>
+    </div>
+  `;
   return renderSection("ファイル情報", rowsFile)
        + renderSection("音声プロパティ", rowsAudio)
-       + renderSection("メタデータ", rowsMeta);
+       + renderSection("メタデータ", rowsMeta)
+       + editBtnHtml;
 }
 
 // escapeHtml は components.escapeHtml と完全に同じ実装だったので統一

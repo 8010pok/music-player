@@ -4,58 +4,58 @@
 */
 
 :root {
-  /* ダークテーマ（デフォルト） */
-  --bg: #0f1115;
-  --bg-elev: #161922;
-  --bg-elev-2: #1d2230;
-  --fg: #e8eaf0;
-  --fg-muted: #9aa0b0;
-  --fg-dim: #6b7080;
-  --accent: #ff5e7e;
-  --accent-2: #ffb86b;
-  --danger: #ff6b6b;
-  --success: #57d18a;
-  --border: #2a2f3d;
-  --border-strong: #3b4252;
-  --shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
-  --scrobble-bar: #57d18a;
+  /* Apple Music ダークテーマ（デフォルト） */
+  --bg: #000000;
+  --bg-elev: #16171b;
+  --bg-elev-2: #212228;
+  --fg: #f5f5f7;
+  --fg-muted: #86868b;
+  --fg-dim: #636366;
+  --accent: #fa2d55;
+  --accent-2: #fc3c44;
+  --danger: #ff453a;
+  --success: #30d158;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --scrobble-bar: #30d158;
 }
 
 /* 明示的にライトテーマ指定された場合 */
 :root[data-theme="light"] {
-  --bg: #f7f8fb;
+  --bg: #f5f5f7;
   --bg-elev: #ffffff;
-  --bg-elev-2: #eef1f6;
-  --fg: #1a1d24;
-  --fg-muted: #4a5060;
-  --fg-dim: #7a8090;
-  --accent: #d83963;
-  --accent-2: #ec8a23;
-  --danger: #d33;
-  --success: #2a9d63;
-  --border: #d8dde6;
-  --border-strong: #b8bfcd;
-  --shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
-  --scrobble-bar: #2a9d63;
+  --bg-elev-2: #e8e8ed;
+  --fg: #1d1d1f;
+  --fg-muted: #86868b;
+  --fg-dim: #a1a1a6;
+  --accent: #fa2d55;
+  --accent-2: #fc3c44;
+  --danger: #ff3b30;
+  --success: #34c759;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.16);
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  --scrobble-bar: #34c759;
 }
 
 /* システム連動かつ OS がライトの場合 */
 @media (prefers-color-scheme: light) {
   :root[data-theme="system"] {
-    --bg: #f7f8fb;
+    --bg: #f5f5f7;
     --bg-elev: #ffffff;
-    --bg-elev-2: #eef1f6;
-    --fg: #1a1d24;
-    --fg-muted: #4a5060;
-    --fg-dim: #7a8090;
-    --accent: #d83963;
-    --accent-2: #ec8a23;
-    --danger: #d33;
-    --success: #2a9d63;
-    --border: #d8dde6;
-    --border-strong: #b8bfcd;
-    --shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
-    --scrobble-bar: #2a9d63;
+    --bg-elev-2: #e8e8ed;
+    --fg: #1d1d1f;
+    --fg-muted: #86868b;
+    --fg-dim: #a1a1a6;
+    --accent: #fa2d55;
+    --accent-2: #fc3c44;
+    --danger: #ff3b30;
+    --success: #34c759;
+    --border: rgba(0, 0, 0, 0.08);
+    --border-strong: rgba(0, 0, 0, 0.16);
+    --shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+    --scrobble-bar: #34c759;
   }
 }
 

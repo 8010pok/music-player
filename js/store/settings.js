@@ -35,9 +35,14 @@ const PUBLIC_DEFAULTS = {
   // === Last.fm フル認証時の送信トグル（デフォルト両方ON） ===
   scrobbleEnabled: true,      // スクロブルを Last.fm に送信するか
   nowPlayingEnabled: true,    // Now Playing 通知を Last.fm に送信するか
+  // === Google Drive 連携 ===
+  gdriveClientId: "",         // Google OAuth Client ID
+  gdriveAutoCache: true,      // 再生時に自動でローカル IndexedDB にキャッシュ
+  gdriveUserEmail: "",        // 連携中アカウントのメール/表示名
+  gdriveTokenExpiry: 0,       // トークン有効期限タイムスタンプ
 };
 
-const SECRET_KEYS = ["apiKey", "apiSecret", "sessionKey"];
+const SECRET_KEYS = ["apiKey", "apiSecret", "sessionKey", "gdriveAccessToken"];
 
 /**
  * 公開設定の取得

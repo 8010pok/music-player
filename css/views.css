@@ -15,10 +15,14 @@
   position: relative; /* 歌詞オーバーレイ(absolute)の基準 */
   width: min(320px, 80vw);
   aspect-ratio: 1 / 1;
-  border-radius: 16px;
+  border-radius: 20px;
   overflow: hidden;
   background: var(--bg-elev-2);
-  box-shadow: var(--shadow);
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.6), 0 4px 12px rgba(0, 0, 0, 0.25);
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+}
+:root[data-theme="light"] .player-art-wrap {
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.14), 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
 .player-art {
@@ -36,23 +40,72 @@
 
 .player-title {
   margin: 0;
-  font-size: 18px;
+  font-size: 21px;
   font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.25;
   word-break: break-word;
 }
 
 .player-artist {
   margin: 4px 0 0;
-  color: var(--fg-muted);
-  font-size: 13px;
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 500;
   word-break: break-word;
 }
 
 .player-album {
   margin: 2px 0 0;
-  color: var(--fg-dim);
-  font-size: 12px;
+  color: var(--fg-muted);
+  font-size: 13px;
   word-break: break-word;
+}
+
+/* Apple Music オーディオバッジ (FLAC • Lossless • 16-bit / 44.1 kHz 等) */
+.apple-audio-badge-wrap {
+  margin-top: 8px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  max-width: 100%;
+}
+.apple-audio-badge-wrap[hidden] {
+  display: none;
+}
+.apple-audio-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  max-width: 90vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: rgba(255, 255, 255, 0.10);
+  color: var(--fg);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s, border-color 0.15s;
+}
+:root[data-theme="light"] .apple-audio-badge {
+  background: rgba(0, 0, 0, 0.06);
+  border-color: rgba(0, 0, 0, 0.12);
+}
+.apple-audio-badge:hover {
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+:root[data-theme="light"] .apple-audio-badge:hover {
+  background: rgba(0, 0, 0, 0.12);
+}
+.apple-audio-badge:active {
+  transform: scale(0.97);
 }
 
 .player-seek {
@@ -64,30 +117,50 @@
   -webkit-appearance: none;
   appearance: none;
   width: 100%;
-  height: 6px;
-  background: var(--border);
+  height: 5px;
+  background: rgba(255, 255, 255, 0.18);
   border-radius: 3px;
   outline: none;
   cursor: pointer;
+  transition: height 0.15s ease;
+}
+:root[data-theme="light"] .seek-bar {
+  background: rgba(0, 0, 0, 0.14);
+}
+.seek-bar:hover {
+  height: 7px;
 }
 
 .seek-bar::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 18px;
-  height: 18px;
-  background: var(--accent);
+  width: 14px;
+  height: 14px;
+  background: #ffffff;
   border-radius: 50%;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
   cursor: pointer;
+  transition: transform 0.12s ease;
+}
+:root[data-theme="light"] .seek-bar::-webkit-slider-thumb {
+  background: #1d1d1f;
+}
+.seek-bar:active::-webkit-slider-thumb {
+  transform: scale(1.3);
 }
 
 .seek-bar::-moz-range-thumb {
-  width: 18px;
-  height: 18px;
-  background: var(--accent);
+  width: 14px;
+  height: 14px;
+  background: #ffffff;
   border-radius: 50%;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
   cursor: pointer;
   border: none;
+  transition: transform 0.12s ease;
+}
+:root[data-theme="light"] .seek-bar::-moz-range-thumb {
+  background: #1d1d1f;
 }
 
 .seek-time {
@@ -95,8 +168,9 @@
   justify-content: space-between;
   font-variant-numeric: tabular-nums;
   font-size: 11px;
+  font-weight: 500;
   color: var(--fg-muted);
-  margin-top: 4px;
+  margin-top: 5px;
 }
 
 /* メインコントロール: 1行バー(シャッフル/前/再生/次/リピート)を中央寄せ */
@@ -104,27 +178,46 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
+  gap: 14px;
   width: 100%;
   max-width: 480px;
 }
 
-/* メイン操作ボタンを大きく押しやすく(最低 44px を満たす 54px) */
+/* メイン操作ボタンを大きく押しやすく(最低 44px を満たす 52px) */
 .player-controls .icon-btn {
-  width: 54px;
-  height: 54px;
+  width: 52px;
+  height: 52px;
+  color: var(--fg);
+  border-radius: 50%;
+  transition: transform 0.12s ease, opacity 0.15s;
+}
+.player-controls .icon-btn:hover {
+  transform: scale(1.08);
+}
+.player-controls .icon-btn:active {
+  transform: scale(0.92);
 }
 
-/* 中央の再生ボタンは円形アクセント FAB で主役化 */
+/* 中央の再生ボタンは Apple Music スタイルの美しい FAB */
 .player-controls .icon-btn.big {
-  width: 68px;
-  height: 68px;
-  background: var(--accent);
-  color: #fff;
-  box-shadow: 0 4px 14px rgba(255, 94, 126, 0.45);
+  width: 66px;
+  height: 66px;
+  background: #ffffff;
+  color: #000000;
+  box-shadow: 0 6px 20px rgba(255, 255, 255, 0.22);
 }
-.player-controls .icon-btn.big:hover { filter: brightness(1.05); }
-.player-controls .icon-btn.big:active { transform: scale(0.96); }
+:root[data-theme="light"] .player-controls .icon-btn.big {
+  background: #1d1d1f;
+  color: #ffffff;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+}
+.player-controls .icon-btn.big:hover {
+  transform: scale(1.06);
+  filter: brightness(1.03);
+}
+.player-controls .icon-btn.big:active {
+  transform: scale(0.94);
+}
 
 /* 補助操作: 15秒戻る / Love / 15秒進む */
 .player-secondary {
@@ -248,6 +341,87 @@
   color: var(--accent);
   background: rgba(255, 94, 126, 0.10);
   border-color: var(--accent);
+}
+
+/* ===== Flacbox風 オーディオスペック表示 (画面下部) ===== */
+.flacbox-spec-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 480px;
+  padding: 10px 14px;
+  margin: 6px auto 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+  user-select: none;
+}
+:root[data-theme="light"] .flacbox-spec-card {
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+}
+.flacbox-spec-card:hover {
+  background: var(--bg-elev-2);
+  border-color: var(--border-strong);
+}
+.flacbox-spec-card:active {
+  transform: scale(0.985);
+}
+.flacbox-spec-card[hidden] {
+  display: none;
+}
+
+.flacbox-badge {
+  flex-shrink: 0;
+  padding: 4px 9px;
+  background: rgba(250, 45, 85, 0.14);
+  color: var(--accent);
+  border: 1px solid rgba(250, 45, 85, 0.32);
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  text-transform: uppercase;
+}
+
+.flacbox-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.flacbox-quality {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.flacbox-bitrate {
+  font-size: 11px;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.flacbox-arrow {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--fg-dim);
+  line-height: 1;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 /* スクロブル進捗バー */
@@ -2306,3 +2480,527 @@
   .player-view .player-controls .icon-btn.big .ic { width: 26px; height: 26px; }
   .player-view .icon-btn .ic { width: 22px; height: 22px; }
 }
+
+/* ===== アルバムビュー ===== */
+.albums-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.album-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 14px;
+  padding: 4px 0 16px;
+}
+
+@media (min-width: 600px) {
+  .album-grid {
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 18px;
+  }
+}
+
+.album-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+  cursor: pointer;
+  user-select: none;
+  transition: transform 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.album-card:hover {
+  background: var(--bg-elev-2);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow);
+}
+
+.album-card:active {
+  transform: translateY(0);
+}
+
+.album-card-art-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-elev-2);
+}
+
+.album-card-art {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.album-card-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 32px;
+  color: var(--fg-muted);
+}
+
+.album-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.album-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg);
+}
+
+.album-card-artist {
+  font-size: 11px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.album-card-meta {
+  font-size: 10px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ===== アルバム詳細ビュー ===== */
+.album-detail-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.album-detail-nav {
+  display: flex;
+  align-items: center;
+}
+
+.album-detail-nav .btn {
+  font-size: 13px;
+}
+
+.album-detail-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 0;
+}
+
+@media (max-width: 480px) {
+  .album-detail-header {
+    flex-direction: column;
+    text-align: center;
+    gap: 12px;
+  }
+}
+
+.album-detail-art-wrap {
+  width: 130px;
+  height: 130px;
+  flex-shrink: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-elev-2);
+  box-shadow: var(--shadow);
+}
+
+@media (min-width: 481px) {
+  .album-detail-art-wrap {
+    width: 150px;
+    height: 150px;
+  }
+}
+
+.album-detail-art {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.album-detail-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.album-detail-type {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.album-detail-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  word-break: break-word;
+  color: var(--fg);
+}
+
+.album-detail-artist {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+
+.album-detail-meta {
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.album-detail-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.album-detail-actions .btn {
+  width: 100%;
+  min-height: 42px;
+}
+
+.album-track-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.album-disc-header {
+  list-style: none;
+  padding: 12px 8px 4px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border);
+  margin-top: 8px;
+}
+
+.album-track-row {
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--bg-elev);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.album-track-row:hover {
+  background: var(--bg-elev-2);
+}
+
+.album-track-row.is-playing {
+  border-color: var(--accent);
+  background: var(--bg-elev-2);
+}
+
+.album-track-row.is-disabled {
+  opacity: 0.45;
+}
+
+.album-track-num {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+  text-align: center;
+}
+
+.album-track-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.album-track-dur {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+}
+
+/* Google Drive 音源バッジ */
+.gdrive-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--accent);
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.source-badge {
+  font-size: 12px;
+}
+
+/* ===== ライブラリ タブバー (Apple Music スタイル) ===== */
+.library-tabs-bar {
+  display: flex;
+  gap: 8px;
+  padding: 4px;
+  margin-bottom: 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.library-tab-btn {
+  flex: 1;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  border-radius: 999px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.library-tab-btn:hover {
+  color: var(--fg);
+}
+
+.library-tab-btn.is-active {
+  background: var(--accent);
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(250, 45, 85, 0.35);
+}
+
+.library-tab-panel[hidden] {
+  display: none !important;
+}
+
+/* ===== アーティスト一覧 ===== */
+.artist-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.artist-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+
+.artist-row:hover {
+  background: var(--bg-elev-2);
+  border-color: var(--border-strong);
+}
+
+.artist-row:active {
+  transform: scale(0.985);
+}
+
+.artist-row-avatar-wrap {
+  width: 52px;
+  height: 52px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--bg-elev-2);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+.artist-row-avatar {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.artist-avatar-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  height: 100%;
+  color: var(--fg-muted);
+}
+
+.artist-row-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.artist-row-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.artist-row-meta {
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-top: 2px;
+}
+
+.artist-row-arrow {
+  font-size: 18px;
+  color: var(--fg-dim);
+  flex-shrink: 0;
+}
+
+/* ===== アーティスト詳細ビュー ===== */
+.artist-detail-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.artist-detail-nav {
+  display: flex;
+  align-items: center;
+}
+
+.artist-detail-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 12px;
+  padding: 10px 0 16px;
+}
+
+.artist-detail-avatar-wrap {
+  width: min(180px, 45vw);
+  height: min(180px, 45vw);
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--bg-elev-2);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+  border: 2px solid rgba(255, 255, 255, 0.1);
+}
+
+.artist-detail-avatar {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.artist-detail-type {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.artist-detail-title {
+  margin: 4px 0 0;
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+}
+
+.artist-detail-meta {
+  font-size: 13px;
+  color: var(--fg-muted);
+  margin-top: 4px;
+}
+
+.artist-detail-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  max-width: 480px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.artist-section-title {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+  margin-bottom: 8px;
+}
+
+.artist-track-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.artist-track-item {
+  display: grid;
+  grid-template-columns: 28px 1fr auto auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-elev);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.artist-track-item:hover {
+  background: var(--bg-elev-2);
+}
+
+.artist-track-item.is-playing {
+  border-color: var(--accent);
+  background: var(--bg-elev-2);
+}
+
+.artist-track-item.is-disabled {
+  opacity: 0.45;
+}
+
+.artist-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+.artist-link:hover {
+  text-decoration: underline;
+}
+

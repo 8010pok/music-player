@@ -111,7 +111,9 @@ async function navigate(name, query, root, fallback) {
 
 function updateNavActive(name) {
   document.querySelectorAll(".nav-item").forEach((el) => {
-    el.classList.toggle("is-active", el.dataset.route === name);
+    const route = el.dataset.route;
+    const active = route === name || (name === "album" && route === "albums");
+    el.classList.toggle("is-active", active);
   });
   // body に現在ルートを保持 (CSS で画面ごとの余白調整等に利用)
   document.body.dataset.route = name;

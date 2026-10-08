@@ -25,6 +25,7 @@ import { wipeAll as wipeStats } from "../lastfm/stats-storage.js";
 import { cancel as cancelStatsService, reset as resetStatsService, startIfNeeded as startStatsIfNeeded } from "../lastfm/stats-service.js";
 import { toast, confirm, promptForm, escapeHtml, escapeAttr } from "./components.js";
 import { releaseAllArtwork } from "./artwork-cache.js";
+import { isDriveConnected, disconnectDrive, openDriveImportModal } from "../gdrive/drive-service.js";
 // 属性値のエスケープは escapeHtml で代用 (quote/&/</> をエスケープ)
 // escapeAttr は components.js から import 済み
 import {
@@ -88,13 +89,14 @@ export async function mount(root) {
   const isIOS = appState.get().isIOS;
   const outputSupported = isOutputDeviceSelectionSupported();
   const outputDevices = outputSupported ? await listAudioOutputDevices() : [];
+  const driveConnected = await isDriveConnected();
 
   // await 中にユーザが他ルートへ遷移していたら、共有コンテナ #view-root には既に
   // 別ビューが描画済み。ここで innerHTML を書くと現在ビューを破壊するため、設定
   // ルートに留まっているときだけ描画する(remountSettings と同じ離脱ガード方針)。
   if (((location.hash.match(/^#\/([^?]+)/) || [])[1]) !== "settings") return;
 
-  root.innerHTML = render(pub, authMode, qCount, isIOS, outputSupported, outputDevices);
+  root.innerHTML = render(pub, authMode, qCount, isIOS, outputSupported, outputDevices, driveConnected);
   const refs = collect(root);
 
   // ===== スクロブルキュー件数のリアルタイム購読 =====
@@ -474,6 +476,24 @@ export async function mount(root) {
     remount();
   });
 
+  // ===== Google Drive 連携 =====
+  refs.btnGdriveConnect?.addEventListener("click", () => {
+    openDriveImportModal({
+      onImported: () => remount(),
+    });
+  });
+
+  refs.btnGdriveDisconnect?.addEventListener("click", async () => {
+    await disconnectDrive();
+    toast("Google Drive との接続を解除しました", "ok");
+    remount();
+  });
+
+  refs.gdriveAutoCacheChk?.addEventListener("change", () => {
+    setPublic({ gdriveAutoCache: refs.gdriveAutoCacheChk.checked });
+    toast(refs.gdriveAutoCacheChk.checked ? "再生時自動キャッシュを有効にしました" : "再生時自動キャッシュを無効にしました", "ok");
+  });
+
   function remount() {
     // remount でも購読を一度クリアして mount 内で再登録する
     // (mount 冒頭の clearViewSubscriptions() でも実行されるが、
@@ -515,7 +535,7 @@ function applyAllEffects(pub) {
   applyNoiseReduction(pub.noiseReduction || "off");
 }
 
-function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices) {
+function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices, driveConnected) {
   const username = pub.username || "(未設定)";
   return `
     <section class="settings-view">
@@ -628,6 +648,32 @@ function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices) {
             <button class="btn" id="btn-flush" ${qCount === 0 ? "disabled" : ""}>送信</button>
             <button class="btn danger" id="btn-wipe-queue" ${qCount === 0 ? "disabled" : ""}>破棄</button>
           </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h2>Google Drive 連携</h2>
+        <div class="settings-row">
+          <div>
+            <div class="label">状態</div>
+            <div class="help" id="gdrive-status-help">
+              ${driveConnected ? `<span style="color:var(--success); font-weight:600;">接続中</span> ${pub.gdriveUserEmail ? `(${escapeHtml(pub.gdriveUserEmail)})` : ""}` : `<span style="color:var(--fg-muted);">未接続</span>`}
+            </div>
+          </div>
+          <div style="display:flex;gap:6px;">
+            ${driveConnected ? `
+              <button class="btn danger" id="btn-gdrive-disconnect">切断</button>
+            ` : `
+              <button class="btn primary" id="btn-gdrive-connect">接続 / 追加</button>
+            `}
+          </div>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="label">再生時に自動キャッシュ</div>
+            <div class="help">Google Drive の曲を再生した際、音源を端末（IndexedDB）に保存して次回以降オフラインで即座に再生できるようにします</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="gdrive-autocache-chk" ${pub.gdriveAutoCache !== false ? "checked" : ""} /><span class="slider"></span></label>
         </div>
       </div>
 
@@ -847,6 +893,9 @@ function collect(root) {
     btnFlush: root.querySelector("#btn-flush"),
     btnWipeQueue: root.querySelector("#btn-wipe-queue"),
     btnWipeAll: root.querySelector("#btn-wipe-all"),
+    btnGdriveConnect: root.querySelector("#btn-gdrive-connect"),
+    btnGdriveDisconnect: root.querySelector("#btn-gdrive-disconnect"),
+    gdriveAutoCacheChk: root.querySelector("#gdrive-autocache-chk"),
     scrobbleChk: root.querySelector("#scrobble-chk"),
     nowPlayingChk: root.querySelector("#nowplaying-chk"),
     btnHelpToggle: root.querySelector("#btn-help-toggle"),

@@ -152,7 +152,70 @@ export async function getTrack(id) {
 export async function getBlob(id) {
   const db = await openDb();
   const row = await txReq(db.transaction("blobs").objectStore("blobs").get(id));
-  return row && row.blob;
+  if (row && row.blob) return row.blob;
+
+  // Google Drive 音源でローカル未キャッシュの場合、Google Drive から取得してキャッシュ
+  if (typeof id === "string" && id.startsWith("gd-")) {
+    const driveFileId = id.slice(3);
+    try {
+      const { fetchDriveAudioBlob } = await import("../gdrive/drive-service.js");
+      const blob = await fetchDriveAudioBlob(driveFileId);
+      if (blob) {
+        // blobs ストアにキャッシュ保存
+        await withWriteRetry(async () => {
+          const wdb = await openDb();
+          const tx = wdb.transaction("blobs", "readwrite");
+          tx.objectStore("blobs").put({ id, blob });
+          return new Promise((res, rej) => {
+            tx.oncomplete = () => res();
+            tx.onerror = () => rej(tx.error);
+            tx.onabort = () => rej(tx.error);
+          });
+        });
+
+        // バックグラウンドでメタデータとアートワーク、再生時間を補完（再生開始をブロックしない）
+        (async () => {
+          try {
+            const track = await getTrack(id);
+            if (track && (!track.duration || !track.userEdited)) {
+              const { extractMetadata, readDurationViaAudio } = await import("../metadata/index.js");
+              const meta = await extractMetadata(blob, track.originalName);
+              let duration = meta.duration;
+              if ((!duration || duration <= 0) && typeof document !== "undefined") {
+                duration = await readDurationViaAudio(blob);
+              }
+              const patch = {};
+              if (!track.userEdited) {
+                if (meta.title && meta.title !== "(無題)") patch.title = meta.title;
+                if (meta.artist && meta.artist !== "(不明アーティスト)" && meta.artist !== "(Google Drive)") patch.artist = meta.artist;
+                if (meta.album && meta.album !== "Google Drive") patch.album = meta.album;
+                if (meta.albumArtist) patch.albumArtist = meta.albumArtist;
+                if (meta.trackNo) patch.trackNo = meta.trackNo;
+                if (meta.discNo) patch.discNo = meta.discNo;
+                if (meta.year) patch.year = meta.year;
+                if (meta.genre) patch.genre = meta.genre;
+                if (meta.artworkBlob && !track.artworkBlob) patch.artworkBlob = meta.artworkBlob;
+              }
+              if (duration && duration > 0) patch.duration = duration;
+              patch.cached = true;
+              if (Object.keys(patch).length > 0) {
+                await updateTrack(id, patch);
+              }
+            }
+          } catch (e) {
+            console.warn("[library-db] Google Drive メタデータ自動補完スキップ:", e);
+          }
+        })();
+
+        return blob;
+      }
+    } catch (err) {
+      console.warn("[library-db] Google Drive からの音源取得に失敗:", id, err);
+      throw err;
+    }
+  }
+
+  return null;
 }
 
 /**

@@ -20,8 +20,13 @@ body {
   justify-content: space-between;
   gap: 8px;
   padding: 10px 14px;
-  background: var(--bg-elev);
+  background: rgba(18, 18, 20, 0.78);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
   border-bottom: 1px solid var(--border);
+}
+:root[data-theme="light"] .app-header {
+  background: rgba(245, 245, 247, 0.82);
 }
 
 .app-title {
@@ -143,9 +148,15 @@ body[data-route="player"] .view-root {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   padding: 6px 0 calc(6px + env(safe-area-inset-bottom));
-  background: var(--bg-elev);
+  background: rgba(18, 18, 20, 0.82);
+  backdrop-filter: saturate(180%) blur(24px);
+  -webkit-backdrop-filter: saturate(180%) blur(24px);
   border-top: 1px solid var(--border);
-  box-shadow: var(--shadow);
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.35);
+}
+:root[data-theme="light"] .bottom-nav {
+  background: rgba(245, 245, 247, 0.85);
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.05);
 }
 
 .nav-item {
@@ -176,19 +187,26 @@ body[data-route="player"] .view-root {
 /* ===== ミニプレイヤー ===== */
 .mini-player {
   position: fixed;
-  left: 8px;
-  right: 8px;
+  left: 10px;
+  right: 10px;
   bottom: calc(64px + env(safe-area-inset-bottom));
   z-index: 90;
   display: grid;
   grid-template-columns: 48px 1fr auto;
   align-items: center;
-  gap: 10px;
-  padding: 8px;
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: var(--shadow);
+  gap: 12px;
+  padding: 8px 10px;
+  background: rgba(28, 29, 34, 0.86);
+  backdrop-filter: saturate(180%) blur(24px);
+  -webkit-backdrop-filter: saturate(180%) blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.5);
+}
+:root[data-theme="light"] .mini-player {
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
 }
 
 /* HTML の hidden 属性を尊重（display: grid に上書きされないように） */
@@ -208,9 +226,10 @@ body[data-route="player"] .mini-player {
 .mini-art {
   width: 48px;
   height: 48px;
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--bg-elev);
   object-fit: cover;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
 .mini-meta {
