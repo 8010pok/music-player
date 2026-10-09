@@ -10,6 +10,8 @@
  *   - history   : { id (auto), trackId, startedAt, durationListened, scrobbled }
  */
 
+import { getPublic } from "./settings.js";
+
 const DB_NAME = "music-player-library";
 const DB_VERSION = 1;
 
@@ -161,17 +163,25 @@ export async function getBlob(id) {
       const { fetchDriveAudioBlob } = await import("../gdrive/drive-service.js");
       const blob = await fetchDriveAudioBlob(driveFileId);
       if (blob) {
-        // blobs ストアにキャッシュ保存
-        await withWriteRetry(async () => {
-          const wdb = await openDb();
-          const tx = wdb.transaction("blobs", "readwrite");
-          tx.objectStore("blobs").put({ id, blob });
-          return new Promise((res, rej) => {
-            tx.oncomplete = () => res();
-            tx.onerror = () => rej(tx.error);
-            tx.onabort = () => rej(tx.error);
+        let shouldCache = true;
+        try {
+          const pub = getPublic();
+          if (pub && pub.gdriveAutoCache === false) shouldCache = false;
+        } catch (_) {}
+
+        if (shouldCache) {
+          // blobs ストアにキャッシュ保存 (自動キャッシュ有効時のみ)
+          await withWriteRetry(async () => {
+            const wdb = await openDb();
+            const tx = wdb.transaction("blobs", "readwrite");
+            tx.objectStore("blobs").put({ id, blob });
+            return new Promise((res, rej) => {
+              tx.oncomplete = () => res();
+              tx.onerror = () => rej(tx.error);
+              tx.onabort = () => rej(tx.error);
+            });
           });
-        });
+        }
 
         // バックグラウンドでメタデータとアートワーク、再生時間を補完（再生開始をブロックしない）
         (async () => {
@@ -197,7 +207,7 @@ export async function getBlob(id) {
                 if (meta.artworkBlob && !track.artworkBlob) patch.artworkBlob = meta.artworkBlob;
               }
               if (duration && duration > 0) patch.duration = duration;
-              patch.cached = true;
+              patch.cached = shouldCache;
               if (Object.keys(patch).length > 0) {
                 await updateTrack(id, patch);
               }
@@ -562,4 +572,35 @@ export async function getStorageEstimate() {
     return navigator.storage.estimate();
   }
   return null;
+}
+
+/**
+ * Google Drive 音源のローカルキャッシュ（blobs）のみを一括消去し、端末容量を解放する
+ * トラックのメタデータ、プレイリスト、お気に入りは保持される
+ * @returns {Promise<{ clearedCount: number }>}
+ */
+export async function clearDriveBlobCache() {
+  const db = await openDb();
+  const allTracks = await getAllTracks();
+  const driveTracks = allTracks.filter((t) => typeof t.id === "string" && t.id.startsWith("gd-"));
+  if (driveTracks.length === 0) return { clearedCount: 0 };
+
+  await withWriteRetry(async () => {
+    const wdb = await openDb();
+    const tx = wdb.transaction(["blobs", "tracks"], "readwrite");
+    const blobStore = tx.objectStore("blobs");
+    const trackStore = tx.objectStore("tracks");
+    for (const track of driveTracks) {
+      blobStore.delete(track.id);
+      track.cached = false;
+      trackStore.put(track);
+    }
+    return new Promise((res, rej) => {
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+      tx.onabort = () => rej(tx.error);
+    });
+  });
+
+  return { clearedCount: driveTracks.length };
 }

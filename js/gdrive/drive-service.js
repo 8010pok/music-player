@@ -481,15 +481,18 @@ export async function openDriveImportModal({ onImported } = {}) {
           <label for="drive-client-id" style="font-size: 12px;">Google Cloud Client ID</label>
           <input type="text" id="drive-client-id" value="${escapeAttr(pub.gdriveClientId || "")}" placeholder="例: 123456789-xxx.apps.googleusercontent.com" style="font-size: 12px;" />
         </div>
+        <div style="font-size: 11px; color: var(--fg-muted); margin-bottom: 10px; line-height: 1.4;">
+          💡 <strong>403エラーが出る場合:</strong> Google Cloud Console で「Google Drive API」が未有効です。<a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">こちら</a> を開いて「有効にする」を1回クリックしてください。
+        </div>
         <button class="btn primary" id="btn-drive-gis-login" style="width: 100%;">
           🔑 Google アカウントでログイン
         </button>
       </div>
 
       <div style="background: var(--bg-surface); padding: 12px; border-radius: 8px; margin-bottom: 12px; border: 1px solid var(--border-color);">
-        <h4 style="margin: 0 0 8px 0; font-size: 14px;">方法 2: Access Token を直接入力</h4>
-        <div style="font-size: 11px; color: var(--fg-muted); margin-bottom: 8px;">
-          Google OAuth Playground 等で取得した一時的なアクセストークン（drive.readonly 権限）を直接使用します。
+        <h4 style="margin: 0 0 8px 0; font-size: 14px;">方法 2: Access Token を直接入力 (Client ID 設定不要)</h4>
+        <div style="font-size: 11px; color: var(--fg-muted); margin-bottom: 8px; line-height: 1.4;">
+          Google Cloud の設定を省略したい場合、<a href="https://developers.google.com/oauthplayground" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">OAuth 2.0 Playground</a> で <code>drive.readonly</code> の一時トークンを発行して貼り付けるだけで即座に接続できます。
         </div>
         <div class="modal-row" style="margin-bottom: 8px;">
           <input type="password" id="drive-direct-token" placeholder="ya29.a0AfH6SM..." style="font-size: 12px;" />

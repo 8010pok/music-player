@@ -516,7 +516,20 @@ export async function mount(root) {
 
   refs.gdriveAutoCacheChk?.addEventListener("change", () => {
     setPublic({ gdriveAutoCache: refs.gdriveAutoCacheChk.checked });
-    toast(refs.gdriveAutoCacheChk.checked ? "再生時自動キャッシュを有効にしました" : "再生時自動キャッシュを無効にしました", "ok");
+    toast(refs.gdriveAutoCacheChk.checked ? "再生時自動キャッシュを有効にしました" : "再生時自動キャッシュを無効にしました（本体ストレージ消費ゼロ）", "ok");
+  });
+
+  refs.btnGdriveClearCache?.addEventListener("click", async () => {
+    const ok = await confirm("端末内に一時保存された Google Drive の音源キャッシュをすべて消去して本体容量を空けますか？\n（曲一覧やプレイリスト、お気に入りは保持されます）", { okLabel: "消去" });
+    if (!ok) return;
+    try {
+      const { clearDriveBlobCache } = await import("../store/library-db.js");
+      const { clearedCount } = await clearDriveBlobCache();
+      toast(`Google Drive 音源キャッシュを消去しました (${clearedCount}曲)`, "ok");
+      remount();
+    } catch (e) {
+      toast("キャッシュ消去に失敗しました: " + (e.message || e), "err");
+    }
   });
 
   // ===== 端末間ライブラリ同期 (iPad ↔ iPhone) =====
@@ -731,9 +744,18 @@ function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices, dr
         <div class="settings-row">
           <div>
             <div class="label">再生時に自動キャッシュ</div>
-            <div class="help">Google Drive の曲を再生した際、音源を端末（IndexedDB）に保存して次回以降オフラインで即座に再生できるようにします</div>
+            <div class="help">Google Drive の曲を再生した際、音源を端末（IndexedDB）に保存します。<br/><span style="color:var(--accent);">※ OFF にすると本体ストレージ消費ゼロ（純粋なオンデマンド再生）になります。</span></div>
           </div>
           <label class="switch"><input type="checkbox" id="gdrive-autocache-chk" ${pub.gdriveAutoCache !== false ? "checked" : ""} /><span class="slider"></span></label>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="label">Google Drive 音源キャッシュを消去</div>
+            <div class="help">再生時に一時保存された音源データを端末から消去して本体容量を解放します（曲一覧やプレイリスト、お気に入りは保持されます）</div>
+          </div>
+          <div>
+            <button class="btn" id="btn-gdrive-clear-cache" style="white-space:nowrap;">🗑 キャッシュ消去</button>
+          </div>
         </div>
       </div>
 
@@ -987,6 +1009,7 @@ function collect(root) {
     btnGdriveConnect: root.querySelector("#btn-gdrive-connect"),
     btnGdriveDisconnect: root.querySelector("#btn-gdrive-disconnect"),
     gdriveAutoCacheChk: root.querySelector("#gdrive-autocache-chk"),
+    btnGdriveClearCache: root.querySelector("#btn-gdrive-clear-cache"),
     btnSyncExport: root.querySelector("#btn-sync-export"),
     btnSyncImport: root.querySelector("#btn-sync-import"),
     syncFileInput: root.querySelector("#sync-file-input"),
