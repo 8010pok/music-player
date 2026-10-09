@@ -262,7 +262,8 @@ function render() {
           <button class="btn" id="btn-add-gdrive" title="Google Drive API 経由で追加">☁ Google Drive API</button>
         </div>
         <div class="help" style="font-size: 11px; color: var(--fg-muted); margin-top: 6px; line-height: 1.5;">
-          💡 <strong>iPad / iPhone の場合:</strong> 【📁 ファイルを選択】を押すと iOS の「ファイル」アプリが開きます。左上「ブラウズ」から <strong>Google ドライブ</strong> や <strong>iCloud Drive</strong> を選ぶだけで、Client ID 不要で曲を一括選択して追加できます！
+          💡 <strong>iPad / iPhone の場合:</strong> 【📁 ファイルを選択】から Google ドライブや iCloud Drive の曲を直接追加できます（Client ID 不要）。<br/>
+          ❓ <strong>ブラウズに Google ドライブ が出ない場合:</strong> iOSの「ファイル」アプリを開く ➔「ブラウズ」右上の「…」➔「サイドバーを編集」で <strong>Google ドライブをON</strong> にしてください。または Google ドライブ アプリ側で曲を選び「共有とエクスポート」➔「ファイルに保存」で端末内に保存してから選択できます。
         </div>
         <input type="file" id="file-input" multiple
                accept=".mp3,.m4a,.m4b,.aac,.mp4,.flac,.ogg,.oga,.opus,.wav,.webm,audio/*"
