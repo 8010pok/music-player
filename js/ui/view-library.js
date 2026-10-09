@@ -253,6 +253,30 @@ function render() {
       <!-- 「現在再生中のプレイリスト」バナー -->
       <div class="now-playing-from" id="np-banner" hidden></div>
 
+      <!-- 音源追加領域（全タブ共通） -->
+      <div class="library-add">
+        <div class="library-add-title">音源を追加 (Googleドライブ / iPad・iPhone内 / iCloud)</div>
+        <div class="library-add-buttons">
+          <button class="btn primary" id="btn-add">📁 ファイルを選択</button>
+          <button class="btn primary" id="btn-add-folder">📂 フォルダを選択</button>
+          <button class="btn" id="btn-add-gdrive" title="Google Drive API 経由で追加">☁ Google Drive API</button>
+        </div>
+        <div class="help" style="font-size: 11px; color: var(--fg-muted); margin-top: 6px; line-height: 1.5;">
+          💡 <strong>iPad / iPhone の場合:</strong> 【📁 ファイルを選択】を押すと iOS の「ファイル」アプリが開きます。左上「ブラウズ」から <strong>Google ドライブ</strong> や <strong>iCloud Drive</strong> を選ぶだけで、Client ID 不要で曲を一括選択して追加できます！
+        </div>
+        <input type="file" id="file-input" multiple
+               accept=".mp3,.m4a,.m4b,.aac,.mp4,.flac,.ogg,.oga,.opus,.wav,.webm,audio/*"
+               style="display:none" />
+        <input type="file" id="folder-input" multiple webkitdirectory directory
+               style="display:none" />
+        <div class="library-rescan-row">
+          <button class="btn" id="btn-rescan-meta" title="保存済み全曲のファイルを再パースしてメタデータを更新します">
+            📋 メタデータ再スキャン
+          </button>
+          <span id="rescan-progress" class="rescan-progress"></span>
+        </div>
+      </div>
+
       <!-- Apple Music スタイル ライブラリタブ (アーティスト / アルバム / 曲) -->
       <div class="library-tabs-bar" role="tablist">
         <button class="library-tab-btn ${activeTab === "artists" ? "is-active" : ""}" data-tab="artists" role="tab">アーティスト</button>
@@ -262,26 +286,6 @@ function render() {
 
       <!-- タブ 1: 曲 -->
       <div class="library-tab-panel" id="panel-tracks" ${activeTab !== "tracks" ? "hidden" : ""}>
-        <div class="library-add">
-          <div class="library-add-title">音源ファイルを追加</div>
-          <div class="library-add-buttons">
-            <button class="btn primary" id="btn-add">ファイル</button>
-            <button class="btn primary" id="btn-add-folder">フォルダ</button>
-            <button class="btn" id="btn-add-gdrive" title="Google Drive から音源を追加">☁ Google Drive</button>
-          </div>
-          <input type="file" id="file-input" multiple
-                 accept=".mp3,.m4a,.m4b,.aac,.mp4,.flac,.ogg,.oga,.opus,.wav,.webm,audio/*"
-                 style="display:none" />
-          <input type="file" id="folder-input" multiple webkitdirectory directory
-                 style="display:none" />
-          <div class="library-rescan-row">
-            <button class="btn" id="btn-rescan-meta" title="保存済み全曲のファイルを再パースしてメタデータを更新します">
-              📋 メタデータ再スキャン
-            </button>
-            <span id="rescan-progress" class="rescan-progress"></span>
-          </div>
-        </div>
-
         <div class="library-toolbar">
           <input type="search" id="lib-search" placeholder="検索: 曲タイトルなどを入力" />
           <select id="lib-sort">
