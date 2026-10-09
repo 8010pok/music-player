@@ -220,12 +220,24 @@ async function main() {
     }, STARTUP_FLUSH_DELAY_MS);
   }
 
-  // 8. Service Worker 登録
+  // 8. Service Worker 登録 (最新バージョン即時反映)
   if ("serviceWorker" in navigator) {
     try {
       const reg = await navigator.serviceWorker.register("./sw.js");
       // 新バージョンの存在を即時チェック
       reg.update();
+      if (reg.waiting) {
+        reg.waiting.postMessage({ type: "SKIP_WAITING" });
+      }
+      reg.addEventListener("updatefound", () => {
+        const newWorker = reg.installing;
+        if (!newWorker) return;
+        newWorker.addEventListener("statechange", () => {
+          if (newWorker.state === "installed" && navigator.serviceWorker.controller) {
+            newWorker.postMessage({ type: "SKIP_WAITING" });
+          }
+        });
+      });
       navigator.serviceWorker.addEventListener("controllerchange", () => {
         // 新しい Service Worker がページを制御したら最新キャッシュを反映
         if (!window.__swReloaded) {

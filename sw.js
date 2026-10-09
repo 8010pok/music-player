@@ -7,7 +7,7 @@
  * バージョンを上げると古いキャッシュは破棄される。
  */
 
-const CACHE_VERSION = "v1.2.2";
+const CACHE_VERSION = "v1.3.0";
 const STATIC_CACHE = `static-${CACHE_VERSION}`;
 const API_CACHE = `api-${CACHE_VERSION}`;
 const IMG_CACHE = `img-${CACHE_VERSION}`;
@@ -27,6 +27,7 @@ const PRECACHE_URLS = [
   "./js/store/library-db.js",
   "./js/store/queue-db.js",
   "./js/store/settings.js",
+  "./js/store/sync-service.js",
   "./js/gdrive/drive-service.js",
   "./js/player/audio-engine.js",
   "./js/player/visualizer.js",
@@ -145,8 +146,21 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  // HTML ナビゲーション（ページ読み込み）: Network-First で最新版を優先（オフライン時はキャッシュ）
+  if (req.mode === "navigate" || req.destination === "document") {
+    event.respondWith(networkFirst(req, STATIC_CACHE));
+    return;
+  }
+
   // 静的アセット: Cache-First
   event.respondWith(cacheFirst(req, STATIC_CACHE));
+});
+
+// 即時アクティベーション要求メッセージの処理
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
 });
 
 /**
