@@ -254,21 +254,23 @@ export function requestGisToken(clientId) {
 }
 
 /**
- * Google Drive 上の音源ファイルを検索・一覧取得
- * @param {{ query?: string, pageToken?: string, pageSize?: number }} [opts]
+ * Google Drive 上のアイテム（フォルダおよび音源ファイル）を検索・一覧取得
+ * @param {{ folderId?: string, query?: string, pageToken?: string, pageSize?: number }} [opts]
  * @returns {Promise<{ files: Array<object>, nextPageToken: string|null }>}
  */
-export async function listDriveAudioFiles({ query = "", pageToken = null, pageSize = 100 } = {}) {
+export async function listDriveItems({ folderId = "root", query = "", pageToken = null, pageSize = 100 } = {}) {
   const token = await getDriveToken();
   if (!token) throw new Error("Google Drive に接続されていません");
 
-  let q = "trashed = false and (mimeType contains 'audio/' or name contains '.mp3' or name contains '.m4a' or name contains '.flac' or name contains '.ogg' or name contains '.wav' or name contains '.aac' or name contains '.opus' or name contains '.webm')";
+  let q = "trashed = false";
   if (query.trim()) {
     const clean = query.trim().replace(/['\\]/g, "");
-    if (clean) q += ` and name contains '${clean}'`;
+    q += ` and name contains '${clean}' and (mimeType = 'application/vnd.google-apps.folder' or mimeType contains 'audio/' or name contains '.mp3' or name contains '.m4a' or name contains '.flac' or name contains '.ogg' or name contains '.wav' or name contains '.aac' or name contains '.opus' or name contains '.webm')`;
+  } else {
+    q += ` and '${folderId}' in parents and (mimeType = 'application/vnd.google-apps.folder' or mimeType contains 'audio/' or name contains '.mp3' or name contains '.m4a' or name contains '.flac' or name contains '.ogg' or name contains '.wav' or name contains '.aac' or name contains '.opus' or name contains '.webm')`;
   }
 
-  let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=${pageSize}&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime,thumbnailLink)&orderBy=name`;
+  let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=${pageSize}&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime)&orderBy=folder,name`;
   if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
 
   const res = await fetch(url, {
@@ -288,6 +290,66 @@ export async function listDriveAudioFiles({ query = "", pageToken = null, pageSi
   return {
     files: data.files || [],
     nextPageToken: data.nextPageToken || null,
+  };
+}
+
+/**
+ * フォルダ（およびその全サブフォルダ）内の全音源ファイルを再帰的に取得
+ * @param {string} rootFolderId
+ * @param {{ onProgress?: (msg: string) => void }} [opts]
+ * @returns {Promise<Array<object>>}
+ */
+export async function fetchFolderAudioFilesRecursive(rootFolderId, { onProgress } = {}) {
+  const token = await getDriveToken();
+  if (!token) throw new Error("Google Drive に接続されていません");
+
+  const audioFiles = [];
+  const folderQueue = [rootFolderId];
+  const visitedFolders = new Set([rootFolderId]);
+
+  while (folderQueue.length > 0) {
+    const curFolderId = folderQueue.shift();
+    if (typeof onProgress === "function") {
+      onProgress(`フォルダを探索中 (検出: ${audioFiles.length} 曲)…`);
+    }
+
+    let pageToken = null;
+    do {
+      const q = `trashed = false and '${curFolderId}' in parents and (mimeType = 'application/vnd.google-apps.folder' or mimeType contains 'audio/' or name contains '.mp3' or name contains '.m4a' or name contains '.flac' or name contains '.ogg' or name contains '.wav' or name contains '.aac' or name contains '.opus' or name contains '.webm')`;
+      let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=100&fields=nextPageToken,files(id,name,mimeType,size)&orderBy=folder,name`;
+      if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
+
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) break;
+      const data = await res.json();
+      const items = data.files || [];
+      for (const item of items) {
+        if (item.mimeType === "application/vnd.google-apps.folder") {
+          if (!visitedFolders.has(item.id)) {
+            visitedFolders.add(item.id);
+            folderQueue.push(item.id);
+          }
+        } else {
+          audioFiles.push(item);
+        }
+      }
+      pageToken = data.nextPageToken;
+    } while (pageToken);
+  }
+
+  return audioFiles;
+}
+
+/**
+ * Google Drive 上の音源ファイルを検索・一覧取得
+ * @param {{ query?: string, pageToken?: string, pageSize?: number }} [opts]
+ * @returns {Promise<{ files: Array<object>, nextPageToken: string|null }>}
+ */
+export async function listDriveAudioFiles({ query = "", pageToken = null, pageSize = 100 } = {}) {
+  const res = await listDriveItems({ query, pageToken, pageSize });
+  return {
+    files: res.files.filter((f) => f.mimeType !== "application/vnd.google-apps.folder"),
+    nextPageToken: res.nextPageToken,
   };
 }
 
@@ -567,8 +629,14 @@ export async function openDriveImportModal({ onImported } = {}) {
     return;
   }
 
-  // 接続済み画面：ファイル一覧と選択
-  let currentFiles = [];
+  // 接続済み画面：フォルダ階層ナビゲーション & 一括追加
+  let currentFolderId = "root";
+  let currentFolderName = "マイドライブ";
+  let breadcrumbs = [{ id: "root", name: "マイドライブ" }];
+  let currentSearch = "";
+  let displayedItems = [];
+  let selectedFileIds = new Set();
+  let currentNextPageToken = null;
   let existingTrackIds = new Set();
   try {
     const existing = await getAllTracks();
@@ -578,39 +646,50 @@ export async function openDriveImportModal({ onImported } = {}) {
   const emailDisplay = pub.gdriveUserEmail ? ` (${escapeHtml(pub.gdriveUserEmail)})` : "";
 
   container.innerHTML = `
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; font-size: 13px;">
-      <div>
-        <span style="color: var(--success); font-weight: bold;">● 接続中</span>${emailDisplay}
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <!-- 接続ヘッダー -->
+      <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px;">
+        <div>
+          <span style="color: var(--success); font-weight: bold;">● 接続中</span>${emailDisplay}
+        </div>
+        <button class="btn danger" id="btn-drive-disconnect" style="padding: 2px 8px; font-size: 11px;">切断</button>
       </div>
-      <button class="btn danger" id="btn-drive-disconnect" style="padding: 4px 8px; font-size: 11px;">切断</button>
-    </div>
 
-    <div style="display: flex; gap: 8px; margin-bottom: 10px;">
-      <input type="search" id="drive-search-input" placeholder="Google Drive 内を検索…" style="flex: 1; font-size: 12px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--fg);" />
-      <button class="btn" id="btn-drive-search" style="padding: 6px 12px; font-size: 12px;">検索</button>
-    </div>
-
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 12px;">
+      <!-- 検索バー -->
       <div style="display: flex; gap: 6px;">
-        <button class="btn" id="btn-drive-select-all" style="padding: 2px 8px; font-size: 11px;">全選択</button>
-        <button class="btn" id="btn-drive-unselect-all" style="padding: 2px 8px; font-size: 11px;">全解除</button>
+        <input type="search" id="drive-search-input" placeholder="Google Drive 内を検索 (曲名・フォルダ名)…" style="flex: 1; font-size: 12px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--fg);" />
+        <button class="btn" id="btn-drive-search" style="padding: 6px 12px; font-size: 12px;">検索</button>
       </div>
-      <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;">
-        <input type="checkbox" id="chk-drive-cache-now" ${pub.gdriveAutoCache !== false ? "checked" : ""} />
-        <span>音源をローカルに即時キャッシュ</span>
-      </label>
-    </div>
 
-    <div id="drive-file-list" style="max-height: 280px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-surface); padding: 4px;">
-      <div style="padding: 24px; text-align: center; color: var(--fg-muted); font-size: 12px;">
-        読み込み中…
+      <!-- パンくずリスト -->
+      <div id="drive-breadcrumbs" style="display: flex; align-items: center; gap: 4px; flex-wrap: wrap; font-size: 11px; padding: 6px 8px; background: var(--bg-surface); border-radius: 6px; border: 1px solid var(--border-color); min-height: 28px;"></div>
+
+      <!-- アクションバー -->
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
+        <div style="display: flex; gap: 6px; align-items: center;">
+          <button class="btn primary" id="btn-drive-import-folder" style="padding: 4px 10px; font-size: 11px; white-space: nowrap;" title="現在のフォルダ内（サブフォルダ含む）の全音源を一括追加">
+            📂 このフォルダの曲を全追加
+          </button>
+          <button class="btn" id="btn-drive-select-all" style="padding: 4px 8px; font-size: 11px;">全選択</button>
+          <button class="btn" id="btn-drive-unselect-all" style="padding: 4px 8px; font-size: 11px;">全解除</button>
+        </div>
+        <label style="display: flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer; user-select: none;">
+          <input type="checkbox" id="chk-drive-cache-now" />
+          <span title="チェックを外すと本体ストレージを消費せず、再生時に直接ストリーミングします">即時キャッシュ (OFFで容量0)</span>
+        </label>
       </div>
-    </div>
 
-    <div id="drive-import-progress" style="margin-top: 10px; font-size: 12px; color: var(--accent); display: none;"></div>
+      <!-- アイテム一覧領域 -->
+      <div id="drive-file-list" style="max-height: 360px; min-height: 220px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-surface); padding: 4px;">
+        <div style="padding: 30px; text-align: center; color: var(--fg-muted); font-size: 12px;">
+          読み込み中…
+        </div>
+      </div>
+
+      <!-- 進捗表示 -->
+      <div id="drive-import-progress" style="font-size: 12px; color: var(--accent); font-weight: 500; display: none; padding: 4px 0;"></div>
+    </div>
   `;
-
-  let modalCloseFn = null;
 
   openModal({
     title: "☁ Google Drive から追加",
@@ -618,18 +697,15 @@ export async function openDriveImportModal({ onImported } = {}) {
     actions: [
       { label: "キャンセル", onClick: () => {} },
       {
-        label: "追加する (0件)",
+        label: "選択した曲を追加 (0件)",
         primary: true,
         onClick: async () => {
-          const checkedCheckboxes = container.querySelectorAll(".drive-file-chk:checked");
-          const selectedFiles = [];
-          for (const chk of checkedCheckboxes) {
-            const idx = parseInt(chk.dataset.index, 10);
-            if (currentFiles[idx]) selectedFiles.push(currentFiles[idx]);
-          }
+          const selectedFiles = displayedItems.filter(
+            (it) => it.mimeType !== "application/vnd.google-apps.folder" && selectedFileIds.has(it.id)
+          );
 
           if (selectedFiles.length === 0) {
-            toast("インポートする曲を選択してください", "err");
+            toast("インポートする曲を選択するか、【このフォルダの曲を全追加】を押してください", "err");
             return;
           }
 
@@ -653,6 +729,9 @@ export async function openDriveImportModal({ onImported } = {}) {
             });
 
             toast(`${added} 件の Google Drive 音源を追加しました`, "ok");
+            for (const f of selectedFiles) {
+              existingTrackIds.add(trackIdFromDriveFileId(f.id));
+            }
             if (typeof onImported === "function") onImported();
           } catch (err) {
             toast(`インポート中にエラーが発生しました: ${err.message}`, "err");
@@ -666,102 +745,379 @@ export async function openDriveImportModal({ onImported } = {}) {
   });
 
   const fileListEl = container.querySelector("#drive-file-list");
+
+  // カウント更新
   const updateCount = () => {
-    const checked = container.querySelectorAll(".drive-file-chk:checked").length;
+    const audioFiles = displayedItems.filter((it) => it.mimeType !== "application/vnd.google-apps.folder");
+    let checkedCount = 0;
+    for (const f of audioFiles) {
+      if (selectedFileIds.has(f.id)) checkedCount++;
+    }
     const btn = document.querySelector(".modal-actions .btn.primary");
-    if (btn) btn.textContent = `追加する (${checked}件)`;
+    if (btn) btn.textContent = `選択した曲を追加 (${checkedCount}件)`;
   };
 
-  const renderFiles = (files) => {
-    currentFiles = files;
-    if (files.length === 0) {
-      fileListEl.innerHTML = `<div style="padding: 24px; text-align: center; color: var(--fg-muted); font-size: 12px;">音源ファイルが見つかりませんでした</div>`;
-      updateCount();
+  // パンくずリスト描画
+  const renderBreadcrumbs = () => {
+    const crumbsEl = container.querySelector("#drive-breadcrumbs");
+    if (!crumbsEl) return;
+    if (currentSearch) {
+      crumbsEl.innerHTML = `
+        <span style="color:var(--accent); font-weight:600;">🔍 検索結果: "${escapeHtml(currentSearch)}"</span>
+        <button class="btn" id="btn-clear-search" style="padding:2px 8px; font-size:11px; margin-left:auto;">✕ フォルダ表示に戻る</button>
+      `;
+      crumbsEl.querySelector("#btn-clear-search")?.addEventListener("click", () => {
+        currentSearch = "";
+        const searchInput = container.querySelector("#drive-search-input");
+        if (searchInput) searchInput.value = "";
+        loadFolder(currentFolderId, false);
+      });
       return;
     }
 
-    fileListEl.innerHTML = files.map((f, i) => {
-      const trackId = trackIdFromDriveFileId(f.id);
-      const isAlreadyAdded = existingTrackIds.has(trackId);
-      const sizeStr = f.size ? `${(parseInt(f.size, 10) / 1024 / 1024).toFixed(1)} MB` : "";
+    crumbsEl.innerHTML = breadcrumbs.map((b, idx) => {
+      const isLast = idx === breadcrumbs.length - 1;
+      if (isLast) {
+        return `<span style="font-weight:600; color:var(--fg);">${escapeHtml(b.name)}</span>`;
+      }
       return `
-        <label style="display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 4px; cursor: pointer; border-bottom: 1px solid var(--border-color); font-size: 12px;">
-          <input type="checkbox" class="drive-file-chk" data-index="${i}" ${isAlreadyAdded ? "" : "checked"} />
-          <div style="flex: 1; min-width: 0;">
-            <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500;">
-              ${escapeHtml(f.name)}
-            </div>
-            <div style="font-size: 10px; color: var(--fg-muted); display: flex; gap: 8px;">
-              <span>${sizeStr}</span>
-              ${isAlreadyAdded ? `<span style="color: var(--accent);">追加済み</span>` : ""}
-            </div>
-          </div>
-        </label>
+        <a href="#" class="drive-crumb-link" data-idx="${idx}" style="color:var(--accent); text-decoration:none;">${escapeHtml(b.name)}</a>
+        <span style="color:var(--fg-muted); margin:0 2px;">/</span>
       `;
     }).join("");
 
-    fileListEl.querySelectorAll(".drive-file-chk").forEach((chk) => {
-      chk.addEventListener("change", updateCount);
+    crumbsEl.querySelectorAll(".drive-crumb-link").forEach((link) => {
+      link.addEventListener("click", (e) => {
+        e.preventDefault();
+        const idx = parseInt(link.dataset.idx, 10);
+        const target = breadcrumbs[idx];
+        breadcrumbs = breadcrumbs.slice(0, idx + 1);
+        currentFolderId = target.id;
+        currentFolderName = target.name;
+        loadFolder(currentFolderId, false);
+      });
     });
-    updateCount();
   };
 
-  // ファイルリスト読み込み
-  const loadFiles = async (q = "") => {
-    fileListEl.innerHTML = `<div style="padding: 24px; text-align: center; color: var(--fg-muted); font-size: 12px;">読み込み中…</div>`;
+  // フォルダ内の曲を一括追加ハンドラ
+  const handleImportFolder = async (folderId, folderName) => {
+    const progressEl = container.querySelector("#drive-import-progress");
+    progressEl.style.display = "block";
+    progressEl.textContent = `フォルダ「${folderName}」を探索中…`;
+
+    const folderBtn = container.querySelector("#btn-drive-import-folder");
+    if (folderBtn) folderBtn.disabled = true;
+
     try {
-      const res = await listDriveAudioFiles({ query: q });
-      renderFiles(res.files);
-    } catch (err) {
-      const is403 = String(err.message).includes("403");
-      fileListEl.innerHTML = `
-        <div style="padding: 16px; text-align: left; background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 8px; font-size: 12px; line-height: 1.6;">
-          <div style="color: var(--err, #ff453a); font-weight: bold; margin-bottom: 8px; font-size: 13px;">
-            ⚠️ ファイル一覧の取得に失敗しました
-          </div>
-          <div style="white-space: pre-wrap; color: var(--fg); margin-bottom: 12px;">${escapeHtml(err.message)}</div>
-          ${
-            is403
-              ? `<div style="background: rgba(10, 132, 255, 0.08); border: 1px solid rgba(10, 132, 255, 0.3); border-radius: 6px; padding: 10px; margin-bottom: 12px; font-size: 11px; line-height: 1.6;">
-              <strong style="color: var(--accent);">🛠 解決手順 (Google Cloud Console):</strong><br/>
-              1. <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener noreferrer" style="color: var(--accent); text-decoration: underline; font-weight: bold;">Google Drive API 有効化ページ</a> をブラウザで開く<br/>
-              2. Client ID を作成したプロジェクトが選択されていることを確認<br/>
-              3. <strong>【有効にする】</strong> ボタンをクリック<br/>
-              4. 反映に数十秒かかる場合があるため、少し待ってから下の【再試行】ボタンを押してください。
-            </div>`
-              : ""
-          }
-          <button class="btn primary" id="btn-drive-retry" style="width: 100%; font-size: 12px; padding: 8px;">🔄 もう一度読み込む (再試行)</button>
-        </div>
-      `;
-      const retryBtn = fileListEl.querySelector("#btn-drive-retry");
-      if (retryBtn) {
-        retryBtn.addEventListener("click", () => {
-          loadFiles(searchInput ? searchInput.value : "");
-        });
+      const audioFiles = await fetchFolderAudioFilesRecursive(folderId, {
+        onProgress: (msg) => { progressEl.textContent = msg; },
+      });
+
+      if (audioFiles.length === 0) {
+        toast(`フォルダ「${folderName}」内に音源ファイルは見つかりませんでした`, "info");
+        progressEl.style.display = "none";
+        if (folderBtn) folderBtn.disabled = false;
+        return;
       }
+
+      const cacheNow = container.querySelector("#chk-drive-cache-now").checked;
+      progressEl.textContent = `追加中 0 / ${audioFiles.length}…`;
+
+      const { added, failed } = await importDriveFilesToLibrary(audioFiles, {
+        cacheBlobs: cacheNow,
+        onProgress: (cur, tot, file) => {
+          progressEl.textContent = `追加中 ${cur} / ${tot}: ${escapeHtml(file.name)}…`;
+        },
+      });
+
+      toast(`「${folderName}」から ${added} 曲を追加しました`, "ok");
+      for (const f of audioFiles) {
+        existingTrackIds.add(trackIdFromDriveFileId(f.id));
+      }
+      renderItems(displayedItems, false);
+      if (typeof onImported === "function") onImported();
+    } catch (err) {
+      toast(`フォルダ追加エラー: ${err.message}`, "err");
+    } finally {
+      progressEl.style.display = "none";
+      if (folderBtn) folderBtn.disabled = false;
     }
   };
 
-  loadFiles();
+  // アイテム一覧描画
+  const renderItems = (items, isAppend = false) => {
+    if (!isAppend) {
+      displayedItems = items;
+    } else {
+      displayedItems = displayedItems.concat(items);
+    }
 
-  // 検索
+    const audioFiles = displayedItems.filter((it) => it.mimeType !== "application/vnd.google-apps.folder");
+    const folders = displayedItems.filter((it) => it.mimeType === "application/vnd.google-apps.folder");
+
+    let html = "";
+
+    // 上の階層へ戻るボタン (ルート以外かつ検索中ではない場合)
+    if (currentFolderId !== "root" && !currentSearch && !isAppend) {
+      html += `
+        <div class="drive-go-up" style="display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:6px; cursor:pointer; background:rgba(10,132,255,0.08); margin-bottom:4px; font-size:12px; color:var(--accent); font-weight:600;">
+          <span>⬆</span><span>[上のフォルダへ戻る]</span>
+        </div>
+      `;
+    }
+
+    if (displayedItems.length === 0) {
+      html += `<div style="padding:28px 16px; text-align:center; color:var(--fg-muted); font-size:12px;">このフォルダには音源やフォルダがありません</div>`;
+    } else {
+      // フォルダ一覧
+      for (const f of folders) {
+        html += `
+          <div class="drive-folder-row" data-folder-id="${f.id}" data-folder-name="${escapeAttr(f.name)}" style="display:flex; align-items:center; justify-content:space-between; padding:8px 10px; border-radius:6px; margin-bottom:3px; background:rgba(255,255,255,0.03); border-bottom:1px solid var(--border-color); cursor:pointer;">
+            <div class="drive-folder-click" style="display:flex; align-items:center; gap:10px; flex:1; min-width:0;">
+              <span style="font-size:18px; line-height:1;">📁</span>
+              <div style="flex:1; min-width:0;">
+                <div style="font-weight:600; font-size:13px; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(f.name)}</div>
+                <div style="font-size:10px; color:var(--fg-muted);">フォルダ (タップして開く)</div>
+              </div>
+            </div>
+            <button class="btn btn-add-folder-quick" data-folder-id="${f.id}" data-folder-name="${escapeAttr(f.name)}" style="padding:4px 8px; font-size:11px; white-space:nowrap; margin-left:8px;" title="このフォルダ内の曲を一括追加">
+              ⚡ 一括追加
+            </button>
+          </div>
+        `;
+      }
+
+      // 音源ファイル一覧
+      for (let i = 0; i < audioFiles.length; i++) {
+        const af = audioFiles[i];
+        const trackId = trackIdFromDriveFileId(af.id);
+        const isAlreadyAdded = existingTrackIds.has(trackId);
+        const sizeStr = af.size ? `${(parseInt(af.size, 10) / 1024 / 1024).toFixed(1)} MB` : "";
+        const extMatch = af.name.match(/\.([a-zA-Z0-9]+)$/);
+        const extStr = extMatch ? extMatch[1].toUpperCase() : "AUDIO";
+        const isChecked = selectedFileIds.has(af.id);
+
+        html += `
+          <label class="drive-file-row" style="display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:6px; margin-bottom:3px; cursor:pointer; border-bottom:1px solid var(--border-color); font-size:12px;">
+            <input type="checkbox" class="drive-file-chk" data-file-id="${af.id}" ${isChecked ? "checked" : ""} style="width:18px; height:18px; cursor:pointer; flex-shrink:0;" />
+            <div style="flex:1; min-width:0;">
+              <div style="font-weight:500; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                ${escapeHtml(af.name)}
+              </div>
+              <div style="font-size:10px; color:var(--fg-muted); display:flex; gap:6px; align-items:center; margin-top:2px;">
+                <span style="padding:1px 4px; border-radius:3px; background:rgba(255,255,255,0.08); font-weight:600; font-size:9px;">${extStr}</span>
+                <span>${sizeStr}</span>
+                ${isAlreadyAdded ? `<span style="color:var(--accent); font-weight:600;">✓ 追加済み</span>` : ""}
+              </div>
+            </div>
+          </label>
+        `;
+      }
+    }
+
+    // さらに読み込むボタン
+    if (currentNextPageToken) {
+      html += `
+        <div style="padding:10px 4px; text-align:center;">
+          <button class="btn" id="btn-drive-load-more" style="width:100%; font-size:12px; padding:8px;">
+            さらに読み込む (次の100件) ▼
+          </button>
+        </div>
+      `;
+    }
+
+    fileListEl.innerHTML = html;
+    bindListEvents();
+    renderBreadcrumbs();
+    updateCount();
+  };
+
+  // 一覧内イベント結線
+  const bindListEvents = () => {
+    // 上の階層へ
+    fileListEl.querySelector(".drive-go-up")?.addEventListener("click", () => {
+      if (breadcrumbs.length > 1) {
+        breadcrumbs.pop();
+        const parent = breadcrumbs[breadcrumbs.length - 1];
+        currentFolderId = parent.id;
+        currentFolderName = parent.name;
+        loadFolder(currentFolderId, false);
+      }
+    });
+
+    // フォルダクリック (展開)
+    fileListEl.querySelectorAll(".drive-folder-click").forEach((el) => {
+      el.addEventListener("click", () => {
+        const row = el.closest(".drive-folder-row");
+        const folderId = row.dataset.folderId;
+        const folderName = row.dataset.folderName;
+        breadcrumbs.push({ id: folderId, name: folderName });
+        currentFolderId = folderId;
+        currentFolderName = folderName;
+        loadFolder(folderId, false);
+      });
+    });
+
+    // フォルダ横「⚡ 一括追加」
+    fileListEl.querySelectorAll(".btn-add-folder-quick").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const folderId = btn.dataset.folderId;
+        const folderName = btn.dataset.folderName;
+        handleImportFolder(folderId, folderName);
+      });
+    });
+
+    // 曲チェックボックス
+    fileListEl.querySelectorAll(".drive-file-chk").forEach((chk) => {
+      chk.addEventListener("change", (e) => {
+        const fileId = chk.dataset.fileId;
+        if (chk.checked) {
+          selectedFileIds.add(fileId);
+        } else {
+          selectedFileIds.delete(fileId);
+        }
+        updateCount();
+      });
+    });
+
+    // さらに読み込む
+    fileListEl.querySelector("#btn-drive-load-more")?.addEventListener("click", () => {
+      if (currentSearch) {
+        searchDrive(currentSearch, true);
+      } else {
+        loadFolder(currentFolderId, true);
+      }
+    });
+  };
+
+  // フォルダ読み込み
+  const loadFolder = async (folderId, isAppend = false) => {
+    if (!isAppend) {
+      fileListEl.innerHTML = `<div style="padding: 30px; text-align: center; color: var(--fg-muted); font-size: 12px;">読み込み中…</div>`;
+      selectedFileIds.clear();
+      currentNextPageToken = null;
+    }
+    try {
+      const res = await listDriveItems({
+        folderId,
+        query: "",
+        pageToken: isAppend ? currentNextPageToken : null,
+      });
+      currentNextPageToken = res.nextPageToken;
+
+      // 新規読み込み時、未追加の音源を自動チェック
+      if (!isAppend) {
+        for (const item of res.files) {
+          if (item.mimeType !== "application/vnd.google-apps.folder") {
+            const trackId = trackIdFromDriveFileId(item.id);
+            if (!existingTrackIds.has(trackId)) {
+              selectedFileIds.add(item.id);
+            }
+          }
+        }
+      }
+
+      renderItems(res.files, isAppend);
+    } catch (err) {
+      renderError(err, () => loadFolder(folderId, isAppend));
+    }
+  };
+
+  // 全体検索
+  const searchDrive = async (q, isAppend = false) => {
+    if (!isAppend) {
+      fileListEl.innerHTML = `<div style="padding: 30px; text-align: center; color: var(--fg-muted); font-size: 12px;">検索中…</div>`;
+      selectedFileIds.clear();
+      currentNextPageToken = null;
+    }
+    try {
+      const res = await listDriveItems({
+        query: q,
+        pageToken: isAppend ? currentNextPageToken : null,
+      });
+      currentNextPageToken = res.nextPageToken;
+
+      if (!isAppend) {
+        for (const item of res.files) {
+          if (item.mimeType !== "application/vnd.google-apps.folder") {
+            const trackId = trackIdFromDriveFileId(item.id);
+            if (!existingTrackIds.has(trackId)) {
+              selectedFileIds.add(item.id);
+            }
+          }
+        }
+      }
+
+      renderItems(res.files, isAppend);
+    } catch (err) {
+      renderError(err, () => searchDrive(q, isAppend));
+    }
+  };
+
+  // エラー描画
+  const renderError = (err, onRetry) => {
+    const is403 = String(err.message).includes("403");
+    fileListEl.innerHTML = `
+      <div style="padding: 16px; text-align: left; background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 8px; font-size: 12px; line-height: 1.6;">
+        <div style="color: var(--err, #ff453a); font-weight: bold; margin-bottom: 8px; font-size: 13px;">
+          ⚠️ 一覧の取得に失敗しました
+        </div>
+        <div style="white-space: pre-wrap; color: var(--fg); margin-bottom: 12px;">${escapeHtml(err.message)}</div>
+        ${
+          is403
+            ? `<div style="background: rgba(10, 132, 255, 0.08); border: 1px solid rgba(10, 132, 255, 0.3); border-radius: 6px; padding: 10px; margin-bottom: 12px; font-size: 11px; line-height: 1.6;">
+            <strong style="color: var(--accent);">🛠 解決手順 (Google Cloud Console):</strong><br/>
+            1. <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener noreferrer" style="color: var(--accent); text-decoration: underline; font-weight: bold;">Google Drive API 有効化ページ</a> をブラウザで開く<br/>
+            2. Client ID を作成したプロジェクトが選択されていることを確認<br/>
+            3. <strong>【有効にする】</strong> ボタンをクリック<br/>
+            4. 反映に数十秒かかる場合があるため、少し待ってから下の【再試行】ボタンを押してください。
+          </div>`
+            : ""
+        }
+        <button class="btn primary" id="btn-drive-retry" style="width: 100%; font-size: 12px; padding: 8px;">🔄 もう一度読み込む (再試行)</button>
+      </div>
+    `;
+    fileListEl.querySelector("#btn-drive-retry")?.addEventListener("click", onRetry);
+  };
+
+  // 初期読み込み (マイドライブ)
+  loadFolder("root", false);
+
+  // 検索ハンドラ
   const searchInput = container.querySelector("#drive-search-input");
-  container.querySelector("#btn-drive-search").addEventListener("click", () => {
-    loadFiles(searchInput.value);
-  });
+  const doSearch = () => {
+    const q = searchInput.value.trim();
+    if (q) {
+      currentSearch = q;
+      searchDrive(q, false);
+    } else {
+      currentSearch = "";
+      loadFolder(currentFolderId, false);
+    }
+  };
+  container.querySelector("#btn-drive-search").addEventListener("click", doSearch);
   searchInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") loadFiles(searchInput.value);
+    if (e.key === "Enter") doSearch();
+  });
+
+  // 現在フォルダ一括追加ボタン
+  container.querySelector("#btn-drive-import-folder").addEventListener("click", () => {
+    handleImportFolder(currentFolderId, currentFolderName);
   });
 
   // 全選択・全解除
   container.querySelector("#btn-drive-select-all").addEventListener("click", () => {
-    container.querySelectorAll(".drive-file-chk").forEach((c) => { c.checked = true; });
-    updateCount();
+    displayedItems.forEach((it) => {
+      if (it.mimeType !== "application/vnd.google-apps.folder") {
+        selectedFileIds.add(it.id);
+      }
+    });
+    renderItems(displayedItems, false);
   });
   container.querySelector("#btn-drive-unselect-all").addEventListener("click", () => {
-    container.querySelectorAll(".drive-file-chk").forEach((c) => { c.checked = false; });
-    updateCount();
+    selectedFileIds.clear();
+    renderItems(displayedItems, false);
   });
 
   // 切断

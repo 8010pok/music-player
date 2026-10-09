@@ -177,9 +177,55 @@ export async function mount(root) {
   //   value をクリアしても取込に影響しない。クリアしないと同一ファイルの再選択で change が
   //   再発火せず「取込(または削除)→同じファイルを再追加」の導線が塞がる。
   refs.fileInput.addEventListener("change", (e) => { onFiles(refs, e.target.files); e.target.value = ""; });
-  refs.folderInput.addEventListener("change", (e) => { onFiles(refs, e.target.files); e.target.value = ""; });
+  refs.folderInput.addEventListener("change", (e) => {
+    if (!e.target.files || e.target.files.length === 0) {
+      if (appState.get().isIOS) {
+        toast("iOS ではフォルダ選択に対応していません。「ファイルを選択」または「Google Drive」をご利用ください", "err");
+      }
+    }
+    onFiles(refs, e.target.files);
+    e.target.value = "";
+  });
   refs.addBtn.addEventListener("click", () => refs.fileInput.click());
-  refs.addFolderBtn.addEventListener("click", () => refs.folderInput.click());
+  refs.addFolderBtn.addEventListener("click", () => {
+    if (appState.get().isIOS) {
+      openModal({
+        title: "📂 フォルダ追加について",
+        body: `
+          <div style="font-size: 13px; line-height: 1.6; color: var(--fg);">
+            <div style="margin-bottom: 12px;">
+              iOS / iPadOS のブラウザ仕様により、端末の「フォルダ選択（webkitdirectory）」は曲が取得できず 0 件になります。
+            </div>
+            <div style="background: var(--bg-surface); padding: 12px; border-radius: 8px; border: 1px solid var(--border-color); margin-bottom: 12px;">
+              <strong style="color: var(--accent);">フォルダ内の曲を追加する方法:</strong>
+              <div style="margin-top: 8px; line-height: 1.6;">
+                1. <strong>☁ Google Drive から追加（推奨）:</strong><br/>
+                Google Drive 内のフォルダをタップして、フォルダ丸ごと一括追加できます（本体容量消費ゼロ！）。<br/><br/>
+                2. <strong>📁 ファイルを選択:</strong><br/>
+                「ファイル」アプリで「…」➔「選択」から、フォルダ内の曲を全選択して追加できます。
+              </div>
+            </div>
+          </div>
+        `,
+        actions: [
+          { label: "キャンセル", onClick: () => {} },
+          {
+            label: "📁 ファイルを複数選択",
+            onClick: () => refs.fileInput.click(),
+          },
+          {
+            label: "☁ Google Drive からフォルダ追加",
+            primary: true,
+            onClick: () => {
+              if (refs.addGdriveBtn) refs.addGdriveBtn.click();
+            },
+          },
+        ],
+      });
+      return;
+    }
+    refs.folderInput.click();
+  });
   if (refs.addGdriveBtn) {
     refs.addGdriveBtn.addEventListener("click", () => {
       openDriveImportModal({
@@ -257,13 +303,13 @@ function render() {
       <div class="library-add">
         <div class="library-add-title">音源を追加 (Googleドライブ / iPad・iPhone内 / iCloud)</div>
         <div class="library-add-buttons">
-          <button class="btn primary" id="btn-add">📁 ファイルを選択</button>
-          <button class="btn primary" id="btn-add-folder">📂 フォルダを選択</button>
-          <button class="btn" id="btn-add-gdrive" title="Google Drive API 経由で追加">☁ Google Drive API</button>
+          <button class="btn primary" id="btn-add-gdrive" style="background: var(--accent); color: #fff; font-weight: bold;" title="Google Drive から曲やフォルダを一括追加">☁ Google Drive (フォルダ・曲追加)</button>
+          <button class="btn" id="btn-add">📁 ファイルを選択</button>
+          <button class="btn" id="btn-add-folder" title="PC用フォルダ選択 (iOSはGoogle Drive推奨)">📂 フォルダを選択</button>
         </div>
-        <div class="help" style="font-size: 11px; color: var(--fg-muted); margin-top: 6px; line-height: 1.5;">
-          💡 <strong>iPad / iPhone の場合:</strong> 【📁 ファイルを選択】から Google ドライブや iCloud Drive の曲を直接追加できます（Client ID 不要）。<br/>
-          ❓ <strong>ブラウズに Google ドライブ が出ない場合:</strong> iOSの「ファイル」アプリを開く ➔「ブラウズ」右上の「…」➔「サイドバーを編集」で <strong>Google ドライブをON</strong> にしてください。または Google ドライブ アプリ側で曲を選び「共有とエクスポート」➔「ファイルに保存」で端末内に保存してから選択できます。
+        <div class="help" style="font-size: 11px; color: var(--fg-muted); margin-top: 6px; line-height: 1.6;">
+          💡 <strong>Google Drive のフォルダを丸ごと追加したい場合:</strong> 【☁ Google Drive】を開くとフォルダ階層が表示され、<strong>「📂 このフォルダの曲を全追加」</strong> ボタンで一発インポートできます（本体ストレージ消費ゼロ！）。<br/>
+          ※ iOS / iPadOS ではブラウザ仕様により「📂 フォルダを選択」が非対応です。端末内の曲は【📁 ファイルを選択】から複数選択してください。
         </div>
         <input type="file" id="file-input" multiple
                accept=".mp3,.m4a,.m4b,.aac,.mp4,.flac,.ogg,.oga,.opus,.wav,.webm,audio/*"

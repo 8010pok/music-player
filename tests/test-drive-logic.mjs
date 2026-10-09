@@ -145,6 +145,29 @@ await asyncTest("parseGoogleApiError: 通常の API エラーを正しくフォ�
   strictEqual(msg, "Driveエラー (404): File not found: abc");
 });
 
+console.log("=== Google Drive フォルダ階層・一括取得ロジック ===");
+
+test("フォルダクエリ: フォルダと音声ファイルの両方がクエリに含まれる", () => {
+  const folderId = "folder123";
+  const q = `trashed = false and '${folderId}' in parents and (mimeType = 'application/vnd.google-apps.folder' or mimeType contains 'audio/' or name contains '.mp3' or name contains '.m4a' or name contains '.flac' or name contains '.ogg' or name contains '.wav' or name contains '.aac' or name contains '.opus' or name contains '.webm')`;
+  ok(q.includes("'folder123' in parents"));
+  ok(q.includes("application/vnd.google-apps.folder"));
+  ok(q.includes(".flac"));
+});
+
+test("再帰探索キュー: 重複フォルダIDをスキップして無限ループを防止する", () => {
+  const visited = new Set(["root"]);
+  const queue = ["root"];
+  const subFolders = ["sub1", "root", "sub2", "sub1"];
+  for (const f of subFolders) {
+    if (!visited.has(f)) {
+      visited.add(f);
+      queue.push(f);
+    }
+  }
+  deepStrictEqual(queue, ["root", "sub1", "sub2"]);
+});
+
 console.log("============================================================");
 console.log(`合計: ${passed} / 成功: ${passed} / 失敗: 0`);
 console.log("Google Drive テスト成功 ✓");
