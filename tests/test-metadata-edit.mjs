@@ -93,6 +93,36 @@ test("アルバム一括編集: 属する全トラックの album, albumArtist, 
   strictEqual(updatedTracks[1].artist, "Artist B");
 });
 
+test("アルバム一括編集: トラックアーティスト統一・ジャンル・アートワーク指定時の反映", () => {
+  const tracks = [
+    { id: "t-1", title: "Track 1", artist: "Unknown Artist", album: "Old Album", year: "2010" },
+    { id: "t-2", title: "Track 2", artist: "Another Artist", album: "Old Album", year: "2010" },
+  ];
+
+  const mockBlob = { size: 1234, type: "image/jpeg" };
+  const patch = {
+    album: "Official Album",
+    albumArtist: "Main Artist",
+    artist: "Main Artist", // 全曲統一アーティスト
+    year: "2023",
+    genre: "J-Pop",
+    artworkBlob: mockBlob,
+    userEdited: true,
+  };
+
+  const updatedTracks = tracks.map((t) => ({ ...t, ...patch }));
+
+  for (const t of updatedTracks) {
+    strictEqual(t.album, "Official Album");
+    strictEqual(t.albumArtist, "Main Artist");
+    strictEqual(t.artist, "Main Artist");
+    strictEqual(t.year, "2023");
+    strictEqual(t.genre, "J-Pop");
+    strictEqual(t.artworkBlob, mockBlob);
+    strictEqual(t.userEdited, true);
+  }
+});
+
 console.log("=== 再スキャン保護ロジック ===");
 
 test("再スキャン保護: userEdited: true の曲はファイルから再抽出されたメタデータで上書きされない", () => {

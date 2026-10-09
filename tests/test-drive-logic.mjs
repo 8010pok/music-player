@@ -14,6 +14,7 @@ import {
   driveFileIdFromTrackId,
   trackIdFromDriveFileId,
   parseGoogleApiError,
+  inferMetadataFromFileName,
 } from "../js/gdrive/drive-service.js";
 
 let passed = 0;
@@ -166,6 +167,37 @@ test("再帰探索キュー: 重複フォルダIDをスキップして無限ル�
     }
   }
   deepStrictEqual(queue, ["root", "sub1", "sub2"]);
+});
+
+console.log("=== 音源ファイル名・フォルダ名からのメタデータ推測 (inferMetadataFromFileName) ===");
+
+test("パターン1: '01. Artist - Title' をトラック番号・アーティスト・曲名に分解", () => {
+  const meta = inferMetadataFromFileName("01. YOASOBI - 夜に駆ける.flac", "THE BOOK");
+  strictEqual(meta.trackNo, "1");
+  strictEqual(meta.artist, "YOASOBI");
+  strictEqual(meta.title, "夜に駆ける");
+  strictEqual(meta.album, "THE BOOK");
+});
+
+test("パターン2: 'Artist - Title' をアーティスト・曲名に分解", () => {
+  const meta = inferMetadataFromFileName("RADWIMPS - 前前前世.mp3");
+  strictEqual(meta.trackNo, "");
+  strictEqual(meta.artist, "RADWIMPS");
+  strictEqual(meta.title, "前前前世");
+});
+
+test("パターン3: '02 Title' をトラック番号・曲名に分解、アルバム名からフォールバック", () => {
+  const meta = inferMetadataFromFileName("02 群青.flac", "THE BOOK");
+  strictEqual(meta.trackNo, "2");
+  strictEqual(meta.title, "群青");
+  strictEqual(meta.album, "THE BOOK");
+  strictEqual(meta.artist, "THE BOOK");
+});
+
+test("拡張子のみの単一ファイル名", () => {
+  const meta = inferMetadataFromFileName("夜に駆ける.flac");
+  strictEqual(meta.title, "夜に駆ける");
+  strictEqual(meta.trackNo, "");
 });
 
 console.log("============================================================");

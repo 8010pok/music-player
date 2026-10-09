@@ -864,17 +864,17 @@ async function loadAndPlay(track) {
   //   `await this.store.getTrackData(track.id)` を実行してから
   //   loadAudio に渡しており、loadAudio 内部の pause→revoke→新src は
   //   すべて同期処理で完結している。Player でも同じ順序にする。
-  // getBlob は null(ファイル消失)だけでなく reject(IDB エラー/トランザクション
-  // abort)も起こりうる。reject を握って null に倒し、ハングや未処理 throw でなく
-  // 既存のスキップ経路に一本化する(再生ロジック本体には触れない)。
+  let blobErr = null;
   const blob = await getBlob(track.id).catch((e) => {
     console.warn("[audio-engine] getBlob 失敗", track.id, e);
+    blobErr = e;
     return null;
   });
   if (!blob) {
     console.warn("blob 未発見", track.id);
-    // 確定エラー: ファイル本体が見つからない → スキップ処理に進む
-    await skipToNextOnError("ファイル本体が見つかりません", track);
+    // 確定エラー: ファイル本体が見つからない、または Google Drive 等の取得エラー → スキップ処理に進む
+    const reason = (blobErr && blobErr.message) ? blobErr.message : "ファイル本体が見つかりません";
+    await skipToNextOnError(reason, track);
     return;
   }
 

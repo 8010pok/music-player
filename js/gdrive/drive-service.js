@@ -304,11 +304,14 @@ export async function fetchFolderAudioFilesRecursive(rootFolderId, { onProgress 
   if (!token) throw new Error("Google Drive に接続されていません");
 
   const audioFiles = [];
-  const folderQueue = [rootFolderId];
+  const folderQueue = [{ id: rootFolderId, name: "" }];
   const visitedFolders = new Set([rootFolderId]);
 
   while (folderQueue.length > 0) {
-    const curFolderId = folderQueue.shift();
+    const curFolder = folderQueue.shift();
+    const curFolderId = curFolder.id;
+    const curFolderName = curFolder.name;
+
     if (typeof onProgress === "function") {
       onProgress(`フォルダを探索中 (検出: ${audioFiles.length} 曲)…`);
     }
@@ -327,9 +330,10 @@ export async function fetchFolderAudioFilesRecursive(rootFolderId, { onProgress 
         if (item.mimeType === "application/vnd.google-apps.folder") {
           if (!visitedFolders.has(item.id)) {
             visitedFolders.add(item.id);
-            folderQueue.push(item.id);
+            folderQueue.push({ id: item.id, name: item.name });
           }
         } else {
+          item.folderName = curFolderName;
           audioFiles.push(item);
         }
       }
@@ -354,59 +358,178 @@ export async function listDriveAudioFiles({ query = "", pageToken = null, pageSi
 }
 
 /**
- * Google Drive から音源ファイルの Blob をダウンロード
+ * Google Drive から音源ファイルの Blob をダウンロード (リトライ機能付き)
  * @param {string} fileId
- * @param {{ onProgress?: (loaded: number, total: number) => void }} [opts]
+ * @param {{ onProgress?: (loaded: number, total: number) => void, maxRetries?: number }} [opts]
  * @returns {Promise<Blob>}
  */
-export async function fetchDriveAudioBlob(fileId, { onProgress } = {}) {
+export async function fetchDriveAudioBlob(fileId, { onProgress, maxRetries = 3 } = {}) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const token = await getDriveToken();
+      if (!token) throw new Error("Google Drive に接続されていません。設定画面で接続してください。");
+
+      const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (!res.ok) {
+        if (res.status === 401) {
+          _cachedToken = null;
+          throw new Error("Google Drive の認証期限が切れました (401)。再接続してください。");
+        }
+        if (res.status === 403) {
+          const errMsg = await parseGoogleApiError(res, "Google Drive 権限エラー (403)");
+          throw new Error(errMsg);
+        }
+        if (res.status >= 500 || res.status === 429) {
+          const errMsg = await parseGoogleApiError(res, `Google Drive 一時エラー (${res.status})`);
+          if (attempt < maxRetries) {
+            await new Promise((r) => setTimeout(r, attempt * 1000));
+            continue;
+          }
+          throw new Error(errMsg);
+        }
+        const errMsg = await parseGoogleApiError(res, "Google Drive ダウンロード失敗");
+        throw new Error(errMsg);
+      }
+
+      // プログレス監視付きのダウンロード
+      if (typeof onProgress === "function" && res.body) {
+        const contentLength = res.headers.get("Content-Length");
+        const total = contentLength ? parseInt(contentLength, 10) : 0;
+        const reader = res.body.getReader();
+        const chunks = [];
+        let loaded = 0;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          loaded += value.length;
+          onProgress(loaded, total);
+        }
+
+        const contentType = res.headers.get("Content-Type") || "audio/mpeg";
+        return new Blob(chunks, { type: contentType });
+      }
+
+      return await res.blob();
+    } catch (err) {
+      lastError = err;
+      if (err.message && (err.message.includes("401") || err.message.includes("403") || err.message.includes("接続されていません"))) {
+        throw err;
+      }
+      if (attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, attempt * 800));
+      }
+    }
+  }
+
+  throw lastError || new Error("Google Drive 音源のダウンロードに失敗しました");
+}
+
+/**
+ * Google Drive から音源ファイルの先頭ヘッダ部分（maxBytes）のみを取得
+ * FLAC や MP3 のメタデータ解析をフルダウンロードせず高速に行う（通信量・ストレージ節約）
+ * @param {string} fileId
+ * @param {number} [maxBytes=262144] 256KB
+ * @returns {Promise<Blob|null>}
+ */
+export async function fetchDriveAudioHeader(fileId, maxBytes = 262144) {
   const token = await getDriveToken();
-  if (!token) throw new Error("Google Drive に接続されていません。設定画面で接続してください。");
+  if (!token) return null;
 
   const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`;
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  try {
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Range: `bytes=0-${maxBytes - 1}`,
+      },
+    });
 
-  if (!res.ok) {
-    if (res.status === 401) {
-      await disconnectDrive();
-      throw new Error("Google Drive の認証期限が切れました (401)。再接続してください。");
-    }
-    const errMsg = await parseGoogleApiError(res, "Google Drive ダウンロード失敗");
-    throw new Error(errMsg);
-  }
+    if (!res.ok && res.status !== 206) return null;
 
-  // プログレス監視付きのダウンロード
-  if (typeof onProgress === "function" && res.body) {
-    const contentLength = res.headers.get("Content-Length");
-    const total = contentLength ? parseInt(contentLength, 10) : 0;
-    const reader = res.body.getReader();
-    const chunks = [];
-    let loaded = 0;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      loaded += value.length;
-      onProgress(loaded, total);
+    if (res.body) {
+      const reader = res.body.getReader();
+      const chunks = [];
+      let loaded = 0;
+      while (loaded < maxBytes) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        loaded += value.length;
+      }
+      try { await reader.cancel(); } catch {}
+      const contentType = res.headers.get("Content-Type") || "audio/flac";
+      return new Blob(chunks, { type: contentType });
     }
 
-    const contentType = res.headers.get("Content-Type") || "audio/mpeg";
-    return new Blob(chunks, { type: contentType });
+    return await res.blob();
+  } catch (err) {
+    console.warn("[drive-service] ヘッダ取得スキップ:", fileId, err);
+    return null;
+  }
+}
+
+/**
+ * 音源ファイル名および配置フォルダ名からメタデータを推測
+ * 例:
+ *  "01. YOASOBI - 夜に駆ける.flac" -> trackNo: "1", artist: "YOASOBI", title: "夜に駆ける"
+ *  "YOASOBI - 夜に駆ける.mp3"     -> artist: "YOASOBI", title: "夜に駆ける"
+ *  "01 夜に駆ける.flac"           -> trackNo: "1", title: "夜に駆ける"
+ * @param {string} filename
+ * @param {string} [folderName=""]
+ * @returns {{ title: string, artist: string, album: string, trackNo: string }}
+ */
+export function inferMetadataFromFileName(filename, folderName = "") {
+  const base = stripExt(filename).trim();
+  let trackNo = "";
+  let artist = "";
+  let title = base;
+  const album = folderName && folderName !== "root" ? folderName : "";
+
+  // パターン 1: "01. Artist - Title" または "01 - Artist - Title" または "01.Artist - Title"
+  let match = base.match(/^(\d+)[\s._-]+([^-–—]+)\s*[-–—]\s*(.+)$/);
+  if (match) {
+    trackNo = String(parseInt(match[1], 10));
+    artist = match[2].trim();
+    title = match[3].trim();
+  } else {
+    // パターン 2: "Artist - Title"
+    match = base.match(/^([^-–—]+)\s*[-–—]\s*(.+)$/);
+    if (match) {
+      artist = match[1].trim();
+      title = match[2].trim();
+    } else {
+      // パターン 3: "01 Title" または "01. Title" または "01_Title"
+      match = base.match(/^(\d+)[\s._-]+(.+)$/);
+      if (match) {
+        trackNo = String(parseInt(match[1], 10));
+        title = match[2].trim();
+      }
+    }
   }
 
-  return await res.blob();
+  return {
+    title: title || base || "(無題)",
+    artist: artist || (album ? album : ""),
+    album: album || "",
+    trackNo,
+  };
 }
 
 /**
  * 選択した Drive ファイル群を IndexedDB ライブラリにインポート
  * @param {Array<object>} driveFiles
- * @param {{ cacheBlobs?: boolean, onProgress?: (current: number, total: number, file: object) => void }} [opts]
+ * @param {{ cacheBlobs?: boolean, defaultAlbumName?: string, onProgress?: (current: number, total: number, file: object) => void }} [opts]
  * @returns {Promise<{ added: number, failed: number }>}
  */
-export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false, onProgress } = {}) {
+export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false, defaultAlbumName = "", onProgress } = {}) {
   let added = 0;
   let failed = 0;
 
@@ -419,6 +542,8 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
     try {
       const trackId = trackIdFromDriveFileId(file.id);
       const existing = await getTrack(trackId);
+      const folder = file.folderName || defaultAlbumName || "";
+      const inferred = inferMetadataFromFileName(file.name, folder);
 
       if (cacheBlobs) {
         // Blob をダウンロードして完全メタデータを抽出
@@ -429,15 +554,19 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           duration = await readDurationViaAudio(blob);
         }
 
+        const title = meta.title || inferred.title || stripExt(file.name) || "(無題)";
+        const artist = (meta.artist && meta.artist !== "(不明アーティスト)") ? meta.artist : (inferred.artist || "(不明アーティスト)");
+        const album = (meta.album && meta.album !== "Google Drive") ? meta.album : (inferred.album || "Google Drive");
+
         const track = {
           id: trackId,
-          title: meta.title || stripExt(file.name),
-          artist: meta.artist || "(不明アーティスト)",
-          album: meta.album || "Google Drive",
+          title,
+          artist,
+          album,
           albumArtist: meta.albumArtist || "",
           year: meta.year || "",
           genre: meta.genre || "",
-          trackNo: meta.trackNo || "",
+          trackNo: meta.trackNo || inferred.trackNo || "",
           discNo: meta.discNo || "",
           duration: duration || 0,
           mime: meta.mime || file.mimeType || mimeFromName(file.name),
@@ -466,24 +595,66 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
         await putTrack(track, blob);
         added++;
       } else {
-        // メタデータレコードのみ作成（音源 Blob は再生時にオンデマンドで取得・キャッシュ）
+        // メタデータレコードを作成（音源 Blob は再生時にオンデマンドで取得・ストリーミング）
+        // Range リクエストで先頭 256KB のみ取得し、本体ダウンロード（ストレージ消費）なしでメタデータを高速解析
         const format = formatFromName(file.name) || "unknown";
         const mime = file.mimeType || mimeFromName(file.name);
-        const baseTitle = stripExt(file.name);
+
+        let extractedMeta = null;
+        try {
+          const headerBlob = await fetchDriveAudioHeader(file.id, 262144);
+          if (headerBlob && headerBlob.size > 0) {
+            extractedMeta = await extractMetadata(headerBlob, file.name);
+          }
+        } catch (e) {
+          console.warn("[drive-service] 先頭ヘッダメタデータ抽出失敗、推測へフォールバック:", file.name, e);
+        }
+
+        const title =
+          (existing && existing.title) ||
+          (extractedMeta && extractedMeta.title && extractedMeta.title !== "(無題)" && extractedMeta.title !== stripExt(file.name) ? extractedMeta.title : null) ||
+          inferred.title ||
+          (extractedMeta && extractedMeta.title) ||
+          stripExt(file.name) ||
+          "(無題)";
+
+        const artist =
+          (existing && existing.artist && existing.artist !== "(Google Drive)") ||
+          (extractedMeta && extractedMeta.artist && extractedMeta.artist !== "(不明アーティスト)" && !extractedMeta.artist.includes("Google Drive") ? extractedMeta.artist : null) ||
+          (inferred.artist && !inferred.artist.includes("Google Drive") ? inferred.artist : null) ||
+          (existing && existing.artist) ||
+          "(不明アーティスト)";
+
+        const album =
+          (existing && existing.album && existing.album !== "Google Drive") ||
+          (extractedMeta && extractedMeta.album && extractedMeta.album !== "Google Drive" ? extractedMeta.album : null) ||
+          inferred.album ||
+          (file.folderName && file.folderName !== "root" ? file.folderName : null) ||
+          (defaultAlbumName && defaultAlbumName !== "root" ? defaultAlbumName : null) ||
+          (existing && existing.album) ||
+          "Google Drive";
+
+        const albumArtist = (existing && existing.albumArtist) || (extractedMeta && extractedMeta.albumArtist) || "";
+        const year = (existing && existing.year) || (extractedMeta && extractedMeta.year) || "";
+        const genre = (existing && existing.genre) || (extractedMeta && extractedMeta.genre) || "";
+        const trackNo = (existing && existing.trackNo) || (extractedMeta && extractedMeta.trackNo) || inferred.trackNo || "";
+        const discNo = (existing && existing.discNo) || (extractedMeta && extractedMeta.discNo) || "";
+        const duration = (existing && existing.duration) || (extractedMeta && extractedMeta.duration) || 0;
+        const artworkBlob = (existing && existing.artworkBlob) || (extractedMeta && extractedMeta.artworkBlob) || null;
 
         const track = {
           id: trackId,
-          title: (existing && existing.title) || baseTitle || "(無題)",
-          artist: (existing && existing.artist) || "(Google Drive)",
-          album: (existing && existing.album) || "Google Drive",
-          albumArtist: (existing && existing.albumArtist) || "",
-          year: (existing && existing.year) || "",
-          genre: (existing && existing.genre) || "",
-          trackNo: (existing && existing.trackNo) || "",
-          discNo: (existing && existing.discNo) || "",
-          duration: (existing && existing.duration) || 0,
+          title,
+          artist,
+          album,
+          albumArtist,
+          year,
+          genre,
+          trackNo,
+          discNo,
+          duration,
           mime,
-          format,
+          format: (extractedMeta && extractedMeta.format) || format,
           addedAt: existing ? (existing.addedAt || Date.now()) : Date.now(),
           playCount: existing ? (existing.playCount || 0) : 0,
           lastPlayedAt: existing ? (existing.lastPlayedAt || 0) : 0,
@@ -491,7 +662,7 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           loved: existing ? !!existing.loved : false,
           fileSize: parseInt(file.size, 10) || 0,
           originalName: file.name,
-          artworkBlob: (existing && existing.artworkBlob) || null,
+          artworkBlob,
           source: "gdrive",
           driveFileId: file.id,
           cached: false,
@@ -723,6 +894,7 @@ export async function openDriveImportModal({ onImported } = {}) {
           try {
             const { added, failed } = await importDriveFilesToLibrary(selectedFiles, {
               cacheBlobs: cacheNow,
+              defaultAlbumName: currentFolderName,
               onProgress: (cur, tot, file) => {
                 progressEl.textContent = `追加中 ${cur} / ${tot}: ${escapeHtml(file.name)}…`;
               },
@@ -825,6 +997,7 @@ export async function openDriveImportModal({ onImported } = {}) {
 
       const { added, failed } = await importDriveFilesToLibrary(audioFiles, {
         cacheBlobs: cacheNow,
+        defaultAlbumName: folderName,
         onProgress: (cur, tot, file) => {
           progressEl.textContent = `追加中 ${cur} / ${tot}: ${escapeHtml(file.name)}…`;
         },
