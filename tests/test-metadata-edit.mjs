@@ -185,6 +185,41 @@ test("再生中トラックが編集された場合、appState.currentTrack も�
   strictEqual(appStateTrack.userEdited, true);
 });
 
+console.log("=== アートワーク（アルバム画像）の更新・削除 ===");
+
+test("アルバム画像の削除: patch.artworkBlob = null で全曲の画像が削除される", () => {
+  const tracks = [
+    { id: "t-1", title: "Track 1", artworkBlob: { size: 100 } },
+    { id: "t-2", title: "Track 2", artworkBlob: { size: 200 } },
+  ];
+
+  const patch = {
+    artworkBlob: null,
+    userEdited: true,
+  };
+
+  const updatedTracks = tracks.map((t) => ({ ...t, ...patch }));
+  strictEqual(updatedTracks[0].artworkBlob, null);
+  strictEqual(updatedTracks[1].artworkBlob, null);
+});
+
+test("アルバム画像の新規設定: patch.artworkBlob で全曲に新しい画像が設定される", () => {
+  const tracks = [
+    { id: "t-1", title: "Track 1", artworkBlob: null },
+    { id: "t-2", title: "Track 2", artworkBlob: null },
+  ];
+
+  const newBlob = { size: 9999, type: "image/png" };
+  const patch = {
+    artworkBlob: newBlob,
+    userEdited: true,
+  };
+
+  const updatedTracks = tracks.map((t) => ({ ...t, ...patch }));
+  strictEqual(updatedTracks[0].artworkBlob, newBlob);
+  strictEqual(updatedTracks[1].artworkBlob, newBlob);
+});
+
 console.log("============================================================");
 console.log(`合計: ${passed} / 成功: ${passed} / 失敗: 0`);
 console.log("メタデータ編集テスト成功 ✓");

@@ -52,10 +52,14 @@ export async function mount(root) {
   });
   refs.playAllBtn.addEventListener("click", () => playAlbum(false));
   refs.playShuffleBtn.addEventListener("click", () => playAlbum(true));
+  const openAlbumEditor = () => {
+    editAlbumMetadata(album, () => mount(root));
+  };
   if (refs.editAlbumBtn) {
-    refs.editAlbumBtn.addEventListener("click", () => {
-      editAlbumMetadata(album, () => mount(root));
-    });
+    refs.editAlbumBtn.addEventListener("click", openAlbumEditor);
+  }
+  if (refs.artWrapBtn) {
+    refs.artWrapBtn.addEventListener("click", openAlbumEditor);
   }
   refs.list.addEventListener("click", (e) => onListClick(e, root));
 
@@ -105,8 +109,9 @@ function render(alb) {
       </div>
 
       <div class="album-detail-header">
-        <div class="album-detail-art-wrap">
+        <div class="album-detail-art-wrap" id="btn-album-art-wrap" title="クリックしてアルバム画像・情報を変更" style="cursor: pointer; position: relative;">
           ${artImg}
+          <div class="album-detail-art-badge" style="position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.65); color: #fff; font-size: 10px; text-align: center; padding: 4px 2px; backdrop-filter: blur(4px);">📷 画像を変更</div>
         </div>
         <div class="album-detail-info">
           <div class="album-detail-type">アルバム</div>
@@ -119,7 +124,7 @@ function render(alb) {
       <div class="album-detail-actions">
         <button class="btn primary" id="btn-album-play-all">▶ すべて再生</button>
         <button class="btn" id="btn-album-play-shuffle">🔀 シャッフル再生</button>
-        <button class="btn" id="btn-album-edit" style="grid-column: 1 / -1;">✏ アルバム情報を編集</button>
+        <button class="btn" id="btn-album-edit" style="grid-column: 1 / -1;">✏ アルバム情報・画像を変更</button>
       </div>
 
       <ul class="album-track-list" id="album-track-list">
@@ -185,6 +190,7 @@ function renderTrackRows(alb) {
 function collectRefs(root) {
   return {
     backBtn: root.querySelector("#btn-album-back"),
+    artWrapBtn: root.querySelector("#btn-album-art-wrap"),
     playAllBtn: root.querySelector("#btn-album-play-all"),
     playShuffleBtn: root.querySelector("#btn-album-play-shuffle"),
     editAlbumBtn: root.querySelector("#btn-album-edit"),

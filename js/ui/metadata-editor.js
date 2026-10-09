@@ -11,6 +11,7 @@
 import { openModal, toast, escapeHtml, escapeAttr } from "./components.js";
 import { updateTrack } from "../store/library-db.js";
 import { appState } from "../state.js";
+import { releaseArtwork, getArtworkUrl } from "./artwork-cache.js";
 import { searchTrackMetadata, searchAlbumMetadata, fetchArtworkBlob } from "../metadata/musicbrainz.js";
 
 /**
@@ -23,7 +24,9 @@ export function editTrackMetadata(track, onUpdated) {
   if (!track || !track.id) return Promise.resolve(null);
 
   return new Promise((resolve) => {
-    let pendingArtworkBlob = null;
+    let pendingArtworkBlob = undefined;
+    const initialArtUrl = track.artworkBlob ? getArtworkUrl(track) : null;
+    let localPreviewUrl = null;
 
     const body = document.createElement("div");
     body.className = "metadata-form";
@@ -43,6 +46,30 @@ export function editTrackMetadata(track, onUpdated) {
           <button type="button" class="btn primary" id="btn-meta-search" style="padding: 4px 10px; font-size: 12px; white-space: nowrap;">検索</button>
         </div>
         <div id="meta-search-results" style="max-height: 180px; overflow-y: auto; margin-top: 8px; display: none;"></div>
+      </div>
+
+      <!-- ジャケット写真プレビュー & 変更 -->
+      <div class="modal-row" style="margin-bottom: 12px; background: var(--bg-surface); padding: 10px; border-radius: 8px; border: 1px solid var(--border-color);">
+        <label style="font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 8px; display: block;">
+          🖼 ジャケット画像
+        </label>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div id="meta-track-art-box" style="width: 64px; height: 64px; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: center; overflow: hidden; flex-shrink: 0; box-shadow: 0 2px 6px rgba(0,0,0,0.2);"></div>
+          <div style="display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0;">
+            <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+              <label for="meta-track-file-input" class="btn" style="padding: 4px 10px; font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; margin: 0;">
+                📁 画像を選択…
+              </label>
+              <input type="file" id="meta-track-file-input" accept="image/png, image/jpeg, image/webp, image/gif, image/*" style="display: none;" />
+              <button type="button" class="btn danger" id="btn-meta-track-remove-art" style="padding: 4px 8px; font-size: 11px;">
+                ✕ 削除
+              </button>
+            </div>
+            <div id="meta-track-art-status" style="font-size: 11px; color: var(--fg-muted); line-height: 1.3;">
+              現在の画像
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="modal-row">
@@ -81,10 +108,71 @@ export function editTrackMetadata(track, onUpdated) {
           <input type="text" id="meta-genre" value="${escapeAttr(track.genre || "")}" placeholder="ジャンル" />
         </div>
       </div>
-      <div id="meta-art-preview" style="margin-top: 8px; font-size: 11px; color: var(--success); display: none;">
-        ✓ アートワーク（ジャケット写真）が選択されました
-      </div>
     `;
+
+    // アートワークプレビュー描画
+    const renderTrackArtPreview = () => {
+      const box = body.querySelector("#meta-track-art-box");
+      const status = body.querySelector("#meta-track-art-status");
+      const removeBtn = body.querySelector("#btn-meta-track-remove-art");
+      if (!box) return;
+
+      if (localPreviewUrl) {
+        try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+        localPreviewUrl = null;
+      }
+
+      let displayUrl = null;
+      if (pendingArtworkBlob instanceof Blob) {
+        localPreviewUrl = URL.createObjectURL(pendingArtworkBlob);
+        displayUrl = localPreviewUrl;
+      } else if (pendingArtworkBlob === null) {
+        displayUrl = null;
+      } else {
+        displayUrl = initialArtUrl;
+      }
+
+      if (displayUrl) {
+        box.innerHTML = `<img src="${escapeAttr(displayUrl)}" style="width: 100%; height: 100%; object-fit: cover; display: block;" />`;
+        if (removeBtn) removeBtn.style.display = "inline-flex";
+      } else {
+        box.innerHTML = `<div style="font-size: 26px;">🎵</div>`;
+        if (removeBtn) removeBtn.style.display = "none";
+      }
+
+      if (status) {
+        if (pendingArtworkBlob instanceof Blob) {
+          const sizeKb = Math.round(pendingArtworkBlob.size / 1024);
+          status.innerHTML = `<span style="color: var(--success); font-weight: 600;">✓ 新しい画像を設定中 (${sizeKb} KB)</span>`;
+        } else if (pendingArtworkBlob === null) {
+          status.innerHTML = `<span style="color: var(--err); font-weight: 600;">✕ 画像を削除（未設定になります）</span>`;
+        } else {
+          status.textContent = initialArtUrl ? "現在の画像" : "画像なし";
+        }
+      }
+    };
+
+    renderTrackArtPreview();
+
+    // 画像ファイル選択ハンドラ
+    const trackFileInput = body.querySelector("#meta-track-file-input");
+    trackFileInput?.addEventListener("change", (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      if (!file.type.startsWith("image/")) {
+        toast("画像ファイルを選択してください", "err");
+        return;
+      }
+      pendingArtworkBlob = file;
+      renderTrackArtPreview();
+      toast("画像を選択しました。「保存」で反映されます", "ok");
+    });
+
+    body.querySelector("#btn-meta-track-remove-art")?.addEventListener("click", () => {
+      pendingArtworkBlob = null;
+      renderTrackArtPreview();
+      toast("画像を削除に設定しました", "info");
+    });
 
     // 検索ハンドラ
     const searchInput = body.querySelector("#meta-search-input");
@@ -139,9 +227,11 @@ export function editTrackMetadata(track, onUpdated) {
 
             if (sel.artworkUrl) {
               btn.textContent = "画像取得…";
-              pendingArtworkBlob = await fetchArtworkBlob(sel.artworkUrl);
-              const preview = body.querySelector("#meta-art-preview");
-              if (preview) preview.style.display = "block";
+              const blob = await fetchArtworkBlob(sel.artworkUrl);
+              if (blob) {
+                pendingArtworkBlob = blob;
+                renderTrackArtPreview();
+              }
             }
 
             toast(`「${sel.title}」のメタデータを入力欄に反映しました`, "ok");
@@ -170,7 +260,10 @@ export function editTrackMetadata(track, onUpdated) {
       actions: [
         {
           label: "キャンセル",
-          onClick: () => resolve(null),
+          onClick: () => {
+            if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+            resolve(null);
+          },
         },
         {
           label: "保存",
@@ -197,19 +290,22 @@ export function editTrackMetadata(track, onUpdated) {
               userEdited: true,
             };
 
-            if (pendingArtworkBlob) {
+            if (pendingArtworkBlob !== undefined) {
               patch.artworkBlob = pendingArtworkBlob;
             }
 
             await updateTrack(track.id, patch);
+            releaseArtwork(track.id);
             Object.assign(track, patch);
 
             // 再生中の曲なら appState の currentTrack も更新
             const cur = appState.get().currentTrack;
             if (cur && cur.id === track.id) {
+              releaseArtwork(cur.id);
               appState.set({ currentTrack: { ...cur, ...patch } });
             }
 
+            if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
             toast("メタデータを更新しました", "ok");
             if (typeof onUpdated === "function") onUpdated(track);
             resolve(track);
@@ -230,7 +326,10 @@ export function editAlbumMetadata(album, onUpdated) {
   if (!album || !album.tracks || album.tracks.length === 0) return Promise.resolve(null);
 
   return new Promise((resolve) => {
-    let pendingArtworkBlob = null;
+    let pendingArtworkBlob = undefined;
+    const currentArtTrack = album.artworkTrack || album.tracks.find((t) => t.artworkBlob);
+    const initialArtUrl = currentArtTrack ? getArtworkUrl(currentArtTrack) : null;
+    let localPreviewUrl = null;
 
     const body = document.createElement("div");
     body.className = "metadata-form";
@@ -255,6 +354,30 @@ export function editAlbumMetadata(album, onUpdated) {
         <div id="meta-alb-search-results" style="max-height: 180px; overflow-y: auto; margin-top: 8px; display: none;"></div>
       </div>
 
+      <!-- アルバムジャケット画像プレビュー & 変更 -->
+      <div class="modal-row" style="margin-bottom: 12px; background: var(--bg-surface); padding: 10px; border-radius: 8px; border: 1px solid var(--border-color);">
+        <label style="font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 8px; display: block;">
+          🖼 アルバムジャケット画像（全曲に一括適用）
+        </label>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div id="meta-alb-art-box" style="width: 72px; height: 72px; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: center; overflow: hidden; flex-shrink: 0; box-shadow: 0 2px 6px rgba(0,0,0,0.2);"></div>
+          <div style="display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0;">
+            <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+              <label for="meta-alb-file-input" class="btn" style="padding: 4px 10px; font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; margin: 0;">
+                📁 画像を選択…
+              </label>
+              <input type="file" id="meta-alb-file-input" accept="image/png, image/jpeg, image/webp, image/gif, image/*" style="display: none;" />
+              <button type="button" class="btn danger" id="btn-meta-alb-remove-art" style="padding: 4px 8px; font-size: 11px;">
+                ✕ 削除
+              </button>
+            </div>
+            <div id="meta-alb-art-status" style="font-size: 11px; color: var(--fg-muted); line-height: 1.3;">
+              現在のアルバム画像
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="modal-row">
         <label for="meta-alb-title">アルバム名</label>
         <input type="text" id="meta-alb-title" value="${escapeAttr(album.title || "")}" placeholder="アルバム名" />
@@ -277,10 +400,71 @@ export function editAlbumMetadata(album, onUpdated) {
           <input type="text" id="meta-alb-genre" value="${escapeAttr(album.genre || "")}" placeholder="ジャンル" />
         </div>
       </div>
-      <div id="meta-alb-art-preview" style="margin-top: 8px; font-size: 11px; color: var(--success); display: none;">
-        ✓ アルバムジャケット画像が全曲に一括適用されます
-      </div>
     `;
+
+    // アートワークプレビュー描画
+    const renderAlbArtPreview = () => {
+      const box = body.querySelector("#meta-alb-art-box");
+      const status = body.querySelector("#meta-alb-art-status");
+      const removeBtn = body.querySelector("#btn-meta-alb-remove-art");
+      if (!box) return;
+
+      if (localPreviewUrl) {
+        try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+        localPreviewUrl = null;
+      }
+
+      let displayUrl = null;
+      if (pendingArtworkBlob instanceof Blob) {
+        localPreviewUrl = URL.createObjectURL(pendingArtworkBlob);
+        displayUrl = localPreviewUrl;
+      } else if (pendingArtworkBlob === null) {
+        displayUrl = null;
+      } else {
+        displayUrl = initialArtUrl;
+      }
+
+      if (displayUrl) {
+        box.innerHTML = `<img src="${escapeAttr(displayUrl)}" style="width: 100%; height: 100%; object-fit: cover; display: block;" />`;
+        if (removeBtn) removeBtn.style.display = "inline-flex";
+      } else {
+        box.innerHTML = `<div style="font-size: 26px;">💿</div>`;
+        if (removeBtn) removeBtn.style.display = "none";
+      }
+
+      if (status) {
+        if (pendingArtworkBlob instanceof Blob) {
+          const sizeKb = Math.round(pendingArtworkBlob.size / 1024);
+          status.innerHTML = `<span style="color: var(--success); font-weight: 600;">✓ 新しい画像を設定中 (${sizeKb} KB、全曲に反映)</span>`;
+        } else if (pendingArtworkBlob === null) {
+          status.innerHTML = `<span style="color: var(--err); font-weight: 600;">✕ 画像を削除（全曲から未設定になります）</span>`;
+        } else {
+          status.textContent = initialArtUrl ? "現在のアルバム画像" : "画像なし";
+        }
+      }
+    };
+
+    renderAlbArtPreview();
+
+    // 画像ファイル選択ハンドラ
+    const albFileInput = body.querySelector("#meta-alb-file-input");
+    albFileInput?.addEventListener("change", (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      if (!file.type.startsWith("image/")) {
+        toast("画像ファイルを選択してください", "err");
+        return;
+      }
+      pendingArtworkBlob = file;
+      renderAlbArtPreview();
+      toast("アルバム画像を選択しました。「全曲に一括保存」で反映されます", "ok");
+    });
+
+    body.querySelector("#btn-meta-alb-remove-art")?.addEventListener("click", () => {
+      pendingArtworkBlob = null;
+      renderAlbArtPreview();
+      toast("アルバム画像を削除に設定しました", "info");
+    });
 
     // アルバム検索ハンドラ
     const searchInput = body.querySelector("#meta-alb-search-input");
@@ -333,9 +517,11 @@ export function editAlbumMetadata(album, onUpdated) {
 
             if (sel.artworkUrl) {
               btn.textContent = "画像取得…";
-              pendingArtworkBlob = await fetchArtworkBlob(sel.artworkUrl);
-              const preview = body.querySelector("#meta-alb-art-preview");
-              if (preview) preview.style.display = "block";
+              const blob = await fetchArtworkBlob(sel.artworkUrl);
+              if (blob) {
+                pendingArtworkBlob = blob;
+                renderAlbArtPreview();
+              }
             }
 
             toast(`「${sel.title}」のアルバム情報を入力欄に反映しました`, "ok");
@@ -364,7 +550,10 @@ export function editAlbumMetadata(album, onUpdated) {
       actions: [
         {
           label: "キャンセル",
-          onClick: () => resolve(null),
+          onClick: () => {
+            if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+            resolve(null);
+          },
         },
         {
           label: "全曲に一括保存",
@@ -384,10 +573,13 @@ export function editAlbumMetadata(album, onUpdated) {
             };
             if (genre) patch.genre = genre;
             if (trackArtist) patch.artist = trackArtist;
-            if (pendingArtworkBlob) patch.artworkBlob = pendingArtworkBlob;
+            if (pendingArtworkBlob !== undefined) {
+              patch.artworkBlob = pendingArtworkBlob;
+            }
 
             for (const t of album.tracks) {
               await updateTrack(t.id, patch);
+              releaseArtwork(t.id);
               Object.assign(t, patch);
             }
 
@@ -395,14 +587,23 @@ export function editAlbumMetadata(album, onUpdated) {
             album.albumArtist = albumArtist;
             album.year = year;
             if (genre) album.genre = genre;
+            if (pendingArtworkBlob !== undefined) {
+              if (pendingArtworkBlob) {
+                album.artworkTrack = { ...album.tracks[0], artworkBlob: pendingArtworkBlob };
+              } else {
+                album.artworkTrack = null;
+              }
+            }
 
             // 再生中の曲が含まれていれば appState も同期
             const cur = appState.get().currentTrack;
             if (cur && album.tracks.some((t) => t.id === cur.id)) {
+              releaseArtwork(cur.id);
               appState.set({ currentTrack: { ...cur, ...patch } });
             }
 
-            toast(`${album.tracks.length} 曲のアルバム情報を一括更新しました`, "ok");
+            if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+            toast(`${album.tracks.length} 曲のアルバム情報と画像を更新しました`, "ok");
             if (typeof onUpdated === "function") onUpdated(album);
             resolve(album);
           },
