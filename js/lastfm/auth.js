@@ -160,3 +160,42 @@ export async function getAuth() {
     sessionKey: secret.sessionKey || null,
   };
 }
+
+/**
+ * 現在のフル認証セッションが有効かどうかを Last.fm API で検証する
+ * @returns {Promise<{ valid: boolean, username?: string, playcount?: number, error?: string, code?: number }>}
+ */
+export async function verifySession() {
+  const { apiKey, apiSecret, sessionKey } = await getAuth();
+  if (!apiKey || !apiSecret || !sessionKey) {
+    return { valid: false, error: "未認証です（セッションキーがありません）" };
+  }
+  try {
+    const res = await callPost("user.getInfo", {}, apiKey, apiSecret, sessionKey);
+    const u = res?.user;
+    if (u) {
+      if (u.name) {
+        setPublic({ username: u.name });
+        appState.set({ username: u.name });
+      }
+      return {
+        valid: true,
+        username: u.name || "",
+        playcount: parseInt(u.playcount || "0", 10),
+      };
+    }
+    return { valid: false, error: "ユーザー情報の取得に失敗しました" };
+  } catch (e) {
+    return {
+      valid: false,
+      code: e.code,
+      error: e.code === 9 ? "セッションが無効または期限切れです (code 9)。再認証してください。"
+           : e.code === 4 ? "認証に失敗しました (code 4)。再認証してください。"
+           : e.code === 14 ? "トークンが未認可です (code 14)。再認証してください。"
+           : e.code === 10 ? "API キーが無効です (code 10)。"
+           : e.code === 26 ? "API キーが停止されています (code 26)。"
+           : (e.message || "通信エラー"),
+    };
+  }
+}
+

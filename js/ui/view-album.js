@@ -6,13 +6,13 @@
  * - 曲一覧: ディスク/トラック番号順、複数ディスク時のDisc見出し、曲タップ再生
  */
 
-import { getAllTracks } from "../store/library-db.js";
+import { getAllTracks, deleteTrack, removeTrackFromAllPlaylists } from "../store/library-db.js";
 import { groupTracksIntoAlbums, parseTrackIndex } from "../metadata/album-util.js";
-import { setQueueAndPlay, setShuffleMode } from "../player/audio-engine.js";
+import { setQueueAndPlay, setShuffleMode, stopPlayback } from "../player/audio-engine.js";
 import { appState } from "../state.js";
-import { getArtworkUrl } from "./artwork-cache.js";
+import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
 import { go } from "../router.js";
-import { escapeHtml, escapeAttr, toast } from "./components.js";
+import { escapeHtml, escapeAttr, toast, confirm } from "./components.js";
 import { editTrackMetadata, editAlbumMetadata } from "./metadata-editor.js";
 
 let album = null;
@@ -53,10 +53,33 @@ export async function mount(root) {
   refs.playAllBtn.addEventListener("click", () => playAlbum(false));
   refs.playShuffleBtn.addEventListener("click", () => playAlbum(true));
   const openAlbumEditor = () => {
-    editAlbumMetadata(album, () => mount(root));
+    editAlbumMetadata(album, (updatedAlb) => {
+      if (!updatedAlb) {
+        go("albums");
+      } else {
+        mount(root);
+      }
+    });
   };
   if (refs.editAlbumBtn) {
     refs.editAlbumBtn.addEventListener("click", openAlbumEditor);
+  }
+  if (refs.deleteAlbumBtn) {
+    refs.deleteAlbumBtn.addEventListener("click", async () => {
+      const yes = await confirm(`アルバム「${album.title || "(無題)"}」と属する全 ${album.tracks.length} 曲をすべて削除しますか？\n（曲データは完全に削除されます）`, { danger: true, okLabel: "アルバムを削除" });
+      if (yes) {
+        for (const t of album.tracks) {
+          if (appState.get().currentTrack?.id === t.id) {
+            stopPlayback();
+          }
+          await deleteTrack(t.id).catch(() => {});
+          await removeTrackFromAllPlaylists(t.id).catch(() => {});
+          releaseArtwork(t.id);
+        }
+        toast(`アルバムと全 ${album.tracks.length} 曲を削除しました`, "ok");
+        go("albums");
+      }
+    });
   }
   if (refs.artWrapBtn) {
     refs.artWrapBtn.addEventListener("click", openAlbumEditor);
@@ -134,6 +157,14 @@ function render(alb) {
           <svg class="ic" viewBox="0 0 24 24"><path d="M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg>
           <span>シャッフル</span>
         </button>
+        <button class="album-action-btn secondary" id="btn-album-edit" title="アルバム情報・収録曲を一括編集">
+          <svg class="ic" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+          <span>一括編集</span>
+        </button>
+        <button class="album-action-btn secondary danger" id="btn-album-delete" title="アルバムを削除" style="color: #ff453a;">
+          <svg class="ic" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+          <span>削除</span>
+        </button>
       </div>
 
       <ul class="album-track-list" id="album-track-list">
@@ -189,6 +220,9 @@ function renderTrackRows(alb) {
           <button class="icon-btn edit-track-btn" data-act="edit" title="曲の情報を編集">
             <svg class="ic" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
           </button>
+          <button class="icon-btn delete-track-btn" data-act="delete" title="曲を削除" style="color: #ff453a;">
+            <svg class="ic" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+          </button>
           <span class="album-track-dur">${durStr}</span>
         </div>
       </li>
@@ -204,6 +238,8 @@ function collectRefs(root) {
     artWrapBtn: root.querySelector("#btn-album-art-wrap"),
     playAllBtn: root.querySelector("#btn-album-play-all"),
     playShuffleBtn: root.querySelector("#btn-album-play-shuffle"),
+    editAlbumBtn: root.querySelector("#btn-album-edit"),
+    deleteAlbumBtn: root.querySelector("#btn-album-delete"),
     list: root.querySelector("#album-track-list"),
   };
 }
@@ -216,6 +252,37 @@ async function onListClick(e, root) {
     const t = album.tracks.find((x) => x.id === id);
     if (t) {
       await editTrackMetadata(t, () => mount(root));
+    }
+    return;
+  }
+  if (btn && btn.dataset.act === "delete") {
+    const row = btn.closest(".track-row");
+    const id = row?.dataset.id;
+    const t = album.tracks.find((x) => x.id === id);
+    if (t) {
+      const yes = await confirm(`「${t.title || "(無題)"}」を削除しますか？`, { danger: true, okLabel: "削除" });
+      if (yes) {
+        if (appState.get().currentTrack?.id === t.id) {
+          stopPlayback();
+        }
+        try {
+          await deleteTrack(t.id);
+        } catch (err) {
+          console.warn("曲削除に失敗", err);
+          toast("削除に失敗しました", "err");
+          return;
+        }
+        await removeTrackFromAllPlaylists(t.id).catch(() => {});
+        releaseArtwork(t.id);
+        album.tracks = album.tracks.filter((x) => x.id !== t.id);
+        if (album.tracks.length === 0) {
+          toast("アルバムの全曲が削除されました", "ok");
+          go("albums");
+        } else {
+          toast("削除しました", "ok");
+          mount(root);
+        }
+      }
     }
     return;
   }

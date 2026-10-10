@@ -25,14 +25,16 @@ class AppState extends EventTarget {
       nowPlayingSent: false,
       scrobbledForCurrent: false,
       // スクロブル送信結果（再生画面の表示メッセージ切替に使用）
-      //   "none":    未送信 / 進捗 1 未満
-      //   "sending": 送信中（onScrobble 呼出後、結果待ち）
-      //   "sent":    Last.fm へ送信成功 (accepted)
-      //   "ignored": リクエストは成功したが Last.fm が拒否 (タイムスタンプ古い等)
-      //   "queued":  オフライン等で送信失敗 → キューに登録（後で flush）
-      //   "failed":  送信もキュー保存も失敗
-      //   "skipped": 未認証等で送信せず
+      //   "none":       未送信 / 進捗 1 未満
+      //   "sending":    送信中（onScrobble 呼出後、結果待ち）
+      //   "sent":       Last.fm へ送信成功 (accepted)
+      //   "ignored":    リクエストは成功したが Last.fm が拒否 (タイムスタンプ古い、アーティスト名無視等)
+      //   "queued":     オフライン等で送信失敗 → キューに登録（後で flush）
+      //   "failed":     送信もキュー保存も失敗
+      //   "skipped":    未認証等で送信せず
+      //   "auth_error": セッション無効 / 認証失敗（要再認証）
       scrobbleResult: "none",
+      scrobbleReason: null,
       // 未送信スクロブル（オフラインキュー）の件数。
       //   - scrobble.js の refreshBadge() がキュー操作後にこの値を更新する
       //   - 画面上部のステータスピル（app.js）と設定画面のキュー件数表示

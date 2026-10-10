@@ -1,23 +1,24 @@
 /**
  * メタデータ編集モーダル
  *
- * - 単一曲のメタデータ編集（タイトル、アーティスト、アルバム、アルバムアーティスト、トラック番号、ディスク番号、年、ジャンル）
- * - アルバム一括メタデータ編集（アルバム名、アルバムアーティスト、アーティスト一括、年、ジャンル）
- * - MusicBrainz & iTunes API からのメタデータ自動検索・ワンクリック反映機能
+ * - 単一曲のメタデータ編集（タイトル、アーティスト、アルバム、アルバムアーティスト、トラック番号、ディスク番号、年、ジャンル、曲削除）
+ * - アルバム一括メタデータ編集（アルバム名、アルバムアーティスト、アーティスト一括、年、ジャンル、全収録曲の個別タイトル・番号の一括編集、アルバム削除）
+ * - MusicBrainz & iTunes API からのメタデータ自動検索・トラックリスト一括流し込み機能
  * - 編集内容は IndexedDB (tracks) に永続化し、userEdited=true を付与して再スキャンからの上書きを防止
  * - 再生中の曲の場合は appState.currentTrack も即座に同期
  */
 
 import { openModal, toast, escapeHtml, escapeAttr } from "./components.js";
-import { updateTrack } from "../store/library-db.js";
+import { updateTrack, deleteTrack, removeTrackFromAllPlaylists } from "../store/library-db.js";
+import { stopPlayback } from "../player/audio-engine.js";
 import { appState } from "../state.js";
 import { releaseArtwork, getArtworkUrl } from "./artwork-cache.js";
-import { searchTrackMetadata, searchAlbumMetadata, fetchArtworkBlob } from "../metadata/musicbrainz.js";
+import { searchTrackMetadata, searchAlbumMetadata, fetchArtworkBlob, fetchAlbumTracklist, cleanQuery } from "../metadata/musicbrainz.js";
 
 /**
  * 1曲分のメタデータ編集モーダルを表示
  * @param {object} track
- * @param {(updatedTrack: object) => void} [onUpdated]
+ * @param {(updatedTrack: object|null) => void} [onUpdated]
  * @returns {Promise<object|null>}
  */
 export function editTrackMetadata(track, onUpdated) {
@@ -33,13 +34,15 @@ export function editTrackMetadata(track, onUpdated) {
 
     // 検索語の初期値: アーティストが "(Google Drive)" や "(不明アーティスト)" の場合はファイル名ベース
     const hasMeaningfulArtist = track.artist && !track.artist.includes("Google Drive") && !track.artist.includes("不明");
-    const initialQuery = `${hasMeaningfulArtist ? track.artist + " " : ""}${track.title && track.title !== "(無題)" ? track.title : track.originalName || ""}`.trim();
+    const cleanArtist = cleanQuery(track.artist || "");
+    const cleanTitle = cleanQuery(track.title || track.originalName || "");
+    const initialQuery = `${hasMeaningfulArtist && cleanArtist ? cleanArtist + " " : ""}${cleanTitle !== "(無題)" ? cleanTitle : cleanQuery(track.originalName || "")}`.trim();
 
     body.innerHTML = `
       <!-- MusicBrainz / iTunes 自動検索ボックス -->
       <div style="background: var(--bg-surface); padding: 10px; border-radius: 8px; border: 1px solid var(--border-color); margin-bottom: 12px;">
         <div style="font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 6px;">
-          🌐 メタデータを自動検索 (MusicBrainz / iTunes)
+          🌐 メタデータを自動検索 (MusicBrainz / iTunes 日本ストア優先)
         </div>
         <div style="display: flex; gap: 6px;">
           <input type="text" id="meta-search-input" value="${escapeAttr(initialQuery)}" placeholder="曲名やアーティスト名を入力…" style="flex: 1; font-size: 12px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--fg);" />
@@ -174,7 +177,7 @@ export function editTrackMetadata(track, onUpdated) {
       toast("画像を削除に設定しました", "info");
     });
 
-    // 検索ハンドラ
+    // 自動検索ハンドラ
     const searchInput = body.querySelector("#meta-search-input");
     const searchBtn = body.querySelector("#btn-meta-search");
     const resultsContainer = body.querySelector("#meta-search-results");
@@ -201,7 +204,7 @@ export function editTrackMetadata(track, onUpdated) {
               ${res.artworkUrl ? `<img src="${escapeAttr(res.artworkUrl)}" style="width: 32px; height: 32px; border-radius: 4px; object-fit: cover; flex-shrink: 0;" />` : `<div style="width: 32px; height: 32px; border-radius: 4px; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; font-size: 14px;">🎵</div>`}
               <div style="flex: 1; min-width: 0;">
                 <div style="font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.title)}</div>
-                <div style="color: var(--fg-muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.artist)} • ${escapeHtml(res.album || "アルバム不明")} (${escapeHtml(res.year || "年不明")})</div>
+                <div style="color: var(--fg-muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.artist)} • ${escapeHtml(res.album || "アルバム不明")} (${escapeHtml(res.source)})</div>
               </div>
             </div>
             <button type="button" class="btn btn-apply-meta" data-idx="${i}" style="padding: 3px 8px; font-size: 10px; white-space: nowrap; margin-left: 6px;">
@@ -234,7 +237,7 @@ export function editTrackMetadata(track, onUpdated) {
               }
             }
 
-            toast(`「${sel.title}」のメタデータを入力欄に反映しました`, "ok");
+            toast(`「${sel.title}」の情報を入力欄に反映しました`, "ok");
             resultsContainer.style.display = "none";
           });
         });
@@ -258,6 +261,31 @@ export function editTrackMetadata(track, onUpdated) {
       title: "曲の情報を編集",
       body,
       actions: [
+        {
+          label: "🗑 曲を削除",
+          danger: true,
+          onClick: async () => {
+            const confirmed = window.confirm(`「${track.title || "(無題)"}」をライブラリから完全に削除しますか？\n（本体・Google Drive音源データは保持されます）`);
+            if (!confirmed) return false;
+            if (appState.get().currentTrack?.id === track.id) {
+              stopPlayback();
+            }
+            try {
+              await deleteTrack(track.id);
+              await removeTrackFromAllPlaylists(track.id).catch(() => {});
+              releaseArtwork(track.id);
+              toast("曲を削除しました", "ok");
+              if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+              if (typeof onUpdated === "function") onUpdated(null);
+              resolve(null);
+              return true;
+            } catch (err) {
+              console.warn("曲削除失敗:", err);
+              toast("削除に失敗しました", "err");
+              return false;
+            }
+          },
+        },
         {
           label: "キャンセル",
           onClick: () => {
@@ -319,7 +347,7 @@ export function editTrackMetadata(track, onUpdated) {
 /**
  * アルバム全体の一括メタデータ編集モーダルを表示
  * @param {object} album
- * @param {(updatedAlbum: object) => void} [onUpdated]
+ * @param {(updatedAlbum: object|null) => void} [onUpdated]
  * @returns {Promise<object|null>}
  */
 export function editAlbumMetadata(album, onUpdated) {
@@ -334,18 +362,19 @@ export function editAlbumMetadata(album, onUpdated) {
     const body = document.createElement("div");
     body.className = "metadata-form";
 
-    const hasMeaningfulArtist = album.albumArtist && !album.albumArtist.includes("Google Drive") && !album.albumArtist.includes("不明");
-    const initialQuery = `${hasMeaningfulArtist ? album.albumArtist + " " : ""}${album.title && album.title !== "Google Drive" ? album.title : ""}`.trim();
+    const cleanArtist = cleanQuery(album.albumArtist || "");
+    const cleanAlb = cleanQuery(album.title || "");
+    const initialQuery = `${cleanArtist ? cleanArtist + " " : ""}${cleanAlb !== "Google Drive" ? cleanAlb : ""}`.trim();
 
     body.innerHTML = `
       <p style="font-size: 12px; color: var(--fg-muted); margin-bottom: 10px;">
-        このアルバムに属する全 <strong>${album.tracks.length} 曲</strong> の情報を一括で更新します。
+        このアルバムに属する全 <strong>${album.tracks.length} 曲</strong> の情報・トラックリストを一括で更新します。
       </p>
 
       <!-- MusicBrainz / iTunes アルバム自動検索ボックス -->
       <div style="background: var(--bg-surface); padding: 10px; border-radius: 8px; border: 1px solid var(--border-color); margin-bottom: 12px;">
         <div style="font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 6px;">
-          🌐 アルバム情報を自動検索 (MusicBrainz / iTunes)
+          🌐 アルバム＆曲目を自動検索 (MusicBrainz / iTunes 日本ストア優先)
         </div>
         <div style="display: flex; gap: 6px;">
           <input type="text" id="meta-alb-search-input" value="${escapeAttr(initialQuery)}" placeholder="アルバム名やアーティスト名を入力…" style="flex: 1; font-size: 12px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--fg);" />
@@ -387,7 +416,7 @@ export function editAlbumMetadata(album, onUpdated) {
         <input type="text" id="meta-alb-artist" value="${escapeAttr(album.albumArtist || "")}" placeholder="アルバムアーティスト" />
       </div>
       <div class="modal-row">
-        <label for="meta-alb-track-artist">全曲のアーティスト名も統一する (任意)</label>
+        <label for="meta-alb-track-artist">全曲のアーティスト名を統一する (任意)</label>
         <input type="text" id="meta-alb-track-artist" value="${escapeAttr(album.albumArtist || "")}" placeholder="全曲に適用するアーティスト名" />
       </div>
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
@@ -398,6 +427,25 @@ export function editAlbumMetadata(album, onUpdated) {
         <div class="modal-row">
           <label for="meta-alb-genre">ジャンル</label>
           <input type="text" id="meta-alb-genre" value="${escapeAttr(album.genre || "")}" placeholder="ジャンル" />
+        </div>
+      </div>
+
+      <!-- 収録曲の個別タイトル・トラック番号一括編集リスト -->
+      <div class="modal-row" style="margin-top: 14px; border-top: 1px solid var(--border-color); padding-top: 12px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+          <label style="font-size: 12px; font-weight: 600; color: var(--accent); margin: 0;">
+            🎵 収録曲の個別タイトル・番号 (${album.tracks.length}曲)
+          </label>
+          <span style="font-size: 10px; color: var(--fg-muted);">直接編集または検索結果から一括自動入力</span>
+        </div>
+        <div class="meta-album-tracklist" id="meta-alb-tracklist" style="display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow-y: auto; padding-right: 4px;">
+          ${album.tracks.map((t, i) => `
+            <div class="meta-album-track-row" data-track-id="${escapeAttr(t.id)}" style="display: flex; gap: 6px; align-items: center; background: var(--bg-surface); padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border-color);">
+              <input type="text" class="meta-track-no-input" value="${escapeAttr(t.trackNo || String(i + 1))}" placeholder="番号" style="width: 44px; text-align: center; font-size: 11px; padding: 4px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" title="トラック番号" />
+              <input type="text" class="meta-track-title-input" value="${escapeAttr(t.title || "")}" placeholder="曲名" style="flex: 1; min-width: 0; font-size: 11px; padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" title="曲名" />
+              <input type="text" class="meta-track-artist-input" value="${escapeAttr(t.artist || "")}" placeholder="アーティスト" style="width: 100px; font-size: 11px; padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" title="アーティスト（空欄ならアルバムアーティスト）" />
+            </div>
+          `).join("")}
         </div>
       </div>
     `;
@@ -493,7 +541,7 @@ export function editAlbumMetadata(album, onUpdated) {
               ${res.artworkUrl ? `<img src="${escapeAttr(res.artworkUrl)}" style="width: 32px; height: 32px; border-radius: 4px; object-fit: cover; flex-shrink: 0;" />` : `<div style="width: 32px; height: 32px; border-radius: 4px; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; font-size: 14px;">💿</div>`}
               <div style="flex: 1; min-width: 0;">
                 <div style="font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.title)}</div>
-                <div style="color: var(--fg-muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.artist)} • ${escapeHtml(res.year || "年不明")} (${res.trackCount ? res.trackCount + "曲" : ""})</div>
+                <div style="color: var(--fg-muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.artist)} • ${escapeHtml(res.year || "年不明")} (${res.trackCount ? res.trackCount + "曲" : ""}) [${escapeHtml(res.source)}]</div>
               </div>
             </div>
             <button type="button" class="btn btn-apply-alb-meta" data-idx="${i}" style="padding: 3px 8px; font-size: 10px; white-space: nowrap; margin-left: 6px;">
@@ -509,6 +557,9 @@ export function editAlbumMetadata(album, onUpdated) {
             const sel = results[idx];
             if (!sel) return;
 
+            btn.textContent = "曲目取得中…";
+            btn.disabled = true;
+
             body.querySelector("#meta-alb-title").value = sel.title || "";
             body.querySelector("#meta-alb-artist").value = sel.artist || "";
             body.querySelector("#meta-alb-track-artist").value = sel.artist || "";
@@ -516,7 +567,6 @@ export function editAlbumMetadata(album, onUpdated) {
             if (sel.genre) body.querySelector("#meta-alb-genre").value = sel.genre;
 
             if (sel.artworkUrl) {
-              btn.textContent = "画像取得…";
               const blob = await fetchArtworkBlob(sel.artworkUrl);
               if (blob) {
                 pendingArtworkBlob = blob;
@@ -524,7 +574,28 @@ export function editAlbumMetadata(album, onUpdated) {
               }
             }
 
-            toast(`「${sel.title}」のアルバム情報を入力欄に反映しました`, "ok");
+            // オンラインの収録曲リスト（トラックリスト）を取得して各曲へ反映
+            const onlineTracks = await fetchAlbumTracklist(sel);
+            if (onlineTracks && onlineTracks.length > 0) {
+              const rows = body.querySelectorAll(".meta-album-track-row");
+              rows.forEach((row, rowIdx) => {
+                const onlineSong = onlineTracks[rowIdx];
+                if (onlineSong) {
+                  const noInput = row.querySelector(".meta-track-no-input");
+                  const titleInput = row.querySelector(".meta-track-title-input");
+                  const artistInput = row.querySelector(".meta-track-artist-input");
+                  if (noInput && onlineSong.trackNo) noInput.value = onlineSong.trackNo;
+                  if (titleInput && onlineSong.title) titleInput.value = onlineSong.title;
+                  if (artistInput && onlineSong.artist) artistInput.value = onlineSong.artist;
+                }
+              });
+              toast(`「${sel.title}」の情報と ${Math.min(rows.length, onlineTracks.length)} 曲の曲名を反映しました`, "ok");
+            } else {
+              toast(`「${sel.title}」のアルバム情報を反映しました`, "ok");
+            }
+
+            btn.textContent = "一括反映";
+            btn.disabled = false;
             resultsContainer.style.display = "none";
           });
         });
@@ -549,6 +620,25 @@ export function editAlbumMetadata(album, onUpdated) {
       body,
       actions: [
         {
+          label: "🗑 アルバムを削除",
+          danger: true,
+          onClick: async () => {
+            const confirmed = window.confirm(`アルバム「${album.title || "(無題)"}」と属する全 ${album.tracks.length} 曲をすべて削除しますか？\n（曲データは完全に削除されます）`);
+            if (!confirmed) return false;
+            for (const t of album.tracks) {
+              if (appState.get().currentTrack?.id === t.id) stopPlayback();
+              await deleteTrack(t.id);
+              await removeTrackFromAllPlaylists(t.id).catch(() => {});
+              releaseArtwork(t.id);
+            }
+            toast(`アルバムと全 ${album.tracks.length} 曲を削除しました`, "ok");
+            if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+            if (typeof onUpdated === "function") onUpdated(null);
+            resolve(null);
+            return true;
+          },
+        },
+        {
           label: "キャンセル",
           onClick: () => {
             if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
@@ -565,22 +655,42 @@ export function editAlbumMetadata(album, onUpdated) {
             const year = body.querySelector("#meta-alb-year").value.trim();
             const genre = body.querySelector("#meta-alb-genre").value.trim();
 
-            const patch = {
+            const trackRows = body.querySelectorAll(".meta-album-track-row");
+            const trackPatchMap = new Map();
+            trackRows.forEach((row) => {
+              const tid = row.dataset.trackId;
+              const noVal = row.querySelector(".meta-track-no-input")?.value.trim();
+              const titleVal = row.querySelector(".meta-track-title-input")?.value.trim();
+              const artistVal = row.querySelector(".meta-track-artist-input")?.value.trim();
+              trackPatchMap.set(tid, {
+                trackNo: noVal,
+                title: titleVal,
+                artist: artistVal,
+              });
+            });
+
+            const basePatch = {
               album: albumName,
               albumArtist,
               year,
               userEdited: true,
             };
-            if (genre) patch.genre = genre;
-            if (trackArtist) patch.artist = trackArtist;
+            if (genre) basePatch.genre = genre;
             if (pendingArtworkBlob !== undefined) {
-              patch.artworkBlob = pendingArtworkBlob;
+              basePatch.artworkBlob = pendingArtworkBlob;
             }
 
             for (const t of album.tracks) {
-              await updateTrack(t.id, patch);
+              const perTrack = trackPatchMap.get(t.id) || {};
+              const individualPatch = { ...basePatch };
+              if (perTrack.title) individualPatch.title = perTrack.title;
+              if (perTrack.trackNo !== undefined && perTrack.trackNo !== "") individualPatch.trackNo = perTrack.trackNo;
+              if (perTrack.artist) individualPatch.artist = perTrack.artist;
+              else if (trackArtist) individualPatch.artist = trackArtist;
+
+              await updateTrack(t.id, individualPatch);
               releaseArtwork(t.id);
-              Object.assign(t, patch);
+              Object.assign(t, individualPatch);
             }
 
             album.title = albumName;
@@ -599,11 +709,12 @@ export function editAlbumMetadata(album, onUpdated) {
             const cur = appState.get().currentTrack;
             if (cur && album.tracks.some((t) => t.id === cur.id)) {
               releaseArtwork(cur.id);
-              appState.set({ currentTrack: { ...cur, ...patch } });
+              const curPatch = trackPatchMap.get(cur.id) || {};
+              appState.set({ currentTrack: { ...cur, ...basePatch, ...curPatch } });
             }
 
             if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
-            toast(`${album.tracks.length} 曲のアルバム情報と画像を更新しました`, "ok");
+            toast(`${album.tracks.length} 曲のアルバム情報と曲名を更新しました`, "ok");
             if (typeof onUpdated === "function") onUpdated(album);
             resolve(album);
           },

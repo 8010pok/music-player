@@ -460,6 +460,7 @@ function playPreloadedSync(index, track, url) {
     nowPlayingSent: false,
     scrobbledForCurrent: false,
     scrobbleResult: "none",
+    scrobbleReason: null,
   });
 
   state.userPausedExplicitly = false;
@@ -565,6 +566,7 @@ function advanceFromEnded() {
       nowPlayingSent: false,
       scrobbledForCurrent: false,
       scrobbleResult: "none",
+      scrobbleReason: null,
     });
     try { audioEl.currentTime = 0; } catch {}
     const p = audioEl.play();
@@ -802,6 +804,7 @@ export function stopPlayback() {
     nowPlayingSent: false,
     scrobbledForCurrent: false,
     scrobbleResult: "none",
+    scrobbleReason: null,
     // 再生コンテキスト（どのプレイリストから再生していたか）もクリア
     currentPlaylistId: null,
     currentPlaylistName: null,
@@ -916,6 +919,7 @@ async function loadAndPlay(track) {
         nowPlayingSent: false,
         scrobbledForCurrent: false,
         scrobbleResult: "none",
+        scrobbleReason: null,
       });
 
       // loadedmetadata を待つことで audio.duration を確定させる

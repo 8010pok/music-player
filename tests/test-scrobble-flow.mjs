@@ -471,6 +471,17 @@ describe("Last.fm timestamp 仕様準拠", () => {
     "差は 120 秒 = 進捗 1 達成までの再生時間");
 });
 
+describe("Last.fm 拒否理由 (ignoredMessage) & 認証エラーコード (4, 9, 14) 検証", () => {
+  assertEqual(SCROBBLE_IGNORED_MESSAGES[1], "アーティスト名が無視されました");
+  assertEqual(SCROBBLE_IGNORED_MESSAGES[2], "トラック名が無視されました");
+
+  const AUTH_ERR_CODES = new Set([4, 9, 14]);
+  assert(AUTH_ERR_CODES.has(9), "code 9 (Invalid session key) は要再認証");
+  assert(AUTH_ERR_CODES.has(4), "code 4 (Authentication Failed) は要再認証");
+  assert(AUTH_ERR_CODES.has(14), "code 14 (Unauthorized token) は要再認証");
+  assert(!AUTH_ERR_CODES.has(8), "code 8 (Operation failed) は一過性リトライ対象");
+});
+
 /* ============ 結果 ============ */
 
 setTimeout(() => {

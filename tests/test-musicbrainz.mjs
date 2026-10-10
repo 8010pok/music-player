@@ -3,7 +3,7 @@
  */
 
 import { strictEqual, ok } from "node:assert";
-import { searchTrackMetadata, searchAlbumMetadata, fetchArtworkBlob } from "../js/metadata/musicbrainz.js";
+import { searchTrackMetadata, searchAlbumMetadata, fetchArtworkBlob, cleanQuery, fetchAlbumTracklist } from "../js/metadata/musicbrainz.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -30,11 +30,25 @@ async function asyncTest(name, fn) {
 
 console.log("=== MusicBrainz & iTunes モジュール検証 ===");
 
+test("cleanQuery: 拡張子、Google Drive、トラック番号プレフィクスを除去", () => {
+  strictEqual(cleanQuery("01. YOASOBI - アイドル.flac"), "YOASOBI - アイドル");
+  strictEqual(cleanQuery("02 - 群青 (Google Drive).mp3"), "群青");
+  strictEqual(cleanQuery("Google Drive"), "");
+  strictEqual(cleanQuery("(不明アーティスト)"), "");
+});
+
 test("空クエリの場合は即座に空配列を返す", async () => {
   const tracks = await searchTrackMetadata("");
   const albums = await searchAlbumMetadata("");
   strictEqual(tracks.length, 0);
   strictEqual(albums.length, 0);
+});
+
+test("空入力の場合は fetchAlbumTracklist は空配列を返す", async () => {
+  const list1 = await fetchAlbumTracklist(null);
+  const list2 = await fetchAlbumTracklist({});
+  strictEqual(list1.length, 0);
+  strictEqual(list2.length, 0);
 });
 
 test("空URLの場合は fetchArtworkBlob は null を返す", async () => {

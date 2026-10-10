@@ -16,7 +16,7 @@
 
 import { appState } from "../state.js";
 import { getPublic, setPublic, getSecret, classifyAuth } from "../store/settings.js";
-import { prepareAuthorization, completeAuthorization, setReadOnlyKey, signOut, checkReadOnlyKey } from "../lastfm/auth.js";
+import { prepareAuthorization, completeAuthorization, setReadOnlyKey, signOut, checkReadOnlyKey, verifySession, getAuth } from "../lastfm/auth.js";
 import { count as queueCount, wipeQueue } from "../store/queue-db.js";
 import { wipeLibrary } from "../store/library-db.js";
 import { flushQueue, refreshBadge } from "../lastfm/scrobble.js";
@@ -319,6 +319,29 @@ export async function mount(root) {
   // btnKeyOnly は anonymous モードでのみ描画される
   // → 認証モードによっては null になりうるためオプショナルチェーンで登録
   refs.btnFullAuth?.addEventListener("click", () => startFullAuth());
+  refs.btnReauth?.addEventListener("click", () => startFullAuth());
+  refs.btnTestAuth?.addEventListener("click", async () => {
+    if (!navigator.onLine) {
+      toast("オフラインのため接続テストを実行できません", "info");
+      return;
+    }
+    const origText = refs.btnTestAuth.textContent;
+    refs.btnTestAuth.disabled = true;
+    refs.btnTestAuth.textContent = "確認中…";
+    try {
+      const res = await verifySession();
+      if (res.valid) {
+        toast(`✅ Last.fm 接続正常 (ユーザー: ${res.username || pub.username || "(不明)"}, 総再生数: ${res.playcount || 0})`, "ok", 4000);
+      } else {
+        toast(`❌ ${res.error}`, "err", 5000);
+      }
+    } catch (e) {
+      toast(`❌ 接続テスト失敗: ${e.message}`, "err");
+    } finally {
+      refs.btnTestAuth.disabled = false;
+      refs.btnTestAuth.textContent = origText;
+    }
+  });
   refs.btnKeyOnly?.addEventListener("click", () => startKeyOnly());
   refs.btnCompleteAuth?.addEventListener("click", () => completeAuth());
   refs.btnCancelAuth?.addEventListener("click", () => cancelAuth());
@@ -691,6 +714,17 @@ function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices, dr
         ${authMode === "authenticated" ? `
           <div class="settings-row">
             <div>
+              <div class="label">接続の確認・再認証</div>
+              <div class="help">Last.fm とのセッション有効性を確認、または再認証を行います</div>
+            </div>
+            <div style="display:flex;gap:6px;">
+              <button class="btn" id="btn-test-auth">接続テスト</button>
+              <button class="btn primary" id="btn-reauth">再認証</button>
+            </div>
+          </div>
+          ${renderPendingAuthBox()}
+          <div class="settings-row">
+            <div>
               <div class="label">スクロブルを有効にする</div>
               <div class="help">再生条件（30 秒以上の曲を 50% or 4 分再生）を満たした曲を Last.fm に送信</div>
             </div>
@@ -998,6 +1032,8 @@ function collect(root) {
     monoChk: root.querySelector("#mono-chk"),
     outputSel: root.querySelector("#output-sel"),
     btnFullAuth: root.querySelector("#btn-full-auth"),
+    btnReauth: root.querySelector("#btn-reauth"),
+    btnTestAuth: root.querySelector("#btn-test-auth"),
     btnKeyOnly: root.querySelector("#btn-key-only"),
     btnCompleteAuth: root.querySelector("#btn-complete-auth"),
     btnCancelAuth: root.querySelector("#btn-cancel-auth"),
@@ -1419,11 +1455,12 @@ async function startFullAuth() {
   if (authBusy) return; // 連打による二重 token 取得を防ぐ
   authBusy = true;
   try {
+  const curAuth = await getAuth().catch(() => ({}));
   const form = await promptForm("Last.fm 認証（フル）", [
-    { name: "apiKey", label: "API キー（32桁の16進）", placeholder: "" },
+    { name: "apiKey", label: "API キー（32桁の16進）", value: curAuth.apiKey || "", placeholder: "" },
     // シークレットは秘匿情報なので password 型でマスクする(肩越し盗み見/履歴残り防止)。
     // autocomplete="new-password" でパスワードマネージャ/Keychain への保存提案を抑止。
-    { name: "apiSecret", label: "シークレット（32桁の16進）", type: "password", autocomplete: "new-password", placeholder: "" },
+    { name: "apiSecret", label: "シークレット（32桁の16進）", value: curAuth.apiSecret || "", type: "password", autocomplete: "new-password", placeholder: "" },
   ]);
   if (!form) return;
   if (!form.apiKey || !form.apiSecret) {

@@ -78,7 +78,7 @@ export async function mount(root) {
   // scrobbleResult を含めることで、送信成功/キュー登録/失敗のメッセージを
   // 即座に反映できる。
   const unsub = appState.subscribe(
-    ["currentTrack", "isPlaying", "duration", "currentTime", "scrobbleProgress", "scrobbleResult", "shuffleMode", "repeatMode", "authState"],
+    ["currentTrack", "isPlaying", "duration", "currentTime", "scrobbleProgress", "scrobbleResult", "scrobbleReason", "shuffleMode", "repeatMode", "authState"],
     (s) => updateUI(refs, s)
   );
 
@@ -849,7 +849,14 @@ function updateUI(refs, s) {
         refs.scrobbleLabel.textContent = "スクロブル送信済";
         break;
       case "ignored":
-        refs.scrobbleLabel.textContent = "Last.fm に拒否されました";
+        refs.scrobbleLabel.textContent = s.scrobbleReason
+          ? `Last.fm に拒否されました (${s.scrobbleReason})`
+          : "Last.fm に拒否されました";
+        break;
+      case "auth_error":
+        refs.scrobbleLabel.textContent = s.scrobbleReason
+          ? `Last.fm 認証エラー (${s.scrobbleReason})`
+          : "Last.fm 認証エラー（設定画面で再認証してください）";
         break;
       default:
         // "sending" もしくは未確定: 送信処理は走ったが結果がまだ届いていない

@@ -177,11 +177,25 @@ export async function sendScrobble(track, _durationSec, startedAtMs) {
     const ignoredInfo = inspectScrobbleResponse(res);
     if (ignoredInfo) {
       console.warn("[scrobble] Last.fm に拒否されました", ignoredInfo);
+      const reasons = [...new Set(ignoredInfo.reasons || [])].filter(Boolean);
+      const reasonText = reasons.length ? reasons.join(" / ") : "詳細不明";
+      appState.set({ scrobbleReason: reasonText });
       return "ignored";
     }
+    appState.set({ scrobbleReason: null });
     return "sent";
   } catch (e) {
-    console.warn("scrobble 失敗 → キューへ", e);
+    console.warn("scrobble 失敗", e);
+    // 認証無効/セッション失効 (code 4, 9, 14) はキューに溜めず即時エラー表示
+    if (e && (e.code === 4 || e.code === 9 || e.code === 14)) {
+      const msg = e.code === 9 ? "セッションが無効または期限切れです。再認証してください"
+                : e.code === 14 ? "トークンが未認可です。設定から再認証してください"
+                : "認証に失敗しました。設定から再認証してください";
+      appState.set({ scrobbleReason: msg });
+      toast("Last.fm のセッションが無効です。設定画面で再認証してください。", "err");
+      return "auth_error";
+    }
+    appState.set({ scrobbleReason: null });
     try {
       await enqueue(payload);
       await refreshBadge();
