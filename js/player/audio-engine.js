@@ -104,6 +104,7 @@ const state = {
   preloadUrl: null,       // プリロード済み object URL（未使用なら revoke 対象）
   preloadToken: 0,        // プリロード要求の世代カウンタ（in-flight の stale 破棄用）
   preloadingId: null,     // 現在 getBlob 取得中のトラック id（二重取得防止）
+  lastSessionSaveAt: 0,   // 再生セッション状態の localStorage 自動保存スロットリング用
 };
 
 // 連続スキップで停止する閾値。これ以上連続でスキップしたら、無限ループの
@@ -809,6 +810,7 @@ export function stopPlayback() {
     try { navigator.mediaSession.metadata = null; } catch {}
     try { navigator.mediaSession.playbackState = "none"; } catch {}
   }
+  clearSessionState();
 }
 
 export function getAudioElement() { return audioEl; }
@@ -1095,6 +1097,7 @@ function onPlay() {
   appState.set({ isPlaying: true });
   state.lastTickAt = Date.now();
   if (navigator.mediaSession) navigator.mediaSession.playbackState = "playing";
+  saveSessionState();
   // ★ ここでは updateMediaPositionState を呼ばない。
   //   呼ぶと audio.currentTime（前曲の終端値が一瞬残る場合がある）が
   //   iOS に流れ、ロック画面の進捗バーが新曲の 40〜50% から始まる現象を
@@ -1133,6 +1136,7 @@ function onPause() {
   //     rate=0 で TypeError を投げる死にコードだったため復元しない(pause 位置は次の
   //     再生再開時の更新で反映される)。
   if (navigator.mediaSession) navigator.mediaSession.playbackState = "paused";
+  saveSessionState();
 }
 
 function flushSessionPlayed() {
@@ -1165,6 +1169,12 @@ function onTimeUpdate() {
   if (!state.transitioning && now - state.lastPositionUpdateAt > 1000) {
     updateMediaPositionState();
     state.lastPositionUpdateAt = now;
+  }
+
+  // 5秒ごとに再生位置を保存 (不意のタスクキルでも最新位置を復元可能にする)
+  if (!state.lastSessionSaveAt || now - state.lastSessionSaveAt > 5000) {
+    saveSessionState();
+    state.lastSessionSaveAt = now;
   }
 
   if (!appState.get().nowPlayingSent && cur >= 1) {
@@ -1502,25 +1512,98 @@ function setupMediaSession() {
  * 廃止する。iOS は PWA が真に終了したときには JS context 破棄に伴い
  * MediaSession を自動的に片付ける。
  *
- * デスクトップでタブ/PWAを閉じた場合の保険として beforeunload だけ残す。
- * （モバイルではほぼ発火しない）
+const SESSION_STORAGE_KEY = "music_player_session";
+
+/**
+ * 現在の再生セッション（現在曲、キュー、再生位置、プレイリスト情報）を localStorage に保存する
+ */
+export function saveSessionState() {
+  try {
+    const curTrack = appState.get().currentTrack;
+    if (!curTrack || !state.queue.length) return;
+    const session = {
+      trackId: curTrack.id,
+      queueIds: state.queue.map((t) => t.id),
+      queueIndex: state.queueIndex,
+      currentTime: Math.floor(audioEl.currentTime || 0),
+      currentPlaylistId: appState.get().currentPlaylistId || null,
+      currentPlaylistName: appState.get().currentPlaylistName || null,
+      updatedAt: Date.now(),
+    };
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+  } catch {}
+}
+
+/**
+ * 再生セッション保存を削除する（stopPlayback 時）
+ */
+export function clearSessionState() {
+  try {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+  } catch {}
+}
+
+/**
+ * アプリ起動時に前回の再生セッション（キューと曲）を復元する
+ * - 画面をタスクキル・再読み込みした際にも直前の曲とキューを即座に再表示
+ */
+export async function restoreSessionState() {
+  try {
+    const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return false;
+    const session = JSON.parse(raw);
+    if (!session || !session.trackId || !Array.isArray(session.queueIds) || session.queueIds.length === 0) {
+      return false;
+    }
+    // 既に再生中の曲がある場合は上書きしない
+    if (appState.get().currentTrack) return false;
+
+    const allTracks = await getAllTracks();
+    const trackMap = new Map(allTracks.map((t) => [t.id, t]));
+    const queueTracks = session.queueIds.map((id) => trackMap.get(id)).filter(Boolean);
+    if (queueTracks.length === 0) return false;
+
+    const curTrack = trackMap.get(session.trackId) || queueTracks[0];
+    const idx = Math.max(0, queueTracks.findIndex((t) => t.id === curTrack.id));
+
+    state.queue = queueTracks;
+    state.queueIndex = idx;
+    state.origQueue = null;
+    state.userPausedExplicitly = true; // 復元時は一時停止状態で待機
+
+    appState.set({
+      currentTrack: curTrack,
+      queue: queueTracks.map((t) => t.id),
+      queueIndex: idx,
+      duration: curTrack.duration || 0,
+      currentTime: session.currentTime || 0,
+      isPlaying: false,
+      currentPlaylistId: session.currentPlaylistId || null,
+      currentPlaylistName: session.currentPlaylistName || null,
+    });
+
+    updateMediaSessionMetadata(curTrack);
+    updateMediaPositionState({ position: session.currentTime || 0, duration: curTrack.duration });
+    return true;
+  } catch (e) {
+    console.warn("[audio-engine] restoreSessionState 失敗", e);
+    return false;
+  }
+}
+
+/**
+ * 終了系イベントのクリーンアップ & 状態退避
+ *
+ * ★ モバイル (iOS/Android) ではタスク切り替えや画面ロック、アプリスイッチャー移行時に
+ *   beforeunload が発火することがある。ここで audio.pause() や src 削除、MediaSession 解放を
+ *   行うとバックグラウンド再生が強制終了してしまうため、破壊的クリーンアップは一切行わない。
+ *   タブや PWA が真に終了した場合はブラウザが JS context と共に自動的に解放する。
+ *   ここでは終了直前の最新再生状態の退避 (saveSessionState) のみに留める。
  */
 function setupTerminationCleanup() {
-  const fullCleanup = () => {
-    try { audioEl.pause(); } catch {}
-    try { audioEl.removeAttribute("src"); audioEl.load(); } catch {}
-    if (state.currentObjectUrl) {
-      try { URL.revokeObjectURL(state.currentObjectUrl); } catch {}
-      state.currentObjectUrl = null;
-    }
-    if (navigator.mediaSession) {
-      try { navigator.mediaSession.metadata = null; } catch {}
-      try { navigator.mediaSession.playbackState = "none"; } catch {}
-    }
-  };
-  // ★ pagehide / pageshow は登録しない（上述の理由）
-  // デスクトップでタブを閉じる程度の操作にだけ反応
-  window.addEventListener("beforeunload", fullCleanup);
+  window.addEventListener("beforeunload", () => {
+    saveSessionState();
+  });
 }
 
 /**

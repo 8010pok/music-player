@@ -274,7 +274,6 @@ async function playPlaylist(shuffle) {
     ? Math.floor(Math.random() * enabled.length)
     : 0;
   await setQueueAndPlay(enabled, startIdx);
-  go("player");
 }
 
 /**
@@ -383,7 +382,6 @@ async function onListClick(e, refs) {
       // プレイリストの曲を直接タップして再生した場合もコンテキストを設定
       appState.set({ currentPlaylistId: playlist.id, currentPlaylistName: playlist.name });
       await setQueueAndPlay(enabled, idx);
-      go("player");
     }
     return;
   }

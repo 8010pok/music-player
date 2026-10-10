@@ -352,6 +352,75 @@
 .lyrics-toggle[hidden] { display: none; }
 .lyrics-toggle.is-active { color: var(--accent); border-color: var(--accent); }
 
+/* ===== 画面下部フッター（左下: 歌詞ボタン） ===== */
+.player-footer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 100%;
+  max-width: 480px;
+  padding: 0 6px;
+  margin-top: -2px;
+}
+
+.btn-lyrics-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+:root[data-theme="light"] .btn-lyrics-pill {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.1);
+}
+
+.btn-lyrics-pill:hover {
+  color: var(--fg);
+  background: var(--bg-elev);
+  border-color: rgba(255, 255, 255, 0.22);
+  transform: translateY(-1px);
+}
+
+:root[data-theme="light"] .btn-lyrics-pill:hover {
+  background: rgba(0, 0, 0, 0.09);
+  border-color: rgba(0, 0, 0, 0.18);
+}
+
+.btn-lyrics-pill:active {
+  transform: scale(0.96);
+}
+
+.btn-lyrics-pill.is-active {
+  color: #ffffff;
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 2px 10px rgba(229, 9, 20, 0.35);
+}
+
+.btn-lyrics-pill .ic-lyrics {
+  width: 18px;
+  height: 18px;
+  display: block;
+  fill: currentColor;
+}
+
+.lyrics-loading,
+.lyrics-empty {
+  font-size: 14px;
+  color: var(--fg-dim);
+  padding: 40px 10px;
+  text-align: center;
+}
+
 /*
   再生モード文言（なし / シャッフル / キューリピート / 単曲リピート /
   シャッフル＋キューリピート）。

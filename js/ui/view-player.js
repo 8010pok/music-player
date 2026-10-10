@@ -19,6 +19,7 @@ import { formatTime, toast, escapeHtml } from "./components.js";
 import { getBlob, updateTrack } from "../store/library-db.js";
 import { getArtworkUrl } from "./artwork-cache.js";
 import { editTrackMetadata } from "./metadata-editor.js";
+import { fetchOnlineLyrics } from "../metadata/lrclib.js";
 
 /**
  * 独自コントロール用の inline SVG アイコン群。
@@ -37,6 +38,7 @@ const ICONS = {
   heart: '<svg class="ic ic-heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54z"/></svg>',
   back15: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/><text x="12" y="15.6" font-size="7.5" font-weight="700" text-anchor="middle">15</text></svg>',
   fwd15: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V1l5 5-5 5V7c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6h2c0 4.42-3.58 8-8 8s-8-3.58-8-8 3.58-8 8-8z"/><text x="12" y="15.6" font-size="7.5" font-weight="700" text-anchor="middle">15</text></svg>',
+  lyrics: '<svg class="ic ic-lyrics" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c-4.97 0-9 3.58-9 8 0 1.84.72 3.53 1.95 4.86L4 20l4.47-1.12C9.57 19.14 10.76 19.3 12 19.3c4.97 0 9-3.58 9-8s-4.03-8.3-9-8.3zm0 14.3c-1.04 0-2.03-.23-2.92-.64l-.21-.1-2.22.55.57-2.12-.14-.2C6.31 13.73 5.7 12.44 5.7 11c0-3.31 3.14-6 7.3-6s7.3 2.69 7.3 6-3.14 6.3-7.3 6.3z"/></svg>',
 };
 
 // シークバーのドラッグ中フラグ。range はタッチ操作中に activeElement にならない
@@ -68,13 +70,15 @@ export async function mount(root) {
     (s) => updateUI(refs, s)
   );
 
-  // ===== 歌詞(同期/非同期)表示 (P3) =====
+  // ===== 歌詞(同期/非同期)表示 (P3 & オンライン歌詞取得) =====
   // 状態は mount スコープのクロージャで保持する。
   let currentLyrics = null;   // { synced:[{timeMs,text}]|null, unsynced:string|null } | null
   let lyricsVisible = false;  // オーバーレイ表示中か(ユーザの切替。曲を跨いで維持)
   let syncedLines = [];       // [{ timeMs, el }] 同期歌詞の行要素
   let lastActiveIdx = -1;
   let lyricsRaf = 0;
+  let isFetchingLyrics = false;
+  let lyricsFetchTrackId = null;
 
   // 歌詞行を描画。innerHTML を使わず textContent ベースで XSS を防ぐ。
   function renderLyricsLines(lyrics) {
@@ -139,21 +143,67 @@ export async function mount(root) {
   function scheduleLyricsTick() { if (!lyricsRaf) lyricsRaf = requestAnimationFrame(lyricsTick); }
   function stopLyricsTick() { if (lyricsRaf) { cancelAnimationFrame(lyricsRaf); lyricsRaf = 0; } }
 
+  // LRCLIB からのオンライン歌詞取得
+  async function ensureLyricsForCurrentTrack() {
+    const cur = appState.get().currentTrack;
+    if (!cur || currentLyrics || isFetchingLyrics) return currentLyrics;
+    isFetchingLyrics = true;
+    lyricsFetchTrackId = cur.id;
+
+    if (lyricsVisible && !currentLyrics) {
+      refs.lyricsLines.innerHTML = '<div class="lyrics-line lyrics-loading">歌詞を取得中...</div>';
+    }
+
+    try {
+      const fetched = await fetchOnlineLyrics({
+        title: cur.title,
+        artist: cur.artist,
+        album: cur.album,
+        duration: cur.duration,
+      });
+
+      if (!alive || appState.get().currentTrack?.id !== cur.id) return null;
+
+      if (fetched) {
+        applyLyrics(fetched);
+        return fetched;
+      } else if (lyricsVisible && !currentLyrics) {
+        refs.lyricsLines.innerHTML = '<div class="lyrics-line lyrics-empty">歌詞が見つかりませんでした</div>';
+      }
+    } catch (e) {
+      if (lyricsVisible && !currentLyrics) {
+        refs.lyricsLines.innerHTML = '<div class="lyrics-line lyrics-empty">歌詞の取得に失敗しました</div>';
+      }
+    } finally {
+      isFetchingLyrics = false;
+    }
+    return null;
+  }
+
   // オーバーレイの表示/非表示(歌詞⇄ジャケット)
-  function showLyrics(show) {
-    if (!currentLyrics) show = false;
+  async function showLyrics(show) {
     lyricsVisible = show;
     refs.lyricsOverlay.hidden = !show;
     refs.lyricsOverlay.setAttribute("aria-hidden", show ? "false" : "true");
     refs.lyricsToggle.classList.toggle("is-active", show);
     refs.lyricsToggle.textContent = show ? "ジャケット" : "歌詞";
     refs.lyricsToggle.setAttribute("aria-label", show ? "ジャケットを表示" : "歌詞を表示");
-    if (show) { lastActiveIdx = -1; scheduleLyricsTick(); }
-    else {
+    if (refs.lyricsBottomBtn) {
+      refs.lyricsBottomBtn.classList.toggle("is-active", show);
+    }
+
+    if (show) {
+      refs.lyricsToggle.hidden = false;
+      lastActiveIdx = -1;
+      if (currentLyrics) {
+        scheduleLyricsTick();
+      } else {
+        await ensureLyricsForCurrentTrack();
+        if (currentLyrics) scheduleLyricsTick();
+      }
+    } else {
       stopLyricsTick();
-      // 非表示にする際、現在ハイライト中の行から is-active を除去しておく。
-      // これを怠ると再表示時(lastActiveIdx=-1 リセット)に旧行の is-active が残り、
-      // 新しい行と二重ハイライトになる(トグル再表示パス固有の不具合)。
+      // 非表示にする際、現在ハイライト中の行から is-active を除去しておく
       if (lastActiveIdx >= 0 && syncedLines[lastActiveIdx]) {
         syncedLines[lastActiveIdx].el.classList.remove("is-active");
       }
@@ -162,19 +212,23 @@ export async function mount(root) {
   }
 
   // 曲のロード結果に応じて歌詞を適用。
-  //   synced あり → カラオケ表示 / unsynced のみ → 静的表示 / 無し → UI 自体を隠す。
+  //   synced あり → カラオケ表示 / unsynced のみ → 静的表示 / 無し → オンライン取得またはクリア
   function applyLyrics(lyrics) {
     stopLyricsTick();
     lastActiveIdx = -1;
     const has = !!(lyrics && (lyrics.synced?.length || (lyrics.unsynced && lyrics.unsynced.trim())));
     currentLyrics = has ? lyrics : null;
     if (!currentLyrics) {
-      // 歌詞なし: トグルもオーバーレイも出さない(仕様: タグが無ければ表示不可)
-      refs.lyricsToggle.hidden = true;
-      refs.lyricsOverlay.hidden = true;
-      refs.lyricsOverlay.setAttribute("aria-hidden", "true");
-      refs.lyricsLines.innerHTML = "";
-      syncedLines = [];
+      if (!lyricsVisible) {
+        refs.lyricsToggle.hidden = true;
+        refs.lyricsOverlay.hidden = true;
+        refs.lyricsOverlay.setAttribute("aria-hidden", "true");
+        refs.lyricsLines.innerHTML = "";
+        syncedLines = [];
+      } else {
+        refs.lyricsLines.innerHTML = '<div class="lyrics-line lyrics-empty">歌詞が見つかりませんでした</div>';
+        syncedLines = [];
+      }
       return;
     }
     refs.lyricsToggle.hidden = false;
@@ -182,9 +236,14 @@ export async function mount(root) {
     showLyrics(lyricsVisible); // ユーザの表示設定を曲を跨いで維持
   }
 
+  // 画面左下の歌詞ボタンで開閉
+  if (refs.lyricsBottomBtn) {
+    refs.lyricsBottomBtn.addEventListener("click", () => showLyrics(!lyricsVisible));
+  }
+  // アート上の歌詞/ジャケット切替ボタンで開閉
   refs.lyricsToggle.addEventListener("click", () => showLyrics(!lyricsVisible));
-  // ジャケットタップで歌詞を表示(歌詞があり、かつ非表示のときのみ)
-  refs.art.addEventListener("click", () => { if (currentLyrics && !lyricsVisible) showLyrics(true); });
+  // ジャケットタップで歌詞を表示
+  refs.art.addEventListener("click", () => { if (!lyricsVisible) showLyrics(true); });
 
   // バックグラウンド/ロック中は rAF を停止し、復帰時に表示中なら再開する。
   const onLyricsVisibility = () => {
@@ -195,10 +254,6 @@ export async function mount(root) {
 
   // 現在曲の Blob を1回だけ取得し、ビジュアライザ用 PCM デコードと歌詞抽出に共用する
   // (getBlob の二重取得を避ける)。
-  // ★ alive: この async コールバックが await(getBlob / extractMetadata)中にビューが
-  //   unmount された場合、購読解除では既に走っている本体は止まらない。await 復帰後に
-  //   alive を確認し、unmount 後は detached DOM への applyLyrics や rAF 再起動を行わない
-  //   (自己永続 rAF リーク・detached DOM 保持の防止)。
   let alive = true;
   let lastBlobId = null;
   const decodeUnsub = appState.subscribe(["currentTrack"], async (s) => {
@@ -211,7 +266,10 @@ export async function mount(root) {
     try { blob = await getBlob(tid); } catch {}
     // await 中の曲変更・ビュー離脱は破棄
     if (!alive || appState.get().currentTrack?.id !== tid) return;
-    if (!blob) return;
+    if (!blob) {
+      ensureLyricsForCurrentTrack();
+      return;
+    }
     // ビジュアライザ用 PCM デコード(OfflineAudioContext 使用で iOS でもオーディオ
     // セッション非干渉)。失敗は無視。
     decodePcmForVisualization(blob).catch(() => {});
@@ -220,8 +278,15 @@ export async function mount(root) {
       const name = s.currentTrack.originalName || ((s.currentTrack.title || "audio") + "." + (s.currentTrack.format || ""));
       const meta = await extractMetadata(new File([blob], name, { type: s.currentTrack.mime || blob.type || "" }));
       if (!alive || appState.get().currentTrack?.id !== tid) return;
-      applyLyrics(meta?.lyrics || null);
-    } catch {}
+      if (meta?.lyrics) {
+        applyLyrics(meta.lyrics);
+      } else {
+        // 埋め込みタグが無い場合はオンラインから自動検索
+        ensureLyricsForCurrentTrack();
+      }
+    } catch {
+      ensureLyricsForCurrentTrack();
+    }
   });
 
   // イベント結線
@@ -449,6 +514,14 @@ function render() {
         <button class="icon-btn" id="btn-fwd15" aria-label="15秒進む" title="15秒進む">${ICONS.fwd15}</button>
       </div>
 
+      <!-- 画面下部アクションバー: 左下に「歌詞」ボタン -->
+      <div class="player-footer-bar">
+        <button class="btn-lyrics-pill" id="btn-lyrics-bottom" aria-label="歌詞を表示" title="歌詞を表示">
+          ${ICONS.lyrics}
+          <span>歌詞</span>
+        </button>
+      </div>
+
       <!-- 再生モード表示（5 パターンを文言で明示） -->
       <div class="playback-mode" id="playback-mode" aria-live="polite">再生モード: なし</div>
 
@@ -539,6 +612,7 @@ function collectRefs(root) {
     lyricsOverlay: root.querySelector("#player-lyrics-overlay"),
     lyricsLines: root.querySelector("#lyrics-lines"),
     lyricsToggle: root.querySelector("#btn-lyrics-toggle"),
+    lyricsBottomBtn: root.querySelector("#btn-lyrics-bottom"),
     scrobbleFill: root.querySelector("#scrobble-fill"),
     scrobbleLabel: root.querySelector("#scrobble-label"),
     modeLabel: root.querySelector("#playback-mode"),

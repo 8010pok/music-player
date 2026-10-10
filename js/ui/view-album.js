@@ -229,7 +229,6 @@ async function onListClick(e, root) {
   appState.set({ currentPlaylistId: null, currentPlaylistName: null });
 
   await setQueueAndPlay(playable, idx);
-  go("player");
 }
 
 async function playAlbum(shuffle) {
@@ -247,7 +246,6 @@ async function playAlbum(shuffle) {
   setShuffleMode(shuffle);
   const startIdx = shuffle ? Math.floor(Math.random() * playable.length) : 0;
   await setQueueAndPlay(playable, startIdx);
-  go("player");
 }
 
 function updatePlayingHighlight(refs) {

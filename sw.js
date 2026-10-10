@@ -7,7 +7,7 @@
  * バージョンを上げると古いキャッシュは破棄される。
  */
 
-const CACHE_VERSION = "v1.3.6";
+const CACHE_VERSION = "v1.3.7";
 const STATIC_CACHE = `static-${CACHE_VERSION}`;
 const API_CACHE = `api-${CACHE_VERSION}`;
 const IMG_CACHE = `img-${CACHE_VERSION}`;
@@ -47,6 +47,7 @@ const PRECACHE_URLS = [
   //   precache 漏れだとオフライン初回起動で metadata/index.js の解決が失敗し、
   //   それを静的 import する再生/ライブラリ画面ごと起動不能になるため必ず含める。
   "./js/metadata/lyrics.js",
+  "./js/metadata/lrclib.js",
   "./js/lastfm/api.js",
   "./js/lastfm/auth.js",
   "./js/lastfm/scrobble.js",

@@ -1006,7 +1006,6 @@ async function playEnabledFrom(track) {
   } else {
     await setQueueAndPlay(enabled, idx);
   }
-  go("player");
 }
 
 /* ============ 追加処理 ============ */

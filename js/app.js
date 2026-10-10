@@ -13,7 +13,7 @@
 import { getPublic } from "./store/settings.js";
 import { appState } from "./state.js";
 import { register, start, go } from "./router.js";
-import { initAudioEngine } from "./player/audio-engine.js";
+import { initAudioEngine, restoreSessionState } from "./player/audio-engine.js";
 import { initMiniPlayer } from "./ui/mini-player.js";
 import { sendNowPlaying, sendScrobble, refreshBadge, installOnlineListener, flushQueue } from "./lastfm/scrobble.js";
 import { bootstrapAuth, getAuth } from "./lastfm/auth.js";
@@ -64,10 +64,7 @@ async function chooseInitialRoute() {
                        || window.navigator.standalone === true;
   if (!isStandalone) return "welcome";
   try {
-    // 件数だけ要るので count() を使う。getAllTracks() だと全曲レコード(artworkBlob 込み)を
-    //   読み出して初回描画を遅らせる(取り込み後ほど黒画面が長引く)ため避ける。
-    const n = await countTracks();
-    return n > 0 ? "player" : "library";
+    return "library";
   } catch {
     return "library";
   }
@@ -151,6 +148,9 @@ async function main() {
 
   // 5. ミニプレイヤー
   initMiniPlayer();
+
+  // 5.1 前回復帰時のセッション（曲・キュー・再生位置）を復元
+  await restoreSessionState().catch((e) => console.warn("restoreSessionState 失敗", e));
 
   // 6. ルート登録（動的読込）
   register("welcome", async (root) => {

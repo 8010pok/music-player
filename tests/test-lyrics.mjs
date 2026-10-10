@@ -11,6 +11,9 @@ import {
   parseLrc, parseUSLT, parseSYLT, extractId3Lyrics,
   applyVorbisLyricTag, hasLyrics, makeLyrics,
 } from "../js/metadata/lyrics.js";
+import {
+  cleanTitleForLyrics, cleanArtistForLyrics, fetchOnlineLyrics,
+} from "../js/metadata/lrclib.js";
 
 let passCount = 0, failCount = 0;
 const failures = [];
@@ -321,6 +324,18 @@ describe("applyVorbisLyricTag: 複数フィールド結合", () => {
   applyVorbisLyricTag("SYNCEDLYRICS", "[00:02.00]X", m);
   applyVorbisLyricTag("LYRICS", "plain text", m);
   assertEqual(m.lyrics, { synced: [{ timeMs: 2000, text: "X" }], unsynced: "plain text" }, "synced既存+プレーンLYRICS後付け");
+});
+
+/* ============ LRCLIB オンライン歌詞ヘルパ ============ */
+describe("LRCLIB: タイトル/アーティスト名クリーンアップ", () => {
+  assertEqual(cleanTitleForLyrics("01. Bohemian Rhapsody.flac"), "Bohemian Rhapsody", "トラック番号・拡張子除去");
+  assertEqual(cleanTitleForLyrics("Song Title (Remastered 2021)"), "Song Title", "(Remastered) 除去");
+  assertEqual(cleanTitleForLyrics("Track Name [feat. Artist]"), "Track Name", "[feat. ...] 除去");
+  assertEqual(cleanTitleForLyrics("アイドル"), "アイドル", "日本語タイトル保持");
+  assertEqual(cleanArtistForLyrics("(Google Drive)"), "", "(Google Drive) は空文字に変換");
+  assertEqual(cleanArtistForLyrics("(不明)"), "", "(不明) は空文字に変換");
+  assertEqual(cleanArtistForLyrics("Queen (Official)"), "Queen", "公式表記除去");
+  assertEqual(cleanArtistForLyrics("YOASOBI"), "YOASOBI", "アーティスト名保持");
 });
 
 /* ============ 結果 ============ */
