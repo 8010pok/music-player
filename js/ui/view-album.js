@@ -64,7 +64,7 @@ export async function mount(root) {
   refs.list.addEventListener("click", (e) => onListClick(e, root));
 
   // 再生中トラックのハイライト追従
-  unsubState = appState.subscribe(["currentTrack"], () => {
+  unsubState = appState.subscribe(["currentTrack", "isPlaying"], () => {
     updatePlayingHighlight(refs);
   });
   updatePlayingHighlight(refs);
@@ -97,34 +97,43 @@ function render(alb) {
   const totalStr = formatTotal(totalSec);
 
   const metaParts = [];
-  if (alb.year) metaParts.push(alb.year);
-  metaParts.push(`${alb.trackCount} 曲`);
+  if (alb.year) metaParts.push(`${alb.year}年`);
+  metaParts.push(`${alb.trackCount}曲`);
   metaParts.push(totalStr);
   const metaStr = metaParts.join(" • ");
 
   return `
     <section class="album-detail-view">
       <div class="album-detail-nav">
-        <button class="btn icon-btn" id="btn-album-back" title="アルバム一覧へ戻る">← 戻る</button>
+        <button class="album-nav-back-btn" id="btn-album-back" title="ライブラリへ戻る">
+          <svg class="ic" viewBox="0 0 24 24"><path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+          <span>ライブラリ</span>
+        </button>
       </div>
 
-      <div class="album-detail-header">
-        <div class="album-detail-art-wrap" id="btn-album-art-wrap" title="クリックしてアルバム画像・情報を変更" style="cursor: pointer; position: relative;">
+      <div class="album-detail-hero">
+        <div class="album-detail-art-wrap" id="btn-album-art-wrap" title="クリックしてアルバム画像・情報を変更">
           ${artImg}
-          <div class="album-detail-art-badge" style="position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.65); color: #fff; font-size: 10px; text-align: center; padding: 4px 2px; backdrop-filter: blur(4px);">📷 画像を変更</div>
+          <div class="album-detail-art-badge">📷 画像・情報変更</div>
         </div>
         <div class="album-detail-info">
-          <div class="album-detail-type">アルバム</div>
           <h2 class="album-detail-title">${escapeHtml(alb.title)}</h2>
-          <div class="album-detail-artist"><a href="#/artist?name=${encodeURIComponent(alb.albumArtist)}" class="artist-link" title="アーティストの詳細へ">${escapeHtml(alb.albumArtist)}</a></div>
+          <div class="album-detail-artist">
+            <a href="#/artist?name=${encodeURIComponent(alb.albumArtist)}" class="artist-link" title="アーティストの詳細へ">${escapeHtml(alb.albumArtist)}</a>
+          </div>
           <div class="album-detail-meta">${escapeHtml(metaStr)}</div>
         </div>
       </div>
 
       <div class="album-detail-actions">
-        <button class="btn primary" id="btn-album-play-all">▶ すべて再生</button>
-        <button class="btn" id="btn-album-play-shuffle">🔀 シャッフル再生</button>
-        <button class="btn" id="btn-album-edit" style="grid-column: 1 / -1;">✏ アルバム情報・画像を変更</button>
+        <button class="album-action-btn primary" id="btn-album-play-all">
+          <svg class="ic" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+          <span>再生</span>
+        </button>
+        <button class="album-action-btn secondary" id="btn-album-play-shuffle">
+          <svg class="ic" viewBox="0 0 24 24"><path d="M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg>
+          <span>シャッフル</span>
+        </button>
       </div>
 
       <ul class="album-track-list" id="album-track-list">
@@ -169,15 +178,17 @@ function renderTrackRows(alb) {
       : ``;
 
     html += `
-      <li class="track-row album-track-row ${enabled ? "" : "is-disabled"}" data-id="${escapeAttr(t.id)}">
-        <span class="album-track-num">${escapeHtml(trackNumDisplay)}</span>
+      <li class="track-row album-track-row ${enabled ? "" : "is-disabled"}" data-id="${escapeAttr(t.id)}" data-track-num="${escapeAttr(trackNumDisplay)}">
+        <span class="album-track-num-slot"><span class="album-track-num">${escapeHtml(trackNumDisplay)}</span></span>
         <div class="track-info">
           <div class="track-title">${gdriveMark}${escapeHtml(t.title || "(無題)")}</div>
           ${artistDisplay ? `<div class="track-sub">${escapeHtml(artistDisplay)}</div>` : ""}
         </div>
         <div class="album-track-right">
           ${lovedMark}
-          <button class="icon-btn" data-act="edit" title="曲の情報を編集">✏</button>
+          <button class="icon-btn edit-track-btn" data-act="edit" title="曲の情報を編集">
+            <svg class="ic" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+          </button>
           <span class="album-track-dur">${durStr}</span>
         </div>
       </li>
@@ -193,7 +204,6 @@ function collectRefs(root) {
     artWrapBtn: root.querySelector("#btn-album-art-wrap"),
     playAllBtn: root.querySelector("#btn-album-play-all"),
     playShuffleBtn: root.querySelector("#btn-album-play-shuffle"),
-    editAlbumBtn: root.querySelector("#btn-album-edit"),
     list: root.querySelector("#album-track-list"),
   };
 }
@@ -250,11 +260,22 @@ async function playAlbum(shuffle) {
 
 function updatePlayingHighlight(refs) {
   if (!refs || !refs.list) return;
-  const curId = appState.get().currentTrack?.id || null;
+  const s = appState.get();
+  const curId = s.currentTrack?.id || null;
+  const isPlaying = !!s.isPlaying;
   const rows = refs.list.querySelectorAll(".album-track-row[data-id]");
   rows.forEach((row) => {
     const isCur = !!curId && row.dataset.id === curId;
     row.classList.toggle("is-playing", isCur);
+    const slot = row.querySelector(".album-track-num-slot");
+    if (slot) {
+      if (isCur) {
+        slot.innerHTML = `<div class="eq-anim ${isPlaying ? "" : "is-paused"}" aria-label="再生中"><span class="eq-bar b1"></span><span class="eq-bar b2"></span><span class="eq-bar b3"></span></div>`;
+      } else {
+        const origNum = row.dataset.trackNum || "-";
+        slot.innerHTML = `<span class="album-track-num">${escapeHtml(origNum)}</span>`;
+      }
+    }
   });
 }
 

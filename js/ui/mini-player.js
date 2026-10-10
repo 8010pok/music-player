@@ -25,6 +25,7 @@ export function initMiniPlayer() {
   const titleEl = document.getElementById("mini-title");
   const artistEl = document.getElementById("mini-artist");
   const artEl = document.getElementById("mini-art");
+  const progressFill = document.getElementById("mini-progress-fill");
 
   // クリックで再生画面へ（操作ボタン以外）
   root.addEventListener("click", (e) => {
@@ -38,7 +39,7 @@ export function initMiniPlayer() {
   prevBtn.addEventListener("click", (e) => { e.stopPropagation(); playPrev(); });
   nextBtn.addEventListener("click", (e) => { e.stopPropagation(); playNext(); });
 
-  // 現在のルートを追跡 (再生画面では同じ情報が大きく見えるのでミニプレイヤー非表示にする)
+  // 現在のルートと再生状態を追跡 (再生画面では同じ情報が大きく見えるのでミニプレイヤー非表示にする)
   const updateVisibility = () => {
     const s = appState.get();
     const track = s.currentTrack;
@@ -51,7 +52,14 @@ export function initMiniPlayer() {
     root.hidden = false;
     titleEl.textContent = track.title || "(無題)";
     artistEl.textContent = track.artist || "(不明)";
-    playBtn.textContent = s.isPlaying ? "⏸" : "▶";
+    playBtn.classList.toggle("is-playing", !!s.isPlaying);
+    playBtn.setAttribute("aria-label", s.isPlaying ? "一時停止" : "再生");
+
+    const dur = s.duration || 0;
+    const cur = s.currentTime || 0;
+    if (progressFill) {
+      progressFill.style.width = dur > 0 ? `${Math.min(100, (cur / dur) * 100)}%` : "0%";
+    }
 
     // アートワーク（ID キャッシュ経由で URL の再生成を避ける）
     const artUrl = getArtworkUrl(track) || track.artworkUrl || null;
@@ -62,7 +70,7 @@ export function initMiniPlayer() {
     }
   };
 
-  appState.subscribe(["currentTrack", "isPlaying"], updateVisibility);
+  appState.subscribe(["currentTrack", "isPlaying", "currentTime", "duration"], updateVisibility);
   // ルート変更にも追従
   window.addEventListener("hashchange", updateVisibility);
   // 初回起動時 (currentTrack が未セットでも player ルート判定が必要)

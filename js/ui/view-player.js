@@ -39,6 +39,7 @@ const ICONS = {
   back15: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/><text x="12" y="15.6" font-size="7.5" font-weight="700" text-anchor="middle">15</text></svg>',
   fwd15: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V1l5 5-5 5V7c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6h2c0 4.42-3.58 8-8 8s-8-3.58-8-8 3.58-8 8-8z"/><text x="12" y="15.6" font-size="7.5" font-weight="700" text-anchor="middle">15</text></svg>',
   lyrics: '<svg class="ic ic-lyrics" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c-4.97 0-9 3.58-9 8 0 1.84.72 3.53 1.95 4.86L4 20l4.47-1.12C9.57 19.14 10.76 19.3 12 19.3c4.97 0 9-3.58 9-8s-4.03-8.3-9-8.3zm0 14.3c-1.04 0-2.03-.23-2.92-.64l-.21-.1-2.22.55.57-2.12-.14-.2C6.31 13.73 5.7 12.44 5.7 11c0-3.31 3.14-6 7.3-6s7.3 2.69 7.3 6-3.14 6.3-7.3 6.3z"/></svg>',
+  dismiss: '<svg class="ic ic-dismiss" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/></svg>',
 };
 
 // シークバーのドラッグ中フラグ。range はタッチ操作中に activeElement にならない
@@ -49,6 +50,17 @@ let isSeeking = false;
 export async function mount(root) {
   root.innerHTML = render();
   const refs = collectRefs(root);
+
+  // 上部閉じるボタン (下スワイプ / 戻る 相当で前画面へ)
+  if (refs.dismissBtn) {
+    refs.dismissBtn.addEventListener("click", () => {
+      if (window.history.length > 1) {
+        window.history.back();
+      } else {
+        go("library");
+      }
+    });
+  }
 
   // 再マウント時にドラッグ中フラグをリセット(module スコープ変数)。
   isSeeking = false;
@@ -475,6 +487,11 @@ export async function mount(root) {
 function render() {
   return `
     <section class="player-view">
+      <div class="player-top-bar">
+        <button class="player-dismiss-btn" id="btn-player-dismiss" aria-label="閉じる" title="閉じる">
+          ${ICONS.dismiss}
+        </button>
+      </div>
       <div class="player-art-wrap" id="player-art-wrap">
         <img class="player-art" id="player-art" alt="" />
         <!-- 歌詞オーバーレイ(初期 hidden。表示制御・同期ハイライトは P3 で配線) -->
@@ -593,6 +610,7 @@ function render() {
 
 function collectRefs(root) {
   return {
+    dismissBtn: root.querySelector("#btn-player-dismiss"),
     art: root.querySelector("#player-art"),
     title: root.querySelector("#player-title"),
     artist: root.querySelector("#player-artist"),
@@ -792,10 +810,16 @@ function updateUI(refs, s) {
   // aria-label も状態に追従させる (アイコンだけだとスクリーンリーダーに伝わらない)
   refs.playBtn.setAttribute("aria-label", s.isPlaying ? "一時停止" : "再生");
 
+  // 再生中/停止中でアートワークの拡大/縮小スプリング演出
+  if (refs.artWrap) {
+    refs.artWrap.classList.toggle("is-paused", !s.isPlaying);
+  }
+
   const dur = s.duration || 0;
   const cur = s.currentTime || 0;
   refs.tCur.textContent = formatTime(cur);
-  refs.tDur.textContent = formatTime(dur);
+  const remaining = Math.max(0, dur - cur);
+  refs.tDur.textContent = dur > 0 ? `-${formatTime(remaining)}` : "0:00";
   if (!isSeeking && document.activeElement !== refs.seekBar) {
     // duration 未確定(0)の曲では前曲のスライダ位置が視覚的に残らないよう 0 にリセットする
     //   (duration 確定後は通常どおり経過比率を反映)。

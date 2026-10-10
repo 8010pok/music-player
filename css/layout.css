@@ -176,12 +176,33 @@ body[data-route="player"] .view-root {
 }
 
 .nav-icon {
-  font-size: 18px;
-  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-bottom: 2px;
+}
+
+.nav-ic {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+  transition: transform 0.15s ease, fill 0.15s ease;
+}
+
+.nav-item:active .nav-ic {
+  transform: scale(0.92);
+}
+
+.nav-item.is-active .nav-ic {
+  fill: var(--accent);
 }
 
 .nav-label {
   font-size: 10px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
 }
 
 /* ===== ミニプレイヤー ===== */
@@ -195,18 +216,42 @@ body[data-route="player"] .view-root {
   grid-template-columns: 48px 1fr auto;
   align-items: center;
   gap: 12px;
-  padding: 8px 10px;
-  background: rgba(28, 29, 34, 0.86);
+  padding: 8px 12px 10px;
+  background: rgba(28, 29, 34, 0.88);
   backdrop-filter: saturate(180%) blur(24px);
   -webkit-backdrop-filter: saturate(180%) blur(24px);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 14px;
   box-shadow: 0 10px 32px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  cursor: pointer;
+  user-select: none;
 }
 :root[data-theme="light"] .mini-player {
-  background: rgba(255, 255, 255, 0.88);
+  background: rgba(255, 255, 255, 0.90);
   border: 1px solid rgba(0, 0, 0, 0.08);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.mini-progress-track {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2.5px;
+  background: rgba(255, 255, 255, 0.12);
+  pointer-events: none;
+}
+
+:root[data-theme="light"] .mini-progress-track {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.mini-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.1s linear;
 }
 
 /* HTML の hidden 属性を尊重（display: grid に上書きされないように） */
@@ -254,8 +299,50 @@ body[data-route="player"] .mini-player {
 
 .mini-controls {
   display: flex;
-  gap: 4px;
+  align-items: center;
+  gap: 2px;
 }
+
+.mini-btn {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--fg);
+  background: transparent;
+  cursor: pointer;
+  transition: transform 0.1s ease, background 0.15s ease;
+}
+
+.mini-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+:root[data-theme="light"] .mini-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.mini-btn:active {
+  transform: scale(0.88);
+}
+
+.mini-btn .ic {
+  width: 20px;
+  height: 20px;
+  fill: currentColor;
+  pointer-events: none;
+}
+
+.mini-btn#mini-play .ic {
+  width: 22px;
+  height: 22px;
+}
+
+.mini-btn#mini-play .ic-pause { display: none; }
+.mini-btn#mini-play.is-playing .ic-play { display: none; }
+.mini-btn#mini-play.is-playing .ic-pause { display: block; }
 
 .icon-btn {
   width: 36px;
