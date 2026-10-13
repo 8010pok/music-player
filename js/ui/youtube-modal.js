@@ -765,7 +765,7 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
 
       // 4. ライブラリに Google Drive トラックとして登録
       loadingStatus.textContent = "ライブラリに曲を追加中…";
-      const trackId = `gd-${uploaded.id}`;
+      const trackId = `gd-${uploaded.id || Date.now()}`;
       const newTrack = {
         id: trackId,
         title,
@@ -788,22 +788,22 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
       await putTrack(newTrack, mp3Blob);
 
       loadingBar.style.width = "100%";
-      toast(`✅ Google Drive「MUSIC-PLAYER」に保存し、ライブラリに追加しました！`, "ok", 4000);
+      loadingStatus.textContent = "再生を開始中…";
 
       if (typeof onSaved === "function") {
-        onSaved(newTrack);
+        try {
+          onSaved(newTrack);
+        } catch (_) {}
       }
 
-      // 今すぐ再生するか確認ダイアログ
-      const playNow = await confirm(`Google Drive に保存しました！\n今すぐ「${title}」を再生しますか？`, {
-        okLabel: "▶ 今すぐ再生",
-        cancelLabel: "完了",
-      });
-
-      if (playNow) {
+      // 5. 確認ダイアログを挟まず、即座にライブラリから再生を開始！
+      try {
         await setQueueAndPlay([newTrack], 0);
+      } catch (playErr) {
+        console.warn("[yt] 即時再生開始エラー:", playErr);
       }
 
+      toast(`✅ Google Drive に保存し、「${title}」の再生を開始しました！`, "ok", 4000);
       return true;
     } catch (err) {
       stepLoading.style.display = "none";

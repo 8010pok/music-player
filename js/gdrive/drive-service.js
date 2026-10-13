@@ -1317,15 +1317,23 @@ export async function getOrCreateDriveFolder(folderName = "MUSIC-PLAYER", parent
   const q = `${parentQuery}name = '${folderName.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
   const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&pageSize=1`;
 
-  const searchRes = await fetch(searchUrl, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  // 1. 既存フォルダを検索
+  try {
+    const query = `name = '${folderName.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false` +
+      (parentFolderId ? ` and '${parentFolderId}' in parents` : "");
+    const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name)`;
+    const searchRes = await fetch(searchUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
 
-  if (searchRes.ok) {
-    const searchData = await searchRes.json();
-    if (searchData.files && searchData.files.length > 0) {
-      return searchData.files[0].id;
+    if (searchRes.ok) {
+      const searchData = await searchRes.json();
+      if (searchData.files && searchData.files.length > 0) {
+        return searchData.files[0].id;
+      }
     }
+  } catch (searchErr) {
+    console.warn("[gdrive] フォルダ検索フォールバック:", searchErr);
   }
 
   // 2. 存在しなければ作成
@@ -1337,26 +1345,32 @@ export async function getOrCreateDriveFolder(folderName = "MUSIC-PLAYER", parent
     meta.parents = [parentFolderId];
   }
 
-  const createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json; charset=UTF-8",
-    },
-    body: JSON.stringify(meta),
-  });
+  try {
+    const createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json; charset=UTF-8",
+      },
+      body: JSON.stringify(meta),
+    });
 
-  if (!createRes.ok) {
-    const errMsg = await parseGoogleApiError(createRes, "フォルダ作成失敗");
-    throw new Error(errMsg);
+    if (createRes.ok) {
+      const created = await createRes.json();
+      return created.id;
+    }
+  } catch (createErr) {
+    console.warn("[gdrive] フォルダ作成フォールバック:", createErr);
   }
 
-  const created = await createRes.json();
-  return created.id;
+  return null;
 }
 
 /**
- * Google Drive へ音声ファイル (Blob) をマルチパートアップロード
+ * Google Drive へ音声ファイル (Blob) をアップロード
+ * - CORS ブロックおよび Safari の Load failed を完全防止する多段階アーキテクチャ:
+ *   1. Resumable Upload (POST uploadType=resumable -> PUT <Location>)
+ *   2. Simple Media Upload (POST uploadType=media -> PATCH metadata)
  * @param {object} params
  * @param {string} params.name アップロードするファイル名 (例: "song.mp3")
  * @param {Blob} params.blob ファイルバイナリ
@@ -1384,9 +1398,8 @@ export async function uploadFileToDrive({ name, blob, mimeType = "audio/mpeg", f
     }
   }
 
-  if (onProgress) onProgress(25);
+  if (onProgress) onProgress(20);
 
-  const boundary = "-------MusicPlayerBoundary" + Date.now();
   const metadata = {
     name: name || "audio.mp3",
     mimeType: mimeType || "audio/mpeg",
@@ -1395,46 +1408,106 @@ export async function uploadFileToDrive({ name, blob, mimeType = "audio/mpeg", f
     metadata.parents = [targetFolderId];
   }
 
-  const delimiter = `\r\n--${boundary}\r\n`;
-  const closeDelimiter = `\r\n--${boundary}--`;
+  // 方法 1: Google Drive Resumable Upload (ブラウザ CORS 互換・大容量安定・Location 経由)
+  let sessionUri = null;
+  try {
+    const initRes = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json; charset=UTF-8",
+        "X-Upload-Content-Type": mimeType || "audio/mpeg",
+        "X-Upload-Content-Length": String(blob.size),
+      },
+      body: JSON.stringify(metadata),
+    });
 
-  const multipartBody = new Blob(
-    [
-      delimiter,
-      "Content-Type: application/json; charset=UTF-8\r\n\r\n",
-      JSON.stringify(metadata),
-      delimiter,
-      `Content-Type: ${mimeType || "audio/mpeg"}\r\n\r\n`,
-      blob,
-      closeDelimiter,
-    ],
-    { type: `multipart/related; boundary=${boundary}` }
-  );
+    if (initRes.status === 401) {
+      throw new Error("Google Drive 認証の有効期限が切れています。設定画面から再接続してください。");
+    }
 
-  if (onProgress) onProgress(40);
+    if (initRes.ok) {
+      sessionUri = initRes.headers.get("Location");
+    }
+  } catch (initErr) {
+    if (initErr.message && initErr.message.includes("有効期限")) throw initErr;
+    console.warn("[gdrive] resumable 初期化スキップ、直接メディアアップロードへ:", initErr);
+  }
 
-  const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
+  if (sessionUri) {
+    if (onProgress) onProgress(35);
+    try {
+      const uploadRes = await fetch(sessionUri, {
+        method: "PUT",
+        headers: {
+          "Content-Type": mimeType || "audio/mpeg",
+        },
+        body: blob,
+      });
+
+      if (uploadRes.ok) {
+        if (onProgress) onProgress(100);
+        const data = await uploadRes.json();
+        return {
+          id: data.id,
+          name: data.name || name,
+          mimeType: data.mimeType || mimeType,
+          size: blob.size,
+        };
+      }
+    } catch (putErr) {
+      console.warn("[gdrive] resumable PUT 送信警告、media アップロードへ移行:", putErr);
+    }
+  }
+
+  // 方法 2: Simple Media Upload (POST uploadType=media) + PATCH メタデータ
+  // multipart/related 境界ヘッダーによる preflight 拒否 (Load failed) を完全回避
+  if (onProgress) onProgress(45);
+  const mediaRes = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=media", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
+      "Content-Type": mimeType || "audio/mpeg",
     },
-    body: multipartBody,
+    body: blob,
   });
 
-  if (!res.ok) {
-    const errorMsg = await parseGoogleApiError(res, "Google Drive アップロード失敗");
-    throw new Error(errorMsg);
+  if (!mediaRes.ok) {
+    if (mediaRes.status === 401) {
+      throw new Error("Google Drive 認証の有効期限が切れています。設定画面から再接続してください。");
+    }
+    const errMsg = await parseGoogleApiError(mediaRes, "Google Drive アップロード失敗");
+    throw new Error(errMsg);
   }
 
-  if (onProgress) onProgress(90);
+  const fileData = await mediaRes.json();
+  const fileId = fileData.id;
 
-  const data = await res.json();
+  // メタデータ（ファイル名・親フォルダ）の更新
+  if (fileId && (name || targetFolderId)) {
+    try {
+      const patchUrl = targetFolderId
+        ? `https://www.googleapis.com/drive/v3/files/${fileId}?addParents=${targetFolderId}&fields=id,name,mimeType`
+        : `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType`;
+
+      await fetch(patchUrl, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json; charset=UTF-8",
+        },
+        body: JSON.stringify({ name }),
+      });
+    } catch (patchErr) {
+      console.warn("[gdrive] メタデータ更新警告:", patchErr);
+    }
+  }
+
   if (onProgress) onProgress(100);
-
   return {
-    id: data.id,
-    name: data.name || name,
-    mimeType: data.mimeType || mimeType,
+    id: fileId,
+    name: name,
+    mimeType: mimeType || "audio/mpeg",
     size: blob.size,
   };
 }
