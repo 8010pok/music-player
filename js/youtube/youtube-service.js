@@ -73,6 +73,29 @@ export async function fetchVideoInfo(videoId) {
     throw new Error("有効な YouTube URL または動画IDを指定してください");
   }
 
+  // 1. 同一オリジンの Vercel Serverless/Edge API (/api/youtube) を最優先で試行 (CORSフリー・高速)
+  try {
+    const apiRes = await fetch(`/api/youtube?action=info&id=${cleanId}`);
+    if (apiRes.ok) {
+      const data = await apiRes.json();
+      if (data && data.title) {
+        return {
+          videoId: cleanId,
+          title: data.title || "",
+          author: data.author || "",
+          duration: data.duration || 0,
+          thumbnailUrl: data.thumbnailUrl || `https://img.youtube.com/vi/${cleanId}/hqdefault.jpg`,
+          adaptiveFormats: data.adaptiveFormats || [],
+          instanceUsed: "/api/youtube",
+          raw: data,
+        };
+      }
+    }
+  } catch (_) {
+    // /api/youtube がローカル等で未配置の場合は Invidious へフォールバック
+  }
+
+  // 2. 外部 Invidious インスタンスリストからの直接フォールバック取得
   const instances = getActiveInstances();
   let lastError = null;
 
@@ -142,16 +165,41 @@ export async function downloadAudioStream(audioUrl, totalBytes = 0, onProgress =
     onProgress({ percent: 0, loaded: 0, total: knownTotal, statusText: "ダウンロード開始…" });
   }
 
-  // totalBytes が既知の場合は Range リクエストで分割取得（googlevideo の帯域制限を回避）
+  // もし audioUrl がクロスオリジン (googlevideo.com 等) の場合、
+  // /api/youtube?action=stream&url=... を経由してブラウザの CORS 制限を解消
+  let resolvedUrl = audioUrl;
+  if (audioUrl.startsWith("http://") || audioUrl.startsWith("https://")) {
+    try {
+      const parsed = new URL(audioUrl, typeof window !== "undefined" ? window.location.href : "http://localhost");
+      if (typeof window !== "undefined" && parsed.origin !== window.location.origin) {
+        resolvedUrl = `/api/youtube?action=stream&url=${encodeURIComponent(audioUrl)}`;
+      }
+    } catch (_) {}
+  }
+
+  // totalBytes が既知の場合は Range リクエストで分割取得
   if (knownTotal > 0) {
     while (offset < knownTotal) {
       const end = Math.min(offset + chunkSize - 1, knownTotal - 1);
-      const res = await fetch(audioUrl, {
-        headers: {
-          Range: `bytes=${offset}-${end}`,
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        },
-      });
+      let res;
+      try {
+        res = await fetch(resolvedUrl, {
+          headers: {
+            Range: `bytes=${offset}-${end}`,
+          },
+        });
+      } catch (err) {
+        // もし /api/youtube が使えない環境なら元の audioUrl へフォールバック
+        if (resolvedUrl !== audioUrl) {
+          res = await fetch(audioUrl, {
+            headers: {
+              Range: `bytes=${offset}-${end}`,
+            },
+          });
+        } else {
+          throw err;
+        }
+      }
 
       if (!res.ok && res.status !== 206) {
         throw new Error(`音声データの取得に失敗しました (${res.status} ${res.statusText})`);
@@ -167,7 +215,7 @@ export async function downloadAudioStream(audioUrl, totalBytes = 0, onProgress =
           percent: pct,
           loaded: offset,
           total: knownTotal,
-          statusText: `音源をダウンロード中 (${Math.round(offset / 1024 / 1024 * 10) / 10}MB / ${Math.round(knownTotal / 1024 / 1024 * 10) / 10}MB)`,
+          statusText: `音源をダウンロード中 (${Math.round((offset / 1024 / 1024) * 10) / 10}MB / ${Math.round((knownTotal / 1024 / 1024) * 10) / 10}MB)`,
         });
       }
     }
@@ -183,7 +231,15 @@ export async function downloadAudioStream(audioUrl, totalBytes = 0, onProgress =
   }
 
   // totalBytes が不明な場合のフォールバック直接ストリーム読込
-  const res = await fetch(audioUrl);
+  let res;
+  try {
+    res = await fetch(resolvedUrl);
+  } catch (_) {
+    res = await fetch(audioUrl);
+  }
+  if (!res.ok && resolvedUrl !== audioUrl) {
+    res = await fetch(audioUrl);
+  }
   if (!res.ok) {
     throw new Error(`音声データの取得に失敗しました (${res.status})`);
   }

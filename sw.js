@@ -7,7 +7,7 @@
  * バージョンを上げると古いキャッシュは破棄される。
  */
 
-const CACHE_VERSION = "v1.4.0";
+const CACHE_VERSION = "v1.4.1";
 const STATIC_CACHE = `static-${CACHE_VERSION}`;
 const API_CACHE = `api-${CACHE_VERSION}`;
 const IMG_CACHE = `img-${CACHE_VERSION}`;
@@ -126,39 +126,52 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(req.url);
 
-  // Last.fm API: Network-First（オンライン時は常に最新、通信失敗時のみキャッシュへフォールバック）。
-  //   第3引数はキャッシュ件数上限(肥大防止の簡易LRU)。
-  if (url.hostname === "ws.audioscrobbler.com") {
-    event.respondWith(networkFirst(req, API_CACHE, 100));
+  // 1. 外部オリジン（クロスオリジン）の通信ハンドリング
+  if (url.origin !== self.location.origin) {
+    // Last.fm API: Network-First（オンライン時は最新、通信失敗時のみフォールバック）
+    if (url.hostname === "ws.audioscrobbler.com") {
+      event.respondWith(networkFirst(req, API_CACHE, 100));
+      return;
+    }
+
+    // Last.fm 画像（アートワーク）: Cache-First
+    if (
+      url.hostname.endsWith("last.fm") ||
+      url.hostname.includes("lastfm.freetls.fastly.net") ||
+      url.hostname.includes("audioscrobbler")
+    ) {
+      event.respondWith(cacheFirst(req, IMG_CACHE, 300));
+      return;
+    }
+
+    // CDN (Chart.js など事前キャッシュ対象)
+    if (url.hostname === "cdn.jsdelivr.net") {
+      event.respondWith(cacheFirst(req, STATIC_CACHE));
+      return;
+    }
+
+    // それ以外の外部通信 (Google Drive API, YouTube, Invidious, LRCLIB, MusicBrainz 等) は
+    // SW でキャッシュせずブラウザの直接通信に任せる (CORS 誤判定や Range 失敗を完全に防止)
     return;
   }
 
-  // Last.fm 画像（アートワーク）: Cache-First
-  if (
-    url.hostname.endsWith("last.fm") ||
-    url.hostname.includes("lastfm.freetls.fastly.net") ||
-    url.hostname.includes("audioscrobbler")
-  ) {
-    event.respondWith(cacheFirst(req, IMG_CACHE, 300));
+  // 2. 同一オリジン内でも /api/ 配下 (Vercel Serverless Functions) は SW でキャッシュせず直接通信
+  if (url.pathname.startsWith("/api/")) {
     return;
   }
 
-  // Google API や外部認証は SW でキャッシュせず直接通信
-  if (
-    url.hostname.endsWith("googleapis.com") ||
-    url.hostname.endsWith("google.com") ||
-    url.hostname.endsWith("gstatic.com")
-  ) {
+  // 3. Range リクエスト (音声ストリーミング等) は Cache API 非互換のため直接通信
+  if (req.headers.has("range")) {
     return;
   }
 
-  // HTML ナビゲーション（ページ読み込み）: Network-First で最新版を優先（オフライン時はキャッシュ）
+  // 4. HTML ナビゲーション（ページ読み込み）: Network-First で最新版を優先（オフライン時はキャッシュ）
   if (req.mode === "navigate" || req.destination === "document") {
     event.respondWith(networkFirst(req, STATIC_CACHE));
     return;
   }
 
-  // 静的アセット: Cache-First
+  // 5. 自サイト内の静的アセット: Cache-First
   event.respondWith(cacheFirst(req, STATIC_CACHE));
 });
 
