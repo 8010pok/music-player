@@ -2,8 +2,9 @@
  * YouTube 音源取得サービス
  *
  * - YouTube URL / 動画IDの解析
- * - Invidious API / 外部プロキシからの動画情報・音声ストリーム取得
- * - 高速・確実な Range チャンク分割ダウンロード (進捗パーセント通知)
+ * - Savetube (MP3 320kbps 直接リンク) & InnerTube (Android VR) から高音質音源 URL を直接抽出
+ * - Invidious API / YouTube oEmbed からのフォールバック情報取得
+ * - 高速・確実な Streams チャンク分割ダウンロード (進捗パーセント通知)
  * - 任意音声 URL およびローカル音声ファイル読み込みへのフォールバック
  */
 
@@ -34,7 +35,7 @@ export function extractYouTubeVideoId(input) {
     return str;
   }
 
-  // youtu.be/ID
+  // youtu.be/ID or youtube.com/shorts/ID or embed/ID
   const shortMatch = str.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|shorts\/))([a-zA-Z0-9_-]{11})/i);
   if (shortMatch && shortMatch[1]) {
     return shortMatch[1];
@@ -62,10 +63,123 @@ export function getActiveInstances() {
   return [...DEFAULT_INVIDIOUS_INSTANCES];
 }
 
+// Web Crypto API による Savetube 応答復号 (AES-128-CBC)
+async function decryptSavetubeData(encBase64) {
+  const secretKeyHex = "C5D58EF67A7584E4A29F6C35BBC4EB12";
+  const keyBytes = new Uint8Array(secretKeyHex.match(/.{1,2}/g).map((b) => parseInt(b, 16)));
+
+  const subtle = (typeof crypto !== "undefined" ? crypto.subtle : null) || globalThis.crypto?.subtle;
+  if (!subtle) throw new Error("SubtleCrypto not supported");
+
+  const cryptoKey = await subtle.importKey(
+    "raw",
+    keyBytes,
+    { name: "AES-CBC" },
+    false,
+    ["decrypt"]
+  );
+
+  let binaryString;
+  if (typeof atob === "function") {
+    binaryString = atob(encBase64);
+  } else if (typeof Buffer !== "undefined") {
+    binaryString = Buffer.from(encBase64, "base64").toString("binary");
+  } else {
+    throw new Error("Base64 decode not available");
+  }
+
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+
+  const iv = bytes.slice(0, 16);
+  const content = bytes.slice(16);
+
+  const decryptedBuf = await subtle.decrypt(
+    { name: "AES-CBC", iv },
+    cryptoKey,
+    content
+  );
+  const decryptedText = new TextDecoder().decode(decryptedBuf);
+  return JSON.parse(decryptedText);
+}
+
 /**
- * YouTube 動画のメタデータ（タイトル、チャンネル名、再生秒数、サムネイル等）を取得
+ * クライアント直接 Savetube による MP3 320kbps 音源解決
+ * @param {string} cleanId
+ * @returns {Promise<object>}
+ */
+async function fetchSavetubeDirect(cleanId) {
+  const cdnRes = await fetch("https://media.savetube.vip/api/random-cdn");
+  if (!cdnRes.ok) throw new Error(`Savetube random-cdn HTTP ${cdnRes.status}`);
+  const { cdn } = await cdnRes.json();
+  if (!cdn) throw new Error("Savetube CDN not found");
+
+  const infoRes = await fetch(`https://${cdn}/v2/info`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      "Referer": "https://save-tube.com/",
+    },
+    body: JSON.stringify({ url: `https://www.youtube.com/watch?v=${cleanId}` }),
+  });
+  if (!infoRes.ok) throw new Error(`Savetube info HTTP ${infoRes.status}`);
+  const infoJson = await infoRes.json();
+  if (!infoJson.data) throw new Error("Savetube info data empty");
+
+  const info = await decryptSavetubeData(infoJson.data);
+  if (!info || !info.key) throw new Error("Savetube decrypt failed or key missing");
+
+  // 320kbps MP3 変換リンク発行
+  const dlRes = await fetch(`https://${cdn}/download`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      "Referer": "https://save-tube.com/",
+    },
+    body: JSON.stringify({
+      downloadType: "audio",
+      quality: "320",
+      key: info.key,
+    }),
+  });
+  if (!dlRes.ok) throw new Error(`Savetube download HTTP ${dlRes.status}`);
+  const dlJson = await dlRes.json();
+  const audioUrl = dlJson.data?.downloadUrl;
+  if (!audioUrl) throw new Error("Savetube downloadUrl missing");
+
+  let title = info.title || "";
+  let author = "";
+  if (title.includes(" - ")) {
+    const parts = title.split(" - ");
+    author = parts[0].trim();
+    title = parts.slice(1).join(" - ").trim();
+  }
+
+  return {
+    videoId: cleanId,
+    title: title || "無題",
+    author: author || "YouTube",
+    duration: parseInt(info.duration || "0", 10),
+    thumbnailUrl: info.thumbnail || `https://img.youtube.com/vi/${cleanId}/hqdefault.jpg`,
+    audioUrl,
+    adaptiveFormats: [
+      {
+        url: audioUrl,
+        type: "audio/mp3",
+        itag: "320",
+      },
+    ],
+  };
+}
+
+/**
+ * YouTube 動画のメタデータ（タイトル、チャンネル名、再生秒数、サムネイル、音源URL等）を取得
  * @param {string} videoId
- * @returns {Promise<{ title: string, author: string, duration: number, thumbnailUrl: string|null, formats: Array<object>, raw: object }>}
+ * @returns {Promise<{ videoId: string, title: string, author: string, duration: number, thumbnailUrl: string|null, audioUrl?: string|null, adaptiveFormats: Array<object>, raw: object }>}
  */
 export async function fetchVideoInfo(videoId) {
   const cleanId = extractYouTubeVideoId(videoId);
@@ -73,7 +187,7 @@ export async function fetchVideoInfo(videoId) {
     throw new Error("有効な YouTube URL または動画IDを指定してください");
   }
 
-  // 1. 同一オリジンの Vercel Serverless/Edge API (/api/youtube) を最優先で試行 (CORSフリー・高速)
+  // 1. 同一オリジンの Vercel Serverless/Edge API (/api/youtube) を最優先で試行 (CORSフリー・高速・320kbps音源URL同梱)
   try {
     const apiRes = await fetch(`/api/youtube?action=info&id=${cleanId}`);
     if (apiRes.ok) {
@@ -85,6 +199,7 @@ export async function fetchVideoInfo(videoId) {
           author: data.author || "",
           duration: data.duration || 0,
           thumbnailUrl: data.thumbnailUrl || `https://img.youtube.com/vi/${cleanId}/hqdefault.jpg`,
+          audioUrl: data.audioUrl || null,
           adaptiveFormats: data.adaptiveFormats || [],
           instanceUsed: "/api/youtube",
           raw: data,
@@ -92,17 +207,29 @@ export async function fetchVideoInfo(videoId) {
       }
     }
   } catch (_) {
-    // /api/youtube がローカル等で未配置の場合は Invidious へフォールバック
+    // /api/youtube がローカル等で未配置の場合はクライアント直接通信へフォールバック
   }
 
-  // 2. 外部 Invidious インスタンスリストからの直接フォールバック取得
+  // 2. ブラウザ直接 Savetube (Web Crypto 復号) による MP3 320kbps 音源解決
+  try {
+    const stData = await fetchSavetubeDirect(cleanId);
+    if (stData && stData.audioUrl) {
+      return {
+        ...stData,
+        instanceUsed: "client-savetube",
+        raw: stData,
+      };
+    }
+  } catch (_) {}
+
+  // 3. 外部 Invidious インスタンスリストからの直接フォールバック取得
   const instances = getActiveInstances();
   let lastError = null;
 
   for (const inst of instances) {
     try {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 6000);
+      const timer = setTimeout(() => ctrl.abort(), 5000);
       const res = await fetch(`${inst}/api/v1/videos/${cleanId}`, {
         signal: ctrl.signal,
         headers: { Accept: "application/json" },
@@ -130,12 +257,16 @@ export async function fetchVideoInfo(videoId) {
         thumbUrl = `https://img.youtube.com/vi/${cleanId}/hqdefault.jpg`;
       }
 
+      const audioFormats = (data.adaptiveFormats || []).filter((f) => f.type && f.type.includes("audio") && f.url);
+      const best = audioFormats.find((f) => f.itag === "140") || audioFormats.find((f) => f.itag === "251") || audioFormats[0];
+
       return {
         videoId: cleanId,
         title: data.title || "",
         author: data.author || "",
         duration: parseInt(data.lengthSeconds || "0", 10),
         thumbnailUrl: thumbUrl,
+        audioUrl: best?.url || null,
         adaptiveFormats: data.adaptiveFormats || [],
         instanceUsed: inst,
         raw: data,
@@ -145,7 +276,7 @@ export async function fetchVideoInfo(videoId) {
     }
   }
 
-  // 3. YouTube oEmbed (noembed) による確実なメタデータ取得 (Title, Author, Thumbnail を 100% 確実に即座に取得)
+  // 4. YouTube oEmbed (noembed) による確実なメタデータ取得 (Title, Author, Thumbnail を 100% 確実に即座に取得)
   try {
     const oRes = await fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${cleanId}`);
     if (oRes.ok) {
@@ -157,6 +288,7 @@ export async function fetchVideoInfo(videoId) {
           author: oData.author_name || "",
           duration: 0,
           thumbnailUrl: oData.thumbnail_url || `https://img.youtube.com/vi/${cleanId}/hqdefault.jpg`,
+          audioUrl: null,
           adaptiveFormats: [],
           instanceUsed: "noembed",
           raw: oData,
@@ -165,7 +297,7 @@ export async function fetchVideoInfo(videoId) {
     }
   } catch (_) {}
 
-  // 第4フォールバック: 公式 YouTube oEmbed API
+  // 第5フォールバック: 公式 YouTube oEmbed API
   try {
     const ytOembed = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${cleanId}&format=json`);
     if (ytOembed.ok) {
@@ -177,6 +309,7 @@ export async function fetchVideoInfo(videoId) {
           author: ytData.author_name || "",
           duration: 0,
           thumbnailUrl: ytData.thumbnail_url || `https://img.youtube.com/vi/${cleanId}/hqdefault.jpg`,
+          audioUrl: null,
           adaptiveFormats: [],
           instanceUsed: "youtube-oembed",
           raw: ytData,
@@ -189,7 +322,7 @@ export async function fetchVideoInfo(videoId) {
 }
 
 /**
- * YouTube 音声ストリームを Range 分割リクエストで高速・確実にダウンロード
+ * YouTube 音声ストリームを Range 分割または Streams リクエストで高速・確実にダウンロード
  * @param {string} audioUrl
  * @param {number} totalBytes
  * @param {(progress: { percent: number, loaded: number, total: number, statusText: string }) => void} [onProgress]
@@ -205,7 +338,7 @@ export async function downloadAudioStream(audioUrl, totalBytes = 0, onProgress =
     onProgress({ percent: 0, loaded: 0, total: knownTotal, statusText: "ダウンロード開始…" });
   }
 
-  // もし audioUrl がクロスオリジン (googlevideo.com 等) の場合、
+  // もし audioUrl がクロスオリジンの場合、
   // /api/youtube?action=stream&url=... を経由してブラウザの CORS 制限を解消
   let resolvedUrl = audioUrl;
   if (audioUrl.startsWith("http://") || audioUrl.startsWith("https://")) {
@@ -217,24 +350,19 @@ export async function downloadAudioStream(audioUrl, totalBytes = 0, onProgress =
     } catch (_) {}
   }
 
-  // totalBytes が既知の場合は Range リクエストで分割取得
+  // 1. totalBytes が既知の場合は Range リクエストで分割取得
   if (knownTotal > 0) {
     while (offset < knownTotal) {
       const end = Math.min(offset + chunkSize - 1, knownTotal - 1);
       let res;
       try {
         res = await fetch(resolvedUrl, {
-          headers: {
-            Range: `bytes=${offset}-${end}`,
-          },
+          headers: { Range: `bytes=${offset}-${end}` },
         });
       } catch (err) {
-        // もし /api/youtube が使えない環境なら元の audioUrl へフォールバック
         if (resolvedUrl !== audioUrl) {
           res = await fetch(audioUrl, {
-            headers: {
-              Range: `bytes=${offset}-${end}`,
-            },
+            headers: { Range: `bytes=${offset}-${end}` },
           });
         } else {
           throw err;
@@ -260,7 +388,6 @@ export async function downloadAudioStream(audioUrl, totalBytes = 0, onProgress =
       }
     }
 
-    // チャンクを単一の ArrayBuffer に結合
     const finalBuffer = new Uint8Array(knownTotal);
     let cur = 0;
     for (const c of chunks) {
@@ -270,7 +397,7 @@ export async function downloadAudioStream(audioUrl, totalBytes = 0, onProgress =
     return finalBuffer.buffer;
   }
 
-  // totalBytes が不明な場合のフォールバック直接ストリーム読込
+  // 2. totalBytes が不明な場合のフォールバック直接ストリーム読込 (Streams API で進捗通知)
   let res;
   try {
     res = await fetch(resolvedUrl);
@@ -283,6 +410,43 @@ export async function downloadAudioStream(audioUrl, totalBytes = 0, onProgress =
   if (!res.ok) {
     throw new Error(`音声データの取得に失敗しました (${res.status})`);
   }
+
+  const cl = res.headers.get("content-length");
+  const streamTotal = cl ? parseInt(cl, 10) : 0;
+
+  if (res.body && typeof res.body.getReader === "function") {
+    const reader = res.body.getReader();
+    const receivedChunks = [];
+    let receivedBytes = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedChunks.push(value);
+      receivedBytes += value.length;
+
+      if (onProgress) {
+        const pct = streamTotal > 0 ? Math.min(99, Math.round((receivedBytes / streamTotal) * 100)) : 50;
+        const mb = Math.round((receivedBytes / 1024 / 1024) * 10) / 10;
+        const totalMb = streamTotal > 0 ? `${Math.round((streamTotal / 1024 / 1024) * 10) / 10}MB` : "";
+        onProgress({
+          percent: pct,
+          loaded: receivedBytes,
+          total: streamTotal,
+          statusText: `音源をダウンロード中 (${mb}MB${totalMb ? " / " + totalMb : ""})…`,
+        });
+      }
+    }
+
+    const merged = new Uint8Array(receivedBytes);
+    let curOffset = 0;
+    for (const c of receivedChunks) {
+      merged.set(c, curOffset);
+      curOffset += c.length;
+    }
+    return merged.buffer;
+  }
+
   return await res.arrayBuffer();
 }
 
@@ -297,22 +461,23 @@ export async function downloadYouTubeAudio(inputUrl, onProgress = null) {
 
   const info = await fetchVideoInfo(inputUrl);
 
-  // 音声フォーマットの選定 (itag 140 m4a 優先、次に itag 251 webm)
-  const audioFormats = (info.adaptiveFormats || []).filter((f) => f.type && f.type.includes("audio"));
-  if (audioFormats.length === 0) {
-    throw new Error("この動画にはダウンロード可能な音声ストリームが見つかりませんでした");
-  }
+  let audioUrl = info.audioUrl;
+  let totalBytes = 0;
+  let mimeType = "audio/mpeg";
 
-  const bestAudio = audioFormats.find((f) => f.itag === "140") ||
-                    audioFormats.find((f) => f.itag === "251") ||
-                    audioFormats[0];
-
-  const audioUrl = bestAudio.url;
   if (!audioUrl) {
-    throw new Error("音声ストリームの URL を取得できませんでした");
+    const audioFormats = (info.adaptiveFormats || []).filter((f) => f.type && f.type.includes("audio") && f.url);
+    if (audioFormats.length === 0) {
+      throw new Error("この動画にはダウンロード可能な音声ストリームが見つかりませんでした");
+    }
+    const bestAudio = audioFormats.find((f) => f.itag === "140") ||
+                      audioFormats.find((f) => f.itag === "251") ||
+                      audioFormats[0];
+    audioUrl = bestAudio.url;
+    totalBytes = parseInt(bestAudio.clen || "0", 10);
+    mimeType = bestAudio.type ? bestAudio.type.split(";")[0] : "audio/mp4";
   }
 
-  const totalBytes = parseInt(bestAudio.clen || "0", 10);
   const audioArrayBuffer = await downloadAudioStream(audioUrl, totalBytes, onProgress);
 
   // サムネイル画像をダウンロード (ID3 カバー用)
@@ -334,6 +499,6 @@ export async function downloadYouTubeAudio(inputUrl, onProgress = null) {
     thumbnailUrl: info.thumbnailUrl,
     artworkBlob,
     audioArrayBuffer,
-    mimeType: bestAudio.type ? bestAudio.type.split(";")[0] : "audio/mp4",
+    mimeType,
   };
 }

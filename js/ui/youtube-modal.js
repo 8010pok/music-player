@@ -312,20 +312,29 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
         dirpyLink.href = `https://dirpy.com/studio?url=https://www.youtube.com/watch?v=${info.videoId}`;
       }
 
-      // 2. 音声ストリームの自動ダウンロード試行
+      // 2. 音声ストリームの自動ダウンロード試行 (Savetube 320kbps または InnerTube 直接ストリーム)
       loadingBar.style.width = "40%";
-      loadingStatus.textContent = "音源データをダウンロード中…";
+      loadingStatus.textContent = "高音質音源をダウンロード中…";
 
       let audioArrayBuffer = null;
-      const audioFormats = (info.adaptiveFormats || []).filter((f) => f.type && f.type.includes("audio"));
-      if (audioFormats.length > 0) {
-        try {
+      let streamUrl = info.audioUrl || null;
+      let totalBytes = 0;
+
+      if (!streamUrl) {
+        const audioFormats = (info.adaptiveFormats || []).filter((f) => f.type && f.type.includes("audio") && f.url);
+        if (audioFormats.length > 0) {
           const bestAudio = audioFormats.find((f) => f.itag === "140") ||
                             audioFormats.find((f) => f.itag === "251") ||
                             audioFormats[0];
-          const totalBytes = parseInt(bestAudio.clen || "0", 10);
-          audioArrayBuffer = await downloadAudioStream(bestAudio.url, totalBytes, ({ percent, statusText }) => {
-            loadingBar.style.width = `${40 + Math.round(percent * 0.6)}%`;
+          streamUrl = bestAudio?.url || null;
+          totalBytes = parseInt(bestAudio?.clen || "0", 10);
+        }
+      }
+
+      if (streamUrl) {
+        try {
+          audioArrayBuffer = await downloadAudioStream(streamUrl, totalBytes, ({ percent, statusText }) => {
+            loadingBar.style.width = `${40 + Math.round(percent * 0.55)}%`;
             loadingStatus.textContent = statusText;
           });
         } catch (streamErr) {
