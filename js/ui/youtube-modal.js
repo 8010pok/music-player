@@ -24,6 +24,7 @@ import { isDriveConnected, uploadFileToDrive, requestGisToken } from "../gdrive/
 import { putTrack, getAllTracks, getBlob } from "../store/library-db.js";
 import { getPublic, setPublic } from "../store/settings.js";
 import { setQueueAndPlay } from "../player/audio-engine.js";
+import { findDuplicateInList } from "../store/dedup-service.js";
 
 /**
  * YouTube ダウンロード & カット編集モーダルを開く
@@ -1005,23 +1006,49 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
         // 2. ローカルライブラリ（IndexedDB）に登録（「○○で開く」を経由せず直接保存）
         loadingStatus.textContent = "ライブラリに曲を追加中…";
         loadingBar.style.width = "95%";
-        const trackId = `loc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+        // ★ 重複防止チェック: すでに同じ曲がライブラリに存在する場合は新規作成せず既存を更新
+        const allExisting = await getAllTracks().catch(() => []);
+        const candidate = {
+          title,
+          artist,
+          album,
+          duration: Math.round(cutEndTime - cutStartTime) || 0,
+        };
+        const duplicate = findDuplicateInList(candidate, allExisting);
+
+        const trackId = duplicate ? duplicate.id : `loc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         const newTrack = {
           id: trackId,
           title,
           artist,
           album,
           albumArtist: artist,
-          duration: Math.round(cutEndTime - cutStartTime) || 0,
+          duration: candidate.duration,
           source: "local",
           format: "mp3",
           mimeType: "audio/mpeg",
           fileSize: mp3Blob.size,
-          addedAt: Date.now(),
+          addedAt: duplicate ? (duplicate.addedAt || Date.now()) : Date.now(),
           userEdited: true,
+          playCount: duplicate ? (duplicate.playCount || 0) : 0,
+          lastPlayedAt: duplicate ? (duplicate.lastPlayedAt || 0) : 0,
+          loved: duplicate ? !!duplicate.loved : false,
+          enabled: duplicate ? (duplicate.enabled !== false) : true,
         };
-        if (memo) newTrack.memo = memo;
-        if (currentArtworkBlob) newTrack.artworkBlob = currentArtworkBlob;
+        if (memo) {
+          newTrack.memo = memo;
+        } else if (duplicate && duplicate.memo) {
+          newTrack.memo = duplicate.memo;
+        }
+        if (currentArtworkBlob) {
+          newTrack.artworkBlob = currentArtworkBlob;
+        } else if (duplicate && duplicate.artworkBlob) {
+          newTrack.artworkBlob = duplicate.artworkBlob;
+        }
+        if (duplicate && typeof duplicate.order === "number") {
+          newTrack.order = duplicate.order;
+        }
 
         await putTrack(newTrack, mp3Blob);
 
@@ -1038,7 +1065,10 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
           console.warn("[yt] 即時再生開始エラー:", playErr);
         }
 
-        if (downloadFile) {
+        const isUpdated = !!duplicate;
+        if (isUpdated) {
+          toast(`✅ 既存の「${title}」を更新しました（重複保存を防止）`, "ok", 4000);
+        } else if (downloadFile) {
           toast(`✅ 端末にダウンロードし、ライブラリに追加しました！（再生を開始）`, "ok", 4000);
         } else {
           toast(`✅ ライブラリに追加しました！（再生を開始）`, "ok", 4000);
@@ -1092,28 +1122,51 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
 
         // 4. ライブラリに Google Drive トラックとして登録
         loadingStatus.textContent = "ライブラリに曲を追加中…";
-        const trackId = `gd-${uploaded.id || Date.now()}`;
+
+        // ★ 重複防止チェック: 既存曲があればその ID を引き継ぎ二重登録を防ぐ
+        const allExisting = await getAllTracks().catch(() => []);
+        const candidate = {
+          title,
+          artist,
+          album,
+          duration: Math.round(cutEndTime - cutStartTime) || 0,
+          driveFileId: uploaded.id,
+        };
+        const duplicate = findDuplicateInList(candidate, allExisting);
+
+        const trackId = duplicate ? duplicate.id : `gd-${uploaded.id || Date.now()}`;
         const newTrack = {
           id: trackId,
           title,
           artist,
           album,
           albumArtist: artist,
-          duration: Math.round(cutEndTime - cutStartTime) || 0,
-          source: "gdrive",
+          duration: candidate.duration,
+          source: duplicate && duplicate.source === "local" ? "local" : "gdrive",
           format: "mp3",
           mimeType: "audio/mpeg",
           fileSize: mp3Blob.size,
-          addedAt: Date.now(),
+          addedAt: duplicate ? (duplicate.addedAt || Date.now()) : Date.now(),
           userEdited: true,
           driveFileId: uploaded.id,
           driveFileName: filename,
+          playCount: duplicate ? (duplicate.playCount || 0) : 0,
+          lastPlayedAt: duplicate ? (duplicate.lastPlayedAt || 0) : 0,
+          loved: duplicate ? !!duplicate.loved : false,
+          enabled: duplicate ? (duplicate.enabled !== false) : true,
         };
         if (memo) {
           newTrack.memo = memo;
+        } else if (duplicate && duplicate.memo) {
+          newTrack.memo = duplicate.memo;
         }
         if (currentArtworkBlob) {
           newTrack.artworkBlob = currentArtworkBlob;
+        } else if (duplicate && duplicate.artworkBlob) {
+          newTrack.artworkBlob = duplicate.artworkBlob;
+        }
+        if (duplicate && typeof duplicate.order === "number") {
+          newTrack.order = duplicate.order;
         }
 
         await putTrack(newTrack, mp3Blob);

@@ -18,7 +18,7 @@ import { appState } from "../state.js";
 import { getPublic, setPublic, getSecret, classifyAuth } from "../store/settings.js";
 import { prepareAuthorization, completeAuthorization, setReadOnlyKey, signOut, checkReadOnlyKey, verifySession, getAuth } from "../lastfm/auth.js";
 import { count as queueCount, wipeQueue } from "../store/queue-db.js";
-import { wipeLibrary } from "../store/library-db.js";
+import { wipeLibrary, getAllTracks } from "../store/library-db.js";
 import { flushQueue, refreshBadge } from "../lastfm/scrobble.js";
 import { clearCache as clearStatsCache } from "../lastfm/stats-cache.js";
 import { wipeAll as wipeStats } from "../lastfm/stats-storage.js";
@@ -28,6 +28,7 @@ import { releaseAllArtwork } from "./artwork-cache.js";
 import { isDriveConnected, disconnectDrive, openDriveImportModal } from "../gdrive/drive-service.js";
 import { openYouTubeDownloadModal } from "./youtube-modal.js";
 import { shareOrDownloadLibrary, importLibraryData, exportLibraryToDrive, importLibraryFromDrive, getDriveSyncFileInfo } from "../store/sync-service.js";
+import { findDuplicateGroups, cleanDuplicateTracks } from "../store/dedup-service.js";
 // 属性値のエスケープは escapeHtml で代用 (quote/&/</> をエスケープ)
 // escapeAttr は components.js から import 済み
 import {
@@ -658,6 +659,67 @@ export async function mount(root) {
     }
   });
 
+  // 3. 重複楽曲のスキャン & クリーンアップ
+  let foundDuplicateGroups = [];
+  if (refs.btnDedupScan) {
+    refs.btnDedupScan.addEventListener("click", async () => {
+      refs.btnDedupScan.disabled = true;
+      refs.btnDedupScan.textContent = "スキャン中…";
+      if (refs.dedupScanStatus) refs.dedupScanStatus.textContent = "ライブラリ内の曲を照合しています…";
+      try {
+        const tracks = await getAllTracks();
+        foundDuplicateGroups = findDuplicateGroups(tracks);
+        if (foundDuplicateGroups.length === 0) {
+          if (refs.dedupScanStatus) {
+            refs.dedupScanStatus.innerHTML = "✅ 重複楽曲は見つかりませんでした（ライブラリは整理されています）";
+          }
+          if (refs.btnDedupClean) refs.btnDedupClean.style.display = "none";
+          toast("重複楽曲は見つかりませんでした", "ok");
+        } else {
+          const totalDups = foundDuplicateGroups.reduce((acc, g) => acc + g.duplicates.length, 0);
+          if (refs.dedupScanStatus) {
+            refs.dedupScanStatus.innerHTML = `⚠️ <strong>${foundDuplicateGroups.length} 組</strong>（計 <strong>${totalDups} 曲</strong>）の重複楽曲が見つかりました。「重複を削除して統合」を押すと、メモ・お気に入り・再生回数を残したまま重複を安全に削除できます。`;
+          }
+          if (refs.btnDedupClean) refs.btnDedupClean.style.display = "inline-block";
+        }
+      } catch (err) {
+        toast(`スキャンエラー: ${err.message}`, "err");
+      } finally {
+        refs.btnDedupScan.disabled = false;
+        refs.btnDedupScan.textContent = "🔍 重複をスキャン";
+      }
+    });
+  }
+
+  if (refs.btnDedupClean) {
+    refs.btnDedupClean.addEventListener("click", async () => {
+      const totalDups = foundDuplicateGroups.reduce((acc, g) => acc + g.duplicates.length, 0);
+      const yes = await confirm(
+        `${totalDups} 曲の重複楽曲を削除して統合しますか？\n（メモ・お気に入り・再生回数・歌詞は保護され、1曲に引き継がれます）`,
+        { danger: true, okLabel: "重複を削除" }
+      );
+      if (!yes) return;
+
+      refs.btnDedupClean.disabled = true;
+      refs.btnDedupClean.textContent = "整理中…";
+      toast("重複楽曲を統合・削除中…", "info");
+      try {
+        const res = await cleanDuplicateTracks();
+        toast(`${res.removedCount} 曲の重複を削除・統合しました`, "ok");
+        if (refs.dedupScanStatus) {
+          refs.dedupScanStatus.innerHTML = `✅ ${res.removedCount} 曲の重複を削除・統合しました。ライブラリが整理されました。`;
+        }
+        refs.btnDedupClean.style.display = "none";
+        foundDuplicateGroups = [];
+        remount();
+      } catch (err) {
+        toast(`重複削除エラー: ${err.message}`, "err");
+        refs.btnDedupClean.disabled = false;
+        refs.btnDedupClean.textContent = "✨ 重複を削除して統合";
+      }
+    });
+  }
+
   function remount() {
     // remount でも購読を一度クリアして mount 内で再登録する
     // (mount 冒頭の clearViewSubscriptions() でも実行されるが、
@@ -934,6 +996,23 @@ function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices, dr
       </div>
 
       <div class="settings-section">
+        <h2>🧹 ライブラリの整理・重複削除</h2>
+        <div class="settings-row">
+          <div>
+            <div class="label">重複楽曲を検出・クリーンアップ</div>
+            <div class="help">
+              ライブラリ内に同じ曲（曲名・アーティスト・再生時間が一致）が複数存在する場合、メモやお気に入り、再生回数、歌詞などの情報を安全に引き継いで1曲に統合し、重複した曲を削除します。
+            </div>
+            <div id="dedup-scan-status" style="font-size: 12px; color: var(--fg-muted); margin-top: 8px;"></div>
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+            <button class="btn" id="btn-dedup-scan" style="white-space:nowrap;">🔍 重複をスキャン</button>
+            <button class="btn danger" id="btn-dedup-clean" style="white-space:nowrap; display: none; font-weight: 600;">✨ 重複を削除して統合</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
         <h2>表示</h2>
         <div class="settings-row">
           <div>
@@ -1171,6 +1250,9 @@ function collect(root) {
     btnDriveSyncExport: root.querySelector("#btn-drive-sync-export"),
     btnDriveSyncImport: root.querySelector("#btn-drive-sync-import"),
     driveSyncStatus: root.querySelector("#drive-sync-status"),
+    btnDedupScan: root.querySelector("#btn-dedup-scan"),
+    btnDedupClean: root.querySelector("#btn-dedup-clean"),
+    dedupScanStatus: root.querySelector("#dedup-scan-status"),
     scrobbleChk: root.querySelector("#scrobble-chk"),
     nowPlayingChk: root.querySelector("#nowplaying-chk"),
     btnHelpToggle: root.querySelector("#btn-help-toggle"),

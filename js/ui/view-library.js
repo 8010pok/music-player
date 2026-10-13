@@ -23,6 +23,7 @@ import { openYouTubeDownloadModal } from "./youtube-modal.js";
 import { exportLibraryToDrive, importLibraryFromDrive, getDriveSyncFileInfo } from "../store/sync-service.js";
 import { groupTracksIntoAlbums, sortAlbums } from "../metadata/album-util.js";
 import { groupTracksIntoArtists, sortArtists } from "../metadata/artist-util.js";
+import { findDuplicateInList, cleanDuplicateTracks, findDuplicateGroups } from "../store/dedup-service.js";
 
 // ファイル拡張子の許可リスト
 const ALLOW_EXT = /\.(mp3|m4a|m4b|aac|mp4|flac|ogg|oga|opus|wav|webm)$/i;
@@ -1121,28 +1122,39 @@ async function ingestFile(file) {
   }
   const id = await hashFile(file);
   // ★ 既存レコードの再取込(同一 id)では、ユーザ管理項目を維持してデータ消失を防ぐ。
-  //   フォルダ再選択等で過去に取り込んだ曲を再 ingest しても、再生回数・お気に入り・
-  //   再生有効/無効・手動並び順(order)・追加日時を引き継ぐ(rescanMeta の「ユーザ管理項目は
-  //   維持」方針に揃える)。メタ/duration/fileSize は新規パース結果で更新し、artworkBlob は
-  //   新規取得できたときだけ差し替え、取れなければ既存を温存する(rescanMeta と同方針)。
-  const existing = await getTrack(id);
+  //   さらに、ファイルハッシュが異なっていてもライブラリ内に同一曲（曲名・アーティスト・時間一致）が
+  //   既に存在する場合は、重複レコードを作成せず既存曲の ID を引き継いで更新する。
+  let existing = await getTrack(id);
+  if (!existing && Array.isArray(tracksCache)) {
+    const candidate = {
+      title: meta.title,
+      artist: meta.artist,
+      duration: duration || 0,
+      originalName: file.name,
+      fileSize: file.size,
+    };
+    const duplicate = findDuplicateInList(candidate, tracksCache);
+    if (duplicate) {
+      existing = duplicate;
+    }
+  }
+
+  const trackId = existing ? existing.id : id;
   const track = {
-    id,
-    title: meta.title,
-    artist: meta.artist,
-    album: meta.album || "",
-    albumArtist: meta.albumArtist || "",
-    year: meta.year || "",
-    genre: meta.genre || "",
-    trackNo: meta.trackNo || "",
-    // composer/discNo/bpm はパーサ拡張で追加された項目。従来 ingest 時に保存されず rescanMeta
-    //   でしか入らなかったため、取込時にも保存する(他メタ項目と同様、再取込時は新規パース値を
-    //   優先し、取れなければ既存値を温存して rescan 済みの値を putTrack の全置換で失わない)。
+    id: trackId,
+    title: existing && existing.userEdited ? existing.title : meta.title,
+    artist: existing && existing.userEdited ? existing.artist : meta.artist,
+    album: existing && existing.userEdited ? existing.album : (meta.album || (existing && existing.album) || ""),
+    albumArtist: existing && existing.userEdited ? existing.albumArtist : (meta.albumArtist || (existing && existing.albumArtist) || ""),
+    year: (existing && existing.year) || meta.year || "",
+    genre: (existing && existing.genre) || meta.genre || "",
+    trackNo: (existing && existing.trackNo) || meta.trackNo || "",
+    // composer/discNo/bpm はパーサ拡張で追加された項目
     composer: meta.composer || (existing && existing.composer) || "",
     discNo: meta.discNo || (existing && existing.discNo) || "",
     bpm: meta.bpm || (existing && existing.bpm) || "",
     audioProps: meta.audioProps || (existing && existing.audioProps) || null,
-    duration: duration || 0,
+    duration: duration || (existing && existing.duration) || 0,
     mime: meta.mime || mimeFromName(file.name),
     format: meta.format || formatFromName(file.name) || "unknown",
     addedAt: existing ? (existing.addedAt || Date.now()) : Date.now(),
@@ -1153,14 +1165,15 @@ async function ingestFile(file) {
     fileSize: file.size,
     originalName: file.name,
     artworkBlob: meta.artworkBlob || (existing && existing.artworkBlob) || null,
+    memo: (existing && existing.memo) || "",
+    userEdited: existing ? !!existing.userEdited : false,
   };
-  // 手動並び順(order)は既存があれば維持する(orderOf は order 無→addedAt にフォールバック)。
+  if (existing && existing.driveFileId) track.driveFileId = existing.driveFileId;
+  // 手動並び順(order)は既存があれば維持する
   if (existing && typeof existing.order === "number") track.order = existing.order;
   await putTrack(track, file);
-  // ★ 同一 id (同名・同サイズ・同更新日時) を再追加した場合、artwork-cache に
-  //   旧 blob の URL がキャッシュされたままだと古いアートワークが表示される。
-  //   新規 id なら no-op、再追加なら旧 URL を破棄して次の描画で再生成させる。
-  releaseArtwork(id);
+  // 同一 id / 既存 id の場合、旧 blob の URL キャッシュを破棄して次の描画で再生成
+  releaseArtwork(trackId);
   return track;
 }
 
@@ -1425,6 +1438,32 @@ async function openSyncModal(refs) {
     title: "🔄 端末間ライブラリ同期",
     body: wrap,
     actions: [
+      {
+        label: "🧹 重複曲を整理",
+        onClick: async () => {
+          const tracks = await getAllTracks();
+          const groups = findDuplicateGroups(tracks);
+          if (groups.length === 0) {
+            toast("重複楽曲は見つかりませんでした（ライブラリは整理されています）", "ok");
+            return false;
+          }
+          const totalDups = groups.reduce((acc, g) => acc + g.duplicates.length, 0);
+          const yes = await confirm(
+            `${totalDups} 曲の重複楽曲が見つかりました。削除して統合しますか？\n（メモ・お気に入り・再生回数などは保護されます）`,
+            { danger: true, okLabel: "重複を削除" }
+          );
+          if (!yes) return false;
+          try {
+            const res = await cleanDuplicateTracks();
+            toast(`${res.removedCount} 曲の重複を削除・統合しました`, "ok");
+            await reloadTracks(activeRefs || refs);
+            await refreshStorage(activeRefs || refs);
+          } catch (e) {
+            toast(`重複削除エラー: ${e.message}`, "err");
+          }
+          return false;
+        },
+      },
       {
         label: "設定画面を開く",
         onClick: () => {

@@ -16,6 +16,7 @@ import {
   fetchDriveTextFile,
   getOrCreateDriveFolder,
 } from "../gdrive/drive-service.js";
+import { findDuplicateInList } from "./dedup-service.js";
 
 const SYNC_FILE_NAME = "music-player-library-sync.json";
 
@@ -132,7 +133,14 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
     if (!incoming || !incoming.id) continue;
     incomingIds.add(incoming.id);
 
-    const existing = existingMap.get(incoming.id);
+    let existing = existingMap.get(incoming.id);
+    if (!existing) {
+      // ID が異なっていても、タイトル・アーティスト・時間の一致する曲を既存から探す
+      const dup = findDuplicateInList(incoming, existingTracks);
+      if (dup) {
+        existing = dup;
+      }
+    }
 
     if (existing) {
       // 既存曲がある場合: iPad/送信元で変更されたメタデータを安全にマージ！

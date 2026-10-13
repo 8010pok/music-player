@@ -12,6 +12,7 @@ import { putTrack, getTrack, getAllTracks } from "../store/library-db.js";
 import { extractMetadata, readDurationViaAudio } from "../metadata/index.js";
 import { formatFromName, mimeFromName } from "../metadata/util.js";
 import { openModal, toast, escapeHtml, escapeAttr } from "../ui/components.js";
+import { findDuplicateInList } from "../store/dedup-service.js";
 
 let _cachedToken = null;
 let _gisTokenClient = null;
@@ -532,6 +533,7 @@ export function inferMetadataFromFileName(filename, folderName = "") {
 export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false, defaultAlbumName = "", onProgress } = {}) {
   let added = 0;
   let failed = 0;
+  const allExistingTracks = await getAllTracks().catch(() => []);
 
   for (let i = 0; i < driveFiles.length; i++) {
     const file = driveFiles[i];
@@ -540,10 +542,27 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
     }
 
     try {
-      const trackId = trackIdFromDriveFileId(file.id);
-      const existing = await getTrack(trackId);
+      let trackId = trackIdFromDriveFileId(file.id);
+      let existing = await getTrack(trackId);
       const folder = file.folderName || defaultAlbumName || "";
       const inferred = inferMetadataFromFileName(file.name, folder);
+
+      // ★ 重複防止チェック: すでに同じ曲がライブラリに存在する場合は既存曲を引き継ぐ
+      if (!existing && Array.isArray(allExistingTracks)) {
+        const candidate = {
+          title: inferred.title || stripExt(file.name),
+          artist: inferred.artist,
+          album: folder,
+          driveFileId: file.id,
+          originalName: file.name,
+          fileSize: parseInt(file.size, 10) || 0,
+        };
+        const dup = findDuplicateInList(candidate, allExistingTracks);
+        if (dup) {
+          existing = dup;
+          trackId = dup.id;
+        }
+      }
 
       if (cacheBlobs) {
         // Blob をダウンロードして完全メタデータを抽出
