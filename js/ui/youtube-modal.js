@@ -655,10 +655,12 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
         },
       });
 
-      if (destination === "download") {
-        // 端末ダウンロード
+      // 端末保存 & ローカルライブラリ追加 & 即時再生の共通ヘルパー
+      async function saveToLocalAndDownload() {
         loadingStatus.textContent = "端末へダウンロード中…";
-        loadingBar.style.width = "100%";
+        loadingBar.style.width = "85%";
+
+        // 1. 端末へダウンロード
         const dlUrl = URL.createObjectURL(mp3Blob);
         const a = document.createElement("a");
         a.href = dlUrl;
@@ -670,84 +672,136 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
           URL.revokeObjectURL(dlUrl);
         }, 1000);
 
-        toast(`「${filename}」をダウンロードしました`, "ok");
+        // 2. ローカルライブラリ（IndexedDB）に登録
+        loadingStatus.textContent = "ライブラリに曲を追加中…";
+        loadingBar.style.width = "95%";
+        const trackId = `loc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const newTrack = {
+          id: trackId,
+          title,
+          artist,
+          album,
+          albumArtist: artist,
+          duration: Math.round(cutEndTime - cutStartTime) || 0,
+          source: "local",
+          format: "mp3",
+          mimeType: "audio/mpeg",
+          fileSize: mp3Blob.size,
+          addedAt: Date.now(),
+          userEdited: true,
+        };
+        if (memo) newTrack.memo = memo;
+        if (currentArtworkBlob) newTrack.artworkBlob = currentArtworkBlob;
+
+        await putTrack(newTrack, mp3Blob);
+
+        if (typeof onSaved === "function") {
+          try { onSaved(newTrack); } catch (_) {}
+        }
+
+        // 3. 即座にライブラリから再生を開始！
+        loadingBar.style.width = "100%";
+        loadingStatus.textContent = "再生を開始中…";
+        try {
+          await setQueueAndPlay([newTrack], 0);
+        } catch (playErr) {
+          console.warn("[yt] 即時再生開始エラー:", playErr);
+        }
+
+        toast(`✅ 端末にダウンロードし、ライブラリに追加しました！（再生を開始）`, "ok", 4000);
         return true;
+      }
+
+      if (destination === "download") {
+        return await saveToLocalAndDownload();
       }
 
       // 3. Google Drive 保存
       loadingStatus.textContent = "Google Drive 接続を確認中…";
       loadingBar.style.width = "75%";
 
-      const connected = await isDriveConnected();
+      let connected = await isDriveConnected();
       if (!connected) {
-        loadingStatus.textContent = "Google Drive に接続してください…";
         const pub = getPublic();
         if (pub.gdriveClientId) {
-          await requestGisToken(pub.gdriveClientId);
-        } else {
-          toast("Google Drive 連携の初期設定が必要です。設定画面から Client ID を設定してください。", "err", 5000);
-          stepLoading.style.display = "none";
-          stepEditor.style.display = "block";
-          return false;
+          try {
+            loadingStatus.textContent = "Google Drive に再接続中…";
+            await requestGisToken(pub.gdriveClientId);
+            connected = await isDriveConnected();
+          } catch (authErr) {
+            console.warn("[yt] Google Drive 認証エラー:", authErr);
+          }
         }
       }
 
+      if (!connected) {
+        toast("Google Drive 未接続のため、端末へのダウンロードとライブラリ追加に切り替えました", "info", 4500);
+        return await saveToLocalAndDownload();
+      }
+
       loadingStatus.textContent = "Google Drive「MUSIC-PLAYER」へアップロード中…";
-      const uploaded = await uploadFileToDrive({
-        name: filename,
-        blob: mp3Blob,
-        mimeType: "audio/mpeg",
-        folderName: "MUSIC-PLAYER",
-        onProgress: (pct) => {
-          loadingBar.style.width = `${75 + Math.round(pct * 0.2)}%`;
-        },
-      });
-
-      // 4. ライブラリに Google Drive トラックとして登録
-      loadingStatus.textContent = "ライブラリに曲を追加中…";
-      const trackId = `gd-${uploaded.id || Date.now()}`;
-      const newTrack = {
-        id: trackId,
-        title,
-        artist,
-        album,
-        albumArtist: artist,
-        duration: Math.round(cutEndTime - cutStartTime),
-        source: "gdrive",
-        format: "mp3",
-        mimeType: "audio/mpeg",
-        fileSize: mp3Blob.size,
-        addedAt: Date.now(),
-        userEdited: true,
-      };
-      if (memo) {
-        newTrack.memo = memo;
-      }
-
-      if (currentArtworkBlob) {
-        newTrack.artworkBlob = currentArtworkBlob;
-      }
-
-      await putTrack(newTrack, mp3Blob);
-
-      loadingBar.style.width = "100%";
-      loadingStatus.textContent = "再生を開始中…";
-
-      if (typeof onSaved === "function") {
-        try {
-          onSaved(newTrack);
-        } catch (_) {}
-      }
-
-      // 5. 確認ダイアログを挟まず、即座にライブラリから再生を開始！
       try {
-        await setQueueAndPlay([newTrack], 0);
-      } catch (playErr) {
-        console.warn("[yt] 即時再生開始エラー:", playErr);
-      }
+        const uploaded = await uploadFileToDrive({
+          name: filename,
+          blob: mp3Blob,
+          mimeType: "audio/mpeg",
+          folderName: "MUSIC-PLAYER",
+          onProgress: (pct) => {
+            loadingBar.style.width = `${75 + Math.round(pct * 0.2)}%`;
+          },
+        });
 
-      toast(`✅ Google Drive に保存し、「${title}」の再生を開始しました！`, "ok", 4000);
-      return true;
+        // 4. ライブラリに Google Drive トラックとして登録
+        loadingStatus.textContent = "ライブラリに曲を追加中…";
+        const trackId = `gd-${uploaded.id || Date.now()}`;
+        const newTrack = {
+          id: trackId,
+          title,
+          artist,
+          album,
+          albumArtist: artist,
+          duration: Math.round(cutEndTime - cutStartTime) || 0,
+          source: "gdrive",
+          format: "mp3",
+          mimeType: "audio/mpeg",
+          fileSize: mp3Blob.size,
+          addedAt: Date.now(),
+          userEdited: true,
+          driveFileId: uploaded.id,
+          driveFileName: filename,
+        };
+        if (memo) {
+          newTrack.memo = memo;
+        }
+        if (currentArtworkBlob) {
+          newTrack.artworkBlob = currentArtworkBlob;
+        }
+
+        await putTrack(newTrack, mp3Blob);
+
+        loadingBar.style.width = "100%";
+        loadingStatus.textContent = "再生を開始中…";
+
+        if (typeof onSaved === "function") {
+          try {
+            onSaved(newTrack);
+          } catch (_) {}
+        }
+
+        // 5. 即座にライブラリから再生を開始！
+        try {
+          await setQueueAndPlay([newTrack], 0);
+        } catch (playErr) {
+          console.warn("[yt] 即時再生開始エラー:", playErr);
+        }
+
+        toast(`✅ Google Drive に保存し、「${title}」の再生を開始しました！`, "ok", 4000);
+        return true;
+      } catch (driveErr) {
+        console.error("[yt] Google Drive アップロードエラー:", driveErr);
+        toast(`Google Drive 保存に失敗したため、端末とライブラリに保存します (${driveErr.message || "通信エラー"})`, "info", 5000);
+        return await saveToLocalAndDownload();
+      }
     } catch (err) {
       stepLoading.style.display = "none";
       stepEditor.style.display = "block";
