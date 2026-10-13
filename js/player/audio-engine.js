@@ -951,12 +951,18 @@ async function loadAndPlay(track) {
         state.consecutiveSkips = 0;
       } catch (err) {
         // ★ ここで自動スキップしない（mp3player の挙動に合わせる）。
-        //   iOS のロック画面再生で play() が一時的に失敗するケース
-        //   （audio session 取り合い、自動再生制約、AbortError 等）が
-        //   あり、自動次曲スキップすると「ロック画面 pause タップで曲が
-        //   消える」「次曲が再生されない」等の連鎖不具合になる。
-        //   ログのみ残し、isPlaying:false で UI を pause 表示にする。
-        //   ユーザが再生ボタンをタップすれば復旧可能。
+        //   iOS や一部ブラウザでロード直後に前の再生中断が AbortError となって
+        //   play() が一時的に拒否される場合があるため、一度だけ微小遅延で再試行。
+        if (err?.name === "AbortError" && !state.userPausedExplicitly && state.currentTrackId === track.id) {
+          try {
+            await new Promise((r) => setTimeout(r, 60));
+            if (!state.userPausedExplicitly && state.currentTrackId === track.id) {
+              await audioEl.play();
+              state.consecutiveSkips = 0;
+              return;
+            }
+          } catch (_) {}
+        }
         console.warn("[audio-engine] play 失敗", err);
         appState.set({ isPlaying: false });
       }
@@ -1074,7 +1080,9 @@ async function skipToNextOnError(reason, failedTrack) {
  *        通常時は数十 ms で loadedmetadata が発火するので、8 秒に
  *        延長してもフォアグラウンド動作には影響しない (発火即時 resolve)。
  */
-function waitForLoadedMetadata(timeoutMs = 8000) {
+function waitForLoadedMetadata(timeoutMs = 3000) {
+  // すでにメタデータ取得済み (HAVE_METADATA 以上) ならイベントを待たずに即時解決
+  if (audioEl.readyState >= 1) return Promise.resolve();
   return new Promise((resolve) => {
     let done = false;
     const finish = () => {

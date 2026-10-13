@@ -74,46 +74,64 @@ export async function searchTrackMetadata(query, { artist = "" } = {}) {
     console.warn("[musicbrainz] iTunes 曲検索失敗:", e);
   }
 
-  // 2. MusicBrainz API (オープンデータベース)
+  // 2. MusicBrainz API (オープンデータベース & Cover Art Archive)
   try {
-    const mbQuery = cleanA
-      ? `recording:"${cleanQ.replace(/"/g, "")}" AND artist:"${cleanA.replace(/"/g, "")}"`
-      : `recording:"${cleanQ.replace(/"/g, "")}"`;
-    const mbUrl = `https://musicbrainz.org/ws/2/recording/?query=${encodeURIComponent(mbQuery)}&fmt=json&limit=5`;
-    const res = await fetch(mbUrl, {
-      headers: { "User-Agent": "MUSIC-PLAYER/1.0 (https://music-player.app)" },
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data.recordings)) {
-        for (const rec of data.recordings) {
-          const artistName = rec["artist-credit"]?.[0]?.name || rec["artist-credit"]?.[0]?.artist?.name || "";
-          const release = rec.releases?.[0];
-          const albumName = release?.title || "";
-          const year = release?.date ? release.date.substring(0, 4) : "";
-          const trackNo = release?.media?.[0]?.tracks?.[0]?.number || "";
-          const genre = rec.tags?.[0]?.name || "";
+    const safeQ = cleanQ.replace(/["\\]/g, "");
+    const safeA = cleanA.replace(/["\\]/g, "");
+    const queryCandidates = [];
+    if (safeA && safeQ) {
+      queryCandidates.push(`recording:"${safeQ}" AND artist:"${safeA}"`);
+      queryCandidates.push(`${safeA} ${safeQ}`);
+    }
+    if (safeQ) {
+      queryCandidates.push(`recording:"${safeQ}"`);
+      queryCandidates.push(safeQ);
+    }
 
-          // 重複チェック (同一タイトル+アーティストがiTunesに無ければ追加)
-          const isDup = results.some(
-            (r) => r.title.toLowerCase() === rec.title.toLowerCase() && r.artist.toLowerCase() === artistName.toLowerCase()
-          );
-          if (!isDup) {
-            results.push({
-              id: rec.id,
-              title: rec.title || "",
-              artist: artistName,
-              album: albumName,
-              albumArtist: artistName,
-              trackNo,
-              year,
-              genre,
-              artworkUrl: null,
-              source: "MusicBrainz",
-            });
+    let recordings = [];
+    for (const qStr of queryCandidates) {
+      try {
+        const mbUrl = `https://musicbrainz.org/ws/2/recording/?query=${encodeURIComponent(qStr)}&fmt=json&limit=10`;
+        const res = await fetch(mbUrl, {
+          headers: { "User-Agent": "MUSIC-PLAYER/1.0 (https://music-player.app)" },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.recordings) && data.recordings.length > 0) {
+            recordings = data.recordings;
+            break;
           }
         }
+      } catch (err) {
+        // 次のクエリ候補へフォールバック
       }
+    }
+
+    for (const rec of recordings) {
+      const artistName = rec["artist-credit"]?.[0]?.name || rec["artist-credit"]?.[0]?.artist?.name || "";
+      const release = rec.releases?.[0];
+      const albumName = release?.title || "";
+      const year = release?.date ? release.date.substring(0, 4) : "";
+      const trackNo = release?.media?.[0]?.tracks?.[0]?.number || "";
+      const genre = rec.tags?.[0]?.name || "";
+      const releaseId = release?.id;
+      // Cover Art Archive 公式 CORS 対応 URL
+      const artworkUrl = releaseId
+        ? `https://coverartarchive.org/release/${releaseId}/front-500`
+        : null;
+
+      results.push({
+        id: rec.id,
+        title: rec.title || "",
+        artist: artistName,
+        album: albumName,
+        albumArtist: artistName,
+        trackNo,
+        year,
+        genre,
+        artworkUrl,
+        source: "MusicBrainz",
+      });
     }
   } catch (e) {
     console.warn("[musicbrainz] MusicBrainz 曲検索失敗:", e);
@@ -171,41 +189,59 @@ export async function searchAlbumMetadata(query, { artist = "" } = {}) {
     console.warn("[musicbrainz] iTunes アルバム検索失敗:", e);
   }
 
-  // 2. MusicBrainz API (リリース)
+  // 2. MusicBrainz API (リリース & Cover Art Archive)
   try {
-    const mbQuery = cleanA
-      ? `release:"${cleanQ.replace(/"/g, "")}" AND artist:"${cleanA.replace(/"/g, "")}"`
-      : `release:"${cleanQ.replace(/"/g, "")}"`;
-    const mbUrl = `https://musicbrainz.org/ws/2/release/?query=${encodeURIComponent(mbQuery)}&fmt=json&limit=5`;
-    const res = await fetch(mbUrl, {
-      headers: { "User-Agent": "MUSIC-PLAYER/1.0 (https://music-player.app)" },
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data.releases)) {
-        for (const rel of data.releases) {
-          const artistName = rel["artist-credit"]?.[0]?.name || rel["artist-credit"]?.[0]?.artist?.name || "";
-          const year = rel.date ? rel.date.substring(0, 4) : "";
-          const trackCount = rel["track-count"] || 0;
+    const safeQ = cleanQ.replace(/["\\]/g, "");
+    const safeA = cleanA.replace(/["\\]/g, "");
+    const queryCandidates = [];
+    if (safeA && safeQ) {
+      queryCandidates.push(`release:"${safeQ}" AND artist:"${safeA}"`);
+      queryCandidates.push(`${safeA} ${safeQ}`);
+    }
+    if (safeQ) {
+      queryCandidates.push(`release:"${safeQ}"`);
+      queryCandidates.push(safeQ);
+    }
 
-          const isDup = results.some(
-            (r) => r.title.toLowerCase() === rel.title.toLowerCase() && r.artist.toLowerCase() === artistName.toLowerCase()
-          );
-          if (!isDup) {
-            results.push({
-              id: rel.id,
-              title: rel.title || "",
-              artist: artistName,
-              albumArtist: artistName,
-              year,
-              genre: "",
-              trackCount,
-              artworkUrl: null,
-              source: "MusicBrainz",
-            });
+    let releases = [];
+    for (const qStr of queryCandidates) {
+      try {
+        const mbUrl = `https://musicbrainz.org/ws/2/release/?query=${encodeURIComponent(qStr)}&fmt=json&limit=10`;
+        const res = await fetch(mbUrl, {
+          headers: { "User-Agent": "MUSIC-PLAYER/1.0 (https://music-player.app)" },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.releases) && data.releases.length > 0) {
+            releases = data.releases;
+            break;
           }
         }
+      } catch (err) {
+        // 次のクエリ候補へフォールバック
       }
+    }
+
+    for (const rel of releases) {
+      const artistName = rel["artist-credit"]?.[0]?.name || rel["artist-credit"]?.[0]?.artist?.name || "";
+      const year = rel.date ? rel.date.substring(0, 4) : "";
+      const trackCount = rel["track-count"] || 0;
+      // Cover Art Archive 公式 CORS 対応 URL
+      const artworkUrl = rel.id
+        ? `https://coverartarchive.org/release/${rel.id}/front-500`
+        : null;
+
+      results.push({
+        id: rel.id,
+        title: rel.title || "",
+        artist: artistName,
+        albumArtist: artistName,
+        year,
+        genre: "",
+        trackCount,
+        artworkUrl,
+        source: "MusicBrainz",
+      });
     }
   } catch (e) {
     console.warn("[musicbrainz] MusicBrainz アルバム検索失敗:", e);

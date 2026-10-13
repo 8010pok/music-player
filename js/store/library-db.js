@@ -152,8 +152,20 @@ export async function getTrack(id) {
  * トラック本体（Blob）取得
  */
 export async function getBlob(id) {
-  const db = await openDb();
-  const row = await txReq(db.transaction("blobs").objectStore("blobs").get(id));
+  let row = null;
+  try {
+    const db = await openDb();
+    row = await txReq(db.transaction("blobs").objectStore("blobs").get(id));
+  } catch (err) {
+    console.warn("[library-db] getBlob 初回失敗、再接続リトライ:", err);
+    try {
+      _dbPromise = null;
+      const db = await openDb();
+      row = await txReq(db.transaction("blobs").objectStore("blobs").get(id));
+    } catch (retryErr) {
+      console.warn("[library-db] getBlob リトライも失敗:", retryErr);
+    }
+  }
   if (row && row.blob) return row.blob;
 
   // Google Drive 音源でローカル未キャッシュの場合、Google Drive から取得してキャッシュ

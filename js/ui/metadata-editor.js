@@ -208,26 +208,74 @@ export function editTrackMetadata(track, onUpdated) {
           return;
         }
 
-        resultsContainer.innerHTML = results.map((res, i) => `
-          <div class="meta-search-item" data-idx="${i}" style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; border-bottom: 1px solid var(--border-color); font-size: 11px; cursor: pointer; border-radius: 4px;">
-            <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">
-              ${res.artworkUrl ? `<img src="${escapeAttr(res.artworkUrl)}" style="width: 32px; height: 32px; border-radius: 4px; object-fit: cover; flex-shrink: 0;" />` : `<div style="width: 32px; height: 32px; border-radius: 4px; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; font-size: 14px;">🎵</div>`}
-              <div style="flex: 1; min-width: 0;">
-                <div style="font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.title)}</div>
-                <div style="color: var(--fg-muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.artist)} • ${escapeHtml(res.album || "アルバム不明")} (${escapeHtml(res.source)})</div>
+        const itunesResults = results.filter((r) => r.source === "iTunes");
+        const mbResults = results.filter((r) => r.source === "MusicBrainz");
+
+        // どちらか一方に結果があればそちらを初期表示
+        const defaultTab = itunesResults.length > 0 ? "itunes" : "mb";
+
+        const renderItemList = (list, prefix) => {
+          if (!list || list.length === 0) {
+            return `<div style="padding: 10px; text-align: center; color: var(--fg-muted); font-size: 11px;">候補がありません</div>`;
+          }
+          return list.map((res, i) => `
+            <div class="meta-search-item" data-source="${escapeAttr(prefix)}" data-idx="${i}" style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; border-bottom: 1px solid var(--border-color); font-size: 11px; cursor: pointer; border-radius: 4px;">
+              <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">
+                <div style="width: 34px; height: 34px; border-radius: 4px; overflow: hidden; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 14px; position: relative;">
+                  ${res.artworkUrl
+                    ? `<img src="${escapeAttr(res.artworkUrl)}" style="width: 100%; height: 100%; object-fit: cover; display: block;" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" /><div style="display: none; width: 100%; height: 100%; align-items: center; justify-content: center;">🎵</div>`
+                    : `🎵`}
+                </div>
+                <div style="flex: 1; min-width: 0;">
+                  <div style="font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.title)}</div>
+                  <div style="color: var(--fg-muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.artist)} • ${escapeHtml(res.album || "アルバム不明")}${res.year ? ` (${escapeHtml(res.year)})` : ""}</div>
+                </div>
               </div>
+              <button type="button" class="btn btn-apply-meta" data-source="${escapeAttr(prefix)}" data-idx="${i}" style="padding: 3px 8px; font-size: 10px; white-space: nowrap; margin-left: 6px;">
+                反映
+              </button>
             </div>
-            <button type="button" class="btn btn-apply-meta" data-idx="${i}" style="padding: 3px 8px; font-size: 10px; white-space: nowrap; margin-left: 6px;">
-              反映
+          `).join("");
+        };
+
+        resultsContainer.innerHTML = `
+          <div class="meta-source-tabs" style="display: flex; gap: 4px; border-bottom: 1px solid var(--border-color); margin-bottom: 6px; padding-bottom: 6px;">
+            <button type="button" class="btn btn-source-tab ${defaultTab === "itunes" ? "primary" : ""}" data-tab="itunes" style="padding: 3px 8px; font-size: 11px; flex: 1;">
+              🍎 iTunes (${itunesResults.length})
+            </button>
+            <button type="button" class="btn btn-source-tab ${defaultTab === "mb" ? "primary" : ""}" data-tab="mb" style="padding: 3px 8px; font-size: 11px; flex: 1;">
+              🧠 MusicBrainz (${mbResults.length})
             </button>
           </div>
-        `).join("");
+          <div id="meta-tab-pane-itunes" style="display: ${defaultTab === "itunes" ? "block" : "none"};">
+            ${renderItemList(itunesResults, "itunes")}
+          </div>
+          <div id="meta-tab-pane-mb" style="display: ${defaultTab === "mb" ? "block" : "none"};">
+            ${renderItemList(mbResults, "mb")}
+          </div>
+        `;
 
+        // タブ切り替えハンドラ
+        resultsContainer.querySelectorAll(".btn-source-tab").forEach((tabBtn) => {
+          tabBtn.addEventListener("click", () => {
+            resultsContainer.querySelectorAll(".btn-source-tab").forEach((b) => b.classList.remove("primary"));
+            tabBtn.classList.add("primary");
+            const tab = tabBtn.dataset.tab;
+            const paneItunes = resultsContainer.querySelector("#meta-tab-pane-itunes");
+            const paneMb = resultsContainer.querySelector("#meta-tab-pane-mb");
+            if (paneItunes) paneItunes.style.display = tab === "itunes" ? "block" : "none";
+            if (paneMb) paneMb.style.display = tab === "mb" ? "block" : "none";
+          });
+        });
+
+        // 反映ボタンハンドラ
         resultsContainer.querySelectorAll(".btn-apply-meta").forEach((btn) => {
           btn.addEventListener("click", async (e) => {
             e.stopPropagation();
+            const source = btn.dataset.source;
             const idx = parseInt(btn.dataset.idx, 10);
-            const sel = results[idx];
+            const targetList = source === "itunes" ? itunesResults : mbResults;
+            const sel = targetList[idx];
             if (!sel) return;
 
             body.querySelector("#meta-title").value = sel.title || "";
@@ -247,7 +295,7 @@ export function editTrackMetadata(track, onUpdated) {
               }
             }
 
-            toast(`「${sel.title}」の情報を入力欄に反映しました`, "ok");
+            toast(`「${sel.title}」(${sel.source}) の情報を反映しました`, "ok");
             resultsContainer.style.display = "none";
           });
         });
@@ -261,6 +309,8 @@ export function editTrackMetadata(track, onUpdated) {
 
     searchBtn.addEventListener("click", performSearch);
     searchInput.addEventListener("keydown", (e) => {
+      // ★ IME 変換中の Enter 確定を保護
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === "Enter") {
         e.preventDefault();
         performSearch();
@@ -548,26 +598,71 @@ export function editAlbumMetadata(album, onUpdated) {
           return;
         }
 
-        resultsContainer.innerHTML = results.map((res, i) => `
-          <div class="meta-search-item" data-idx="${i}" style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; border-bottom: 1px solid var(--border-color); font-size: 11px; cursor: pointer; border-radius: 4px;">
-            <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">
-              ${res.artworkUrl ? `<img src="${escapeAttr(res.artworkUrl)}" style="width: 32px; height: 32px; border-radius: 4px; object-fit: cover; flex-shrink: 0;" />` : `<div style="width: 32px; height: 32px; border-radius: 4px; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; font-size: 14px;">💿</div>`}
-              <div style="flex: 1; min-width: 0;">
-                <div style="font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.title)}</div>
-                <div style="color: var(--fg-muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.artist)} • ${escapeHtml(res.year || "年不明")} (${res.trackCount ? res.trackCount + "曲" : ""}) [${escapeHtml(res.source)}]</div>
+        const itunesResults = results.filter((r) => r.source === "iTunes");
+        const mbResults = results.filter((r) => r.source === "MusicBrainz");
+        const defaultTab = itunesResults.length > 0 ? "itunes" : "mb";
+
+        const renderAlbumList = (list, prefix) => {
+          if (!list || list.length === 0) {
+            return `<div style="padding: 10px; text-align: center; color: var(--fg-muted); font-size: 11px;">候補がありません</div>`;
+          }
+          return list.map((res, i) => `
+            <div class="meta-search-item" data-source="${escapeAttr(prefix)}" data-idx="${i}" style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; border-bottom: 1px solid var(--border-color); font-size: 11px; cursor: pointer; border-radius: 4px;">
+              <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">
+                <div style="width: 34px; height: 34px; border-radius: 4px; overflow: hidden; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 14px; position: relative;">
+                  ${res.artworkUrl
+                    ? `<img src="${escapeAttr(res.artworkUrl)}" style="width: 100%; height: 100%; object-fit: cover; display: block;" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" /><div style="display: none; width: 100%; height: 100%; align-items: center; justify-content: center;">💿</div>`
+                    : `💿`}
+                </div>
+                <div style="flex: 1; min-width: 0;">
+                  <div style="font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.title)}</div>
+                  <div style="color: var(--fg-muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.artist)} • ${escapeHtml(res.year || "年不明")}${res.trackCount ? ` (${res.trackCount}曲)` : ""}</div>
+                </div>
               </div>
+              <button type="button" class="btn btn-apply-alb-meta" data-source="${escapeAttr(prefix)}" data-idx="${i}" style="padding: 3px 8px; font-size: 10px; white-space: nowrap; margin-left: 6px;">
+                一括反映
+              </button>
             </div>
-            <button type="button" class="btn btn-apply-alb-meta" data-idx="${i}" style="padding: 3px 8px; font-size: 10px; white-space: nowrap; margin-left: 6px;">
-              一括反映
+          `).join("");
+        };
+
+        resultsContainer.innerHTML = `
+          <div class="meta-source-tabs" style="display: flex; gap: 4px; border-bottom: 1px solid var(--border-color); margin-bottom: 6px; padding-bottom: 6px;">
+            <button type="button" class="btn btn-alb-source-tab ${defaultTab === "itunes" ? "primary" : ""}" data-tab="itunes" style="padding: 3px 8px; font-size: 11px; flex: 1;">
+              🍎 iTunes (${itunesResults.length})
+            </button>
+            <button type="button" class="btn btn-alb-source-tab ${defaultTab === "mb" ? "primary" : ""}" data-tab="mb" style="padding: 3px 8px; font-size: 11px; flex: 1;">
+              🧠 MusicBrainz (${mbResults.length})
             </button>
           </div>
-        `).join("");
+          <div id="meta-alb-tab-pane-itunes" style="display: ${defaultTab === "itunes" ? "block" : "none"};">
+            ${renderAlbumList(itunesResults, "itunes")}
+          </div>
+          <div id="meta-alb-tab-pane-mb" style="display: ${defaultTab === "mb" ? "block" : "none"};">
+            ${renderAlbumList(mbResults, "mb")}
+          </div>
+        `;
+
+        // タブ切り替えハンドラ
+        resultsContainer.querySelectorAll(".btn-alb-source-tab").forEach((tabBtn) => {
+          tabBtn.addEventListener("click", () => {
+            resultsContainer.querySelectorAll(".btn-alb-source-tab").forEach((b) => b.classList.remove("primary"));
+            tabBtn.classList.add("primary");
+            const tab = tabBtn.dataset.tab;
+            const paneItunes = resultsContainer.querySelector("#meta-alb-tab-pane-itunes");
+            const paneMb = resultsContainer.querySelector("#meta-alb-tab-pane-mb");
+            if (paneItunes) paneItunes.style.display = tab === "itunes" ? "block" : "none";
+            if (paneMb) paneMb.style.display = tab === "mb" ? "block" : "none";
+          });
+        });
 
         resultsContainer.querySelectorAll(".btn-apply-alb-meta").forEach((btn) => {
           btn.addEventListener("click", async (e) => {
             e.stopPropagation();
+            const source = btn.dataset.source;
             const idx = parseInt(btn.dataset.idx, 10);
-            const sel = results[idx];
+            const targetList = source === "itunes" ? itunesResults : mbResults;
+            const sel = targetList[idx];
             if (!sel) return;
 
             btn.textContent = "曲目取得中…";
@@ -602,9 +697,9 @@ export function editAlbumMetadata(album, onUpdated) {
                   if (artistInput && onlineSong.artist) artistInput.value = onlineSong.artist;
                 }
               });
-              toast(`「${sel.title}」の情報と ${Math.min(rows.length, onlineTracks.length)} 曲の曲名を反映しました`, "ok");
+              toast(`「${sel.title}」(${sel.source}) の情報と ${Math.min(rows.length, onlineTracks.length)} 曲の曲名を反映しました`, "ok");
             } else {
-              toast(`「${sel.title}」のアルバム情報を反映しました`, "ok");
+              toast(`「${sel.title}」(${sel.source}) のアルバム情報を反映しました`, "ok");
             }
 
             btn.textContent = "一括反映";
@@ -622,6 +717,8 @@ export function editAlbumMetadata(album, onUpdated) {
 
     searchBtn.addEventListener("click", performSearch);
     searchInput.addEventListener("keydown", (e) => {
+      // ★ IME 変換中の Enter 確定を保護
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === "Enter") {
         e.preventDefault();
         performSearch();

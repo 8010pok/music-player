@@ -13,6 +13,7 @@ import {
 } from "../js/metadata/lyrics.js";
 import {
   cleanTitleForLyrics, cleanArtistForLyrics, fetchOnlineLyrics,
+  stripParenthesesAndSubtitles, extractPrimaryArtist,
 } from "../js/metadata/lrclib.js";
 
 let passCount = 0, failCount = 0;
@@ -336,6 +337,12 @@ describe("LRCLIB: タイトル/アーティスト名クリーンアップ", () =
   assertEqual(cleanArtistForLyrics("(不明)"), "", "(不明) は空文字に変換");
   assertEqual(cleanArtistForLyrics("Queen (Official)"), "Queen", "公式表記除去");
   assertEqual(cleanArtistForLyrics("YOASOBI"), "YOASOBI", "アーティスト名保持");
+  assertEqual(stripParenthesesAndSubtitles("RIVER (Live at 京都大作戦2025)"), "RIVER", "全角半角カッコ内完全除去");
+  assertEqual(stripParenthesesAndSubtitles("アイドル - Anime Size"), "アイドル", "ハイフン以降サブタイトル除去");
+  assertEqual(stripParenthesesAndSubtitles("Pretender〜acoustic version〜"), "Pretender", "波ダッシュサブタイトル除去");
+  assertEqual(extractPrimaryArtist("Age Factory feat. JESSE"), "Age Factory", "feat. から第一アーティスト抽出");
+  assertEqual(extractPrimaryArtist("YOASOBI & Ayase"), "YOASOBI", "& から第一アーティスト抽出");
+  assertEqual(extractPrimaryArtist("10-FEET / ゲスト"), "10-FEET", "/ から第一アーティスト抽出");
 });
 
 /* ============ 結果 ============ */

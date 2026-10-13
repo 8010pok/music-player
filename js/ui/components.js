@@ -65,16 +65,21 @@ export function openModal({ title, body, actions = [] }) {
     //   - Escape: 先頭ボタン（慣例上キャンセル）を押下してダイアログを閉じる。
     // 実際のボタン要素を click することで、各ボタンの onClick（resolve(true/false/
     // null) 等）が正しく走り、Promise の取りこぼしが起きない。
+    let lastCompositionEndedAt = 0;
+    const onCompositionEnd = () => { lastCompositionEndedAt = Date.now(); };
+    document.addEventListener("compositionend", onCompositionEnd);
+
     const onKeydown = (e) => {
       // ★ IME 変換中（日本語入力など）の Enter/Escape は「変換確定 / 変換取消」の
-      //   操作であり、ダイアログ操作として扱ってはいけない。例えばプレイリスト名を
-      //   日本語入力中、変換確定の Enter でフォームが早期送信されてしまうのを防ぐ。
-      //   e.isComposing が標準。一部の旧 Android ブラウザ等は composition 中に
-      //   keyCode=229 を返すため併せて弾く。
-      if (e.isComposing || e.keyCode === 229) return;
+      //   操作であり、ダイアログ操作として扱ってはいけない。
+      //   e.isComposing が標準。keyCode=229 や直近の compositionend 直後も弾く。
+      if (e.isComposing || e.keyCode === 229 || (Date.now() - lastCompositionEndedAt < 100)) return;
       if (e.key === "Enter") {
-        // textarea の改行入力は妨げない（現状 textarea は無いが防御的に）
-        if (e.target && e.target.tagName === "TEXTAREA") return;
+        // INPUT / TEXTAREA の入力中は勝手にモーダル送信しない（曲名・アーティスト編集等の日本語変換を保護）
+        if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) {
+          // 単一 input フォーム (promptForm 等) で明示指定された場合のみ Enter 送信を許可
+          if (e.target.dataset.enterSubmit !== "true") return;
+        }
         const primary = modal.querySelector(".modal-actions .btn.primary");
         if (primary) { e.preventDefault(); primary.click(); }
       } else if (e.key === "Escape") {
@@ -85,6 +90,7 @@ export function openModal({ title, body, actions = [] }) {
 
     const close = () => {
       document.removeEventListener("keydown", onKeydown);
+      document.removeEventListener("compositionend", onCompositionEnd);
       root.hidden = true;
       root.innerHTML = "";
       resolve();
@@ -185,6 +191,7 @@ export function promptForm(title, fields, { okLabel = "OK", cancelLabel = "キ�
       // "new-password" を渡して保存プロンプトを抑止できるようにする。
       input.autocomplete = f.autocomplete || "off";
       input.spellcheck = false;
+      input.dataset.enterSubmit = "true";
       inputs[f.name] = input;
       row.appendChild(label);
       row.appendChild(input);

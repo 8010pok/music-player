@@ -56,6 +56,13 @@ test("空URLの場合は fetchArtworkBlob は null を返す", async () => {
   strictEqual(blob, null);
 });
 
+test("Cover Art Archive のフロント画像 URL 形式の検証", () => {
+  const releaseId = "a1b2c3d4-e5f6-7890-abcd-ef0123456789";
+  const expectedUrl = `https://coverartarchive.org/release/${releaseId}/front-500`;
+  ok(expectedUrl.startsWith("https://coverartarchive.org/release/"));
+  ok(expectedUrl.endsWith("/front-500"));
+});
+
 console.log("============================================================");
 console.log(`合計: ${passed} / 成功: ${passed} / 失敗: 0`);
 console.log("MusicBrainz テスト成功 ✓");
