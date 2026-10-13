@@ -13,6 +13,7 @@ import { enqueue, peek, removeMany, count } from "../store/queue-db.js";
 import { getAuth } from "./auth.js";
 import { appState } from "../state.js";
 import { toast } from "../ui/components.js";
+import { resolveScrobbleTrack, isPlaceholderArtist } from "./scrobble-cleaner.js";
 
 const MAX_BATCH = 50;
 let flushing = false;
@@ -146,19 +147,34 @@ export async function sendNowPlaying(track) {
  */
 export async function sendScrobble(track, _durationSec, startedAtMs) {
   if (!track) return "skipped";
-  // artist か曲名が空のスクロブルは Last.fm が必須項目欠落として無視する(記録されない)。
-  // それを送信/キュー登録すると「無視 → キューから無言で削除(サイレント喪失)」や、
-  // バッチ先頭に居座って後続を堰き止める原因になるため、送信前に弾いてキューを汚さない。
-  if (!track.artist || !track.title) return "skipped";
+
+  // Last.fm 最適化の正規化 & プレースホルダー救済（タイトルからの自動抽出等）
+  const resolved = resolveScrobbleTrack(track);
+  if (!resolved) return "skipped";
+
+  // アーティスト名が未設定またはプレースホルダーから救済できなかった場合
+  // （例: "YouTube" や "(不明アーティスト)" のままでタイトルからも分離不能）
+  // そのまま送ると Last.fm が code 1 (Filtered artist) で拒否するため、
+  // 事前に検知してユーザーに曲名編集・アーティスト名修正を促す。
+  if (resolved.isInvalid) {
+    const rawArtist = (track.artist || "").trim() || "未設定";
+    console.warn(`[scrobble] アーティスト名「${rawArtist}」が無効なためスクロブルできません`, track);
+    appState.set({
+      scrobbleReason: `アーティスト名が無効です (「${rawArtist}」)`,
+      scrobbleRejectedTrack: track,
+    });
+    return "ignored";
+  }
+
   // timestamp は曲の再生開始時刻を優先。startedAtMs 未指定なら現在時刻にフォールバック
   const timestamp = startedAtMs
     ? Math.floor(startedAtMs / 1000)
     : Math.floor(Date.now() / 1000);
   const payload = {
-    artist: track.artist || "",
-    track: track.title || "",
-    album: track.album || "",
-    albumArtist: track.albumArtist || "",
+    artist: resolved.artist,
+    track: resolved.title,
+    album: resolved.album || "",
+    albumArtist: resolved.albumArtist || "",
     timestamp,
     duration: track.duration ? Math.floor(track.duration) : undefined,
     trackNumber: normalizeTrackNumber(track.trackNo),
@@ -179,10 +195,13 @@ export async function sendScrobble(track, _durationSec, startedAtMs) {
       console.warn("[scrobble] Last.fm に拒否されました", ignoredInfo);
       const reasons = [...new Set(ignoredInfo.reasons || [])].filter(Boolean);
       const reasonText = reasons.length ? reasons.join(" / ") : "詳細不明";
-      appState.set({ scrobbleReason: reasonText });
+      appState.set({
+        scrobbleReason: reasonText,
+        scrobbleRejectedTrack: track,
+      });
       return "ignored";
     }
-    appState.set({ scrobbleReason: null });
+    appState.set({ scrobbleReason: null, scrobbleRejectedTrack: null });
     return "sent";
   } catch (e) {
     console.warn("scrobble 失敗", e);
@@ -255,11 +274,19 @@ export async function flushQueue() {
       // バッチ送信用パラメータを構築（インデックス記法）
       const params = {};
       items.forEach((p, i) => {
-        params[`artist[${i}]`] = p.artist || "";
-        params[`track[${i}]`] = p.track || "";
+        // キューに保存された旧データも送信前に正規化 & プレースホルダー救済
+        const resolved = resolveScrobbleTrack({
+          artist: p.artist,
+          title: p.track,
+          album: p.album,
+          albumArtist: p.albumArtist,
+        }) || p;
+
+        params[`artist[${i}]`] = resolved.artist || p.artist || "";
+        params[`track[${i}]`] = resolved.title || p.track || "";
         params[`timestamp[${i}]`] = String(p.timestamp || 0);
-        if (p.album) params[`album[${i}]`] = p.album;
-        if (p.albumArtist) params[`albumArtist[${i}]`] = p.albumArtist;
+        if (resolved.album) params[`album[${i}]`] = resolved.album;
+        if (resolved.albumArtist) params[`albumArtist[${i}]`] = resolved.albumArtist;
         if (p.duration) params[`duration[${i}]`] = String(p.duration);
         // 既にキューにある旧データが "5/12" 形式の trackNumber を持つ可能性があるため
         // 送信時にも整数へ正規化する（新規 enqueue 分は payload 構築時に正規化済み）。
@@ -376,14 +403,34 @@ export function installOnlineListener() {
   });
 }
 
+/**
+ * 特定のトラックに対して手動でスクロブルを再試行する
+ * （メタデータ編集後や拒否後のリトライ用）
+ * @param {object} track
+ * @returns {Promise<"sent" | "ignored" | "queued" | "failed" | "skipped">}
+ */
+export async function retryScrobbleForTrack(track) {
+  if (!track) return "skipped";
+  appState.set({ scrobbleResult: "sending", scrobbleReason: null });
+  const result = await sendScrobble(track, track.duration || 0, Date.now() - 30000);
+  appState.set({ scrobbleResult: result });
+  if (result === "sent") {
+    toast(`✅ 「${track.title || "曲"}」のスクロブルを送信しました`, "ok");
+  } else if (result === "ignored") {
+    toast(`⚠️ Last.fm に拒否されました (${appState.get().scrobbleReason || "アーティスト名確認"})`, "err", 5000);
+  }
+  return result;
+}
+
 /* ============ utility ============ */
 
 function buildTrackParams(track) {
+  const resolved = resolveScrobbleTrack(track) || track;
   return flatten({
-    artist: track.artist || "",
-    track: track.title || "",
-    album: track.album || "",
-    albumArtist: track.albumArtist || "",
+    artist: resolved.artist || "",
+    track: resolved.title || "",
+    album: resolved.album || "",
+    albumArtist: resolved.albumArtist || "",
     duration: track.duration ? Math.floor(track.duration) : undefined,
     trackNumber: normalizeTrackNumber(track.trackNo),
   });

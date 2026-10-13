@@ -12,6 +12,7 @@ import { parseFlac } from "./parse-flac.js";
 import { parseOgg } from "./parse-ogg.js";
 import { parseWav } from "./parse-wav.js";
 import { parseWebm } from "./parse-webm.js";
+import { parseArtistAndTitle } from "../lastfm/scrobble-cleaner.js";
 
 /**
  * File または Blob+name から共通メタデータを抽出
@@ -43,9 +44,24 @@ export async function extractMetadata(fileOrBlob, name) {
     parsed = makeFallback(filename);
   }
 
-  // 必須項目を埋める
-  if (!parsed.title) parsed.title = stripExt(filename) || "(無題)";
-  if (!parsed.artist) parsed.artist = "(不明アーティスト)";
+  // 必須項目を埋める: タグからアーティスト名が取れなかった場合、ファイル名からの自動分離を試みる
+  const rawBaseName = stripExt(filename);
+  if (!parsed.artist || parsed.artist === "(不明アーティスト)") {
+    const fromFilename = parseArtistAndTitle(rawBaseName);
+    if (fromFilename) {
+      parsed.artist = fromFilename.artist;
+      if (!parsed.title || parsed.title === rawBaseName) {
+        parsed.title = fromFilename.title;
+      }
+      if (!parsed.albumArtist) {
+        parsed.albumArtist = fromFilename.artist;
+      }
+    } else {
+      parsed.artist = "(不明アーティスト)";
+    }
+  }
+
+  if (!parsed.title) parsed.title = rawBaseName || "(無題)";
 
   // 音声プロパティの bitrate が未設定の場合、 fileSize / duration から平均値を算出
   if (parsed.audioProps && !parsed.audioProps.bitrate && fileOrBlob && fileOrBlob.size && parsed.duration > 0) {

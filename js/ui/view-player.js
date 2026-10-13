@@ -14,7 +14,7 @@ import { getAudioElement, togglePlay, playNext, playPrev, seekTo, setShuffleMode
 import { getPublic, setPublic } from "../store/settings.js";
 import { extractMetadata } from "../metadata/index.js";
 import { initVisualizer, startVisualizer, stopVisualizer, decodePcmForVisualization } from "../player/visualizer.js";
-import { setLoved } from "../lastfm/scrobble.js";
+import { setLoved, retryScrobbleForTrack } from "../lastfm/scrobble.js";
 import { formatTime, toast, escapeHtml, openModal } from "./components.js";
 import { getBlob, updateTrack } from "../store/library-db.js";
 import { getArtworkUrl } from "./artwork-cache.js";
@@ -79,7 +79,7 @@ export async function mount(root) {
   // scrobbleResult を含めることで、送信成功/キュー登録/失敗のメッセージを
   // 即座に反映できる。
   const unsub = appState.subscribe(
-    ["currentTrack", "isPlaying", "duration", "currentTime", "scrobbleProgress", "scrobbleResult", "scrobbleReason", "shuffleMode", "repeatMode", "authState"],
+    ["currentTrack", "isPlaying", "duration", "currentTime", "scrobbleProgress", "scrobbleResult", "scrobbleReason", "scrobbleRejectedTrack", "shuffleMode", "repeatMode", "authState"],
     (s) => updateUI(refs, s)
   );
 
@@ -588,6 +588,19 @@ export async function mount(root) {
     }
   });
 
+  if (refs.scrobbleFixBtn) {
+    refs.scrobbleFixBtn.addEventListener("click", () => {
+      const targetTrack = appState.get().scrobbleRejectedTrack || appState.get().currentTrack;
+      if (targetTrack) {
+        editTrackMetadata(targetTrack, async (updated) => {
+          if (updated) {
+            await retryScrobbleForTrack(updated);
+          }
+        });
+      }
+    });
+  }
+
   // クリーンアップ
   return () => {
     alive = false; // in-flight な decodeUnsub コールバックの await 復帰後処理を無効化
@@ -673,7 +686,10 @@ function render() {
         <div class="scrobble-progress-bar">
           <div class="scrobble-progress-fill" id="scrobble-fill"></div>
         </div>
-        <div class="scrobble-progress-label" id="scrobble-label">スクロブル待機</div>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px;">
+          <div class="scrobble-progress-label" id="scrobble-label" style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">スクロブル待機</div>
+          <button type="button" class="btn" id="btn-scrobble-fix" style="display: none; font-size: 10px; padding: 2px 7px; height: 22px; line-height: 1; white-space: nowrap; border-radius: 4px; background: rgba(255, 69, 58, 0.15); color: var(--danger); border: 1px solid var(--danger); cursor: pointer;" title="曲情報を編集して再スクロブル">✏️ 修正して再送信</button>
+        </div>
       </div>
 
       <div class="visualizer-wrap">
@@ -750,6 +766,7 @@ function collectRefs(root) {
     lyricsBottomBtn: root.querySelector("#btn-lyrics-bottom"),
     scrobbleFill: root.querySelector("#scrobble-fill"),
     scrobbleLabel: root.querySelector("#scrobble-label"),
+    scrobbleFixBtn: root.querySelector("#btn-scrobble-fix"),
     modeLabel: root.querySelector("#playback-mode"),
     canvas: root.querySelector("#visualizer-canvas"),
     rmsBar: root.querySelector("#rms-bar"),
@@ -956,6 +973,7 @@ function updateUI(refs, s) {
     //   "failed"  : 送信もキュー保存も失敗（IDB エラー等）
     //   "skipped" : 未認証 or 設定で無効化
     //   "sending" / "none": 結果未確定（送信中）
+    if (refs.scrobbleFixBtn) refs.scrobbleFixBtn.style.display = "none";
     switch (s.scrobbleResult) {
       case "queued":
         refs.scrobbleLabel.textContent = "スクロブルをキューに登録（オンライン復帰で送信）";
@@ -971,8 +989,9 @@ function updateUI(refs, s) {
         break;
       case "ignored":
         refs.scrobbleLabel.textContent = s.scrobbleReason
-          ? `Last.fm に拒否されました (${s.scrobbleReason})`
-          : "Last.fm に拒否されました";
+          ? `Last.fm 拒否: ${s.scrobbleReason}`
+          : "Last.fm に拒否されました (アーティスト名確認)";
+        if (refs.scrobbleFixBtn) refs.scrobbleFixBtn.style.display = "inline-flex";
         break;
       case "auth_error":
         refs.scrobbleLabel.textContent = s.scrobbleReason
@@ -984,10 +1003,13 @@ function updateUI(refs, s) {
         refs.scrobbleLabel.textContent = "スクロブル送信中…";
         break;
     }
-  } else if (s.authState === "authenticated") {
-    refs.scrobbleLabel.textContent = `スクロブル進捗 ${Math.round((s.scrobbleProgress || 0) * 100)}%`;
   } else {
-    refs.scrobbleLabel.textContent = "Last.fm 未認証（スクロブル無効）";
+    if (refs.scrobbleFixBtn) refs.scrobbleFixBtn.style.display = "none";
+    if (s.authState === "authenticated") {
+      refs.scrobbleLabel.textContent = `スクロブル進捗 ${Math.round((s.scrobbleProgress || 0) * 100)}%`;
+    } else {
+      refs.scrobbleLabel.textContent = "Last.fm 未認証（スクロブル無効）";
+    }
   }
 
   refs.shuffleBtn.classList.toggle("is-active", !!s.shuffleMode);

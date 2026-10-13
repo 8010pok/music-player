@@ -14,6 +14,7 @@ import { stopPlayback } from "../player/audio-engine.js";
 import { appState } from "../state.js";
 import { releaseArtwork, getArtworkUrl } from "./artwork-cache.js";
 import { searchTrackMetadata, searchAlbumMetadata, fetchArtworkBlob, fetchAlbumTracklist, cleanQuery } from "../metadata/musicbrainz.js";
+import { retryScrobbleForTrack } from "../lastfm/scrobble.js";
 
 /**
  * 1曲分のメタデータ編集モーダルを表示
@@ -386,13 +387,25 @@ export function editTrackMetadata(track, onUpdated) {
 
             await updateTrack(track.id, patch);
             releaseArtwork(track.id);
+            const updatedTrack = { ...track, ...patch };
             Object.assign(track, patch);
 
             // 再生中の曲なら appState の currentTrack も更新
             const cur = appState.get().currentTrack;
             if (cur && cur.id === track.id) {
               releaseArtwork(cur.id);
-              appState.set({ currentTrack: { ...cur, ...patch } });
+              appState.set({ currentTrack: updatedTrack });
+            }
+
+            // 直近でスクロブル拒否された曲、または再生中の曲が拒否状態なら自動再スクロブルを試行
+            const rejectedTrack = appState.get().scrobbleRejectedTrack;
+            if (
+              (rejectedTrack && rejectedTrack.id === track.id) ||
+              (cur && cur.id === track.id && appState.get().scrobbleResult === "ignored")
+            ) {
+              retryScrobbleForTrack(updatedTrack).catch((err) => {
+                console.warn("[meta-edit] 自動再スクロブルエラー:", err);
+              });
             }
 
             if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}

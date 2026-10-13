@@ -9,6 +9,7 @@
  */
 
 import { getPublic, setPublic } from "../store/settings.js";
+import { cleanArtistName, cleanTrackTitle, parseArtistAndTitle } from "../lastfm/scrobble-cleaner.js";
 
 // 既定の信頼性の高い Invidious インスタンスリスト（自動フォールバック用）
 export const DEFAULT_INVIDIOUS_INSTANCES = [
@@ -188,12 +189,18 @@ async function fetchSavetubeDirect(cleanId) {
       const audioUrl = dlJson.data?.downloadUrl;
       if (!audioUrl) continue;
 
-      let title = info.title || "";
+      let rawTitle = info.title || "";
+      let title = cleanTrackTitle(rawTitle);
       let author = "";
-      if (title.includes(" - ")) {
-        const parts = title.split(" - ");
-        author = parts[0].trim();
-        title = parts.slice(1).join(" - ").trim();
+
+      const parsed = parseArtistAndTitle(rawTitle);
+      if (parsed) {
+        author = parsed.artist;
+        title = parsed.title;
+      } else if (rawTitle.includes(" - ")) {
+        const parts = rawTitle.split(" - ");
+        author = cleanArtistName(parts[0].trim());
+        title = cleanTrackTitle(parts.slice(1).join(" - ").trim());
       }
 
       return {
@@ -219,6 +226,26 @@ async function fetchSavetubeDirect(cleanId) {
   throw lastErr || new Error("Savetube CDN 接続失敗");
 }
 
+function normalizeYtMeta(rawTitle, rawAuthor) {
+  let title = cleanTrackTitle(rawTitle || "");
+  let author = cleanArtistName(rawAuthor || "");
+
+  const parsed = parseArtistAndTitle(rawTitle);
+  if (parsed) {
+    if (!author || author === "YouTube") {
+      author = parsed.artist;
+      title = parsed.title;
+    } else if (author.toLowerCase() === parsed.artist.toLowerCase()) {
+      title = parsed.title;
+    }
+  }
+
+  return {
+    title: title || rawTitle || "無題",
+    author: author || "YouTube",
+  };
+}
+
 /**
  * YouTube 動画のメタデータ（タイトル、チャンネル名、再生秒数、サムネイル、音源URL等）を取得
  * @param {string} videoId
@@ -238,10 +265,11 @@ export async function fetchVideoInfo(videoId) {
     if (apiRes.ok) {
       const data = await apiRes.json();
       if (data && data.title) {
+        const norm = normalizeYtMeta(data.title, data.author);
         baseMeta = {
           videoId: cleanId,
-          title: data.title || "",
-          author: data.author || "",
+          title: norm.title,
+          author: norm.author,
           duration: data.duration || 0,
           thumbnailUrl: data.thumbnailUrl || `https://img.youtube.com/vi/${cleanId}/hqdefault.jpg`,
           audioUrl: data.audioUrl || null,
@@ -314,10 +342,11 @@ export async function fetchVideoInfo(videoId) {
       const audioFormats = (data.adaptiveFormats || []).filter((f) => f.type && f.type.includes("audio") && f.url);
       const best = audioFormats.find((f) => f.itag === "140") || audioFormats.find((f) => f.itag === "251") || audioFormats[0];
 
+      const norm = normalizeYtMeta(data.title, data.author);
       return {
         videoId: cleanId,
-        title: data.title || "",
-        author: data.author || "",
+        title: norm.title,
+        author: norm.author,
         duration: parseInt(data.lengthSeconds || "0", 10),
         thumbnailUrl: thumbUrl,
         audioUrl: best?.url || null,
@@ -336,10 +365,11 @@ export async function fetchVideoInfo(videoId) {
     if (oRes.ok) {
       const oData = await oRes.json();
       if (oData && oData.title) {
+        const norm = normalizeYtMeta(oData.title, oData.author_name);
         return {
           videoId: cleanId,
-          title: oData.title || "",
-          author: oData.author_name || "",
+          title: norm.title,
+          author: norm.author,
           duration: 0,
           thumbnailUrl: oData.thumbnail_url || `https://img.youtube.com/vi/${cleanId}/hqdefault.jpg`,
           audioUrl: null,
@@ -357,10 +387,11 @@ export async function fetchVideoInfo(videoId) {
     if (ytOembed.ok) {
       const ytData = await ytOembed.json();
       if (ytData && ytData.title) {
+        const norm = normalizeYtMeta(ytData.title, ytData.author_name);
         return {
           videoId: cleanId,
-          title: ytData.title || "",
-          author: ytData.author_name || "",
+          title: norm.title,
+          author: norm.author,
           duration: 0,
           thumbnailUrl: ytData.thumbnail_url || `https://img.youtube.com/vi/${cleanId}/hqdefault.jpg`,
           audioUrl: null,

@@ -12,6 +12,14 @@
  * 実行: node tests/test-scrobble-flow.mjs
  */
 
+import {
+  isPlaceholderArtist,
+  cleanArtistName,
+  cleanTrackTitle,
+  parseArtistAndTitle,
+  resolveScrobbleTrack,
+} from "../js/lastfm/scrobble-cleaner.js";
+
 let passCount = 0, failCount = 0;
 const failures = [];
 
@@ -47,14 +55,16 @@ function normalizeTrackNumber(raw) {
  */
 function buildScrobblePayload(track, startedAtMs) {
   if (!track) return null;
+  const resolved = resolveScrobbleTrack(track);
+  if (!resolved || resolved.isInvalid) return null;
   const timestamp = startedAtMs
     ? Math.floor(startedAtMs / 1000)
     : Math.floor(Date.now() / 1000);
   return {
-    artist: track.artist || "",
-    track: track.title || "",
-    album: track.album || "",
-    albumArtist: track.albumArtist || "",
+    artist: resolved.artist,
+    track: resolved.title,
+    album: resolved.album || "",
+    albumArtist: resolved.albumArtist || "",
     timestamp,
     duration: track.duration ? Math.floor(track.duration) : undefined,
     trackNumber: normalizeTrackNumber(track.trackNo),
@@ -480,6 +490,104 @@ describe("Last.fm 拒否理由 (ignoredMessage) & 認証エラーコード (4, 9
   assert(AUTH_ERR_CODES.has(4), "code 4 (Authentication Failed) は要再認証");
   assert(AUTH_ERR_CODES.has(14), "code 14 (Unauthorized token) は要再認証");
   assert(!AUTH_ERR_CODES.has(8), "code 8 (Operation failed) は一過性リトライ対象");
+});
+
+/* ============ scrobble-cleaner & プレースホルダー救済テスト ============ */
+
+describe("isPlaceholderArtist (Last.fm 拒否プレースホルダー判定)", () => {
+  assert(isPlaceholderArtist("YouTube"), '"YouTube" はプレースホルダー');
+  assert(isPlaceholderArtist("youtube"), '"youtube" はプレースホルダー');
+  assert(isPlaceholderArtist("Savetube"), '"Savetube" はプレースホルダー');
+  assert(isPlaceholderArtist("不明なアーティスト"), '"不明なアーティスト" はプレースホルダー');
+  assert(isPlaceholderArtist("(不明アーティスト)"), '"(不明アーティスト)" はプレースホルダー');
+  assert(isPlaceholderArtist("Unknown Artist"), '"Unknown Artist" はプレースホルダー');
+  assert(isPlaceholderArtist("Various Artists"), '"Various Artists" はプレースホルダー');
+  assert(isPlaceholderArtist("VA"), '"VA" はプレースホルダー');
+  assert(isPlaceholderArtist(""), "空文字はプレースホルダー");
+  assert(isPlaceholderArtist("   "), "空白のみはプレースホルダー");
+  assert(isPlaceholderArtist(null), "null はプレースホルダー");
+  assert(isPlaceholderArtist(".mp3"), '".mp3" 拡張子のみはプレースホルダー');
+  assert(!isPlaceholderArtist("Beatles"), '"Beatles" は有効なアーティスト');
+  assert(!isPlaceholderArtist("YOASOBI"), '"YOASOBI" は有効なアーティスト');
+  assert(!isPlaceholderArtist("米津玄師"), '"米津玄師" は有効なアーティスト');
+  assert(!isPlaceholderArtist("Queen"), '"Queen" は有効なアーティスト');
+});
+
+describe("cleanArtistName & cleanTrackTitle (サニタイズ処理)", () => {
+  // Topic チャンネル除去
+  assertEqual(cleanArtistName("YOASOBI - Topic"), "YOASOBI", '"YOASOBI - Topic" → "YOASOBI"');
+  assertEqual(cleanArtistName("Ado - トピック"), "Ado", '"Ado - トピック" → "Ado"');
+  assertEqual(cleanArtistName("米津玄師 Official Channel"), "米津玄師", '"米津玄師 Official Channel" → "米津玄師"');
+  assertEqual(cleanArtistName("Official髭男dism"), "Official髭男dism", '"Official髭男dism" は先頭のOfficialを維持');
+  assertEqual(cleanArtistName("Artist Name.mp3"), "Artist Name", '拡張子 .mp3 除去');
+  assertEqual(cleanArtistName("  Artist   Name  "), "Artist Name", '空白トリム & 連続空白統合');
+  // 不可視文字・ゼロ幅文字
+  assertEqual(cleanArtistName("Artist\u200BName"), "ArtistName", 'ゼロ幅スペース除去');
+
+  // トラック名サニタイズ
+  assertEqual(cleanTrackTitle("アイドル【MV】"), "アイドル", '【MV】除去');
+  assertEqual(cleanTrackTitle("白日 [Official Video]"), "白日", '[Official Video] 除去');
+  assertEqual(cleanTrackTitle("KICK BACK (Music Video)"), "KICK BACK", '(Music Video) 除去');
+  assertEqual(cleanTrackTitle("Song.flac"), "Song", '拡張子 .flac 除去');
+});
+
+describe("parseArtistAndTitle (タイトルからの自動分離)", () => {
+  // "Artist - Title"
+  const r1 = parseArtistAndTitle("YOASOBI - 夜に駆ける");
+  assertEqual(r1?.artist, "YOASOBI", 'r1 artist');
+  assertEqual(r1?.title, "夜に駆ける", 'r1 title');
+
+  // "Artist / Title"
+  const r2 = parseArtistAndTitle("King Gnu / 白日");
+  assertEqual(r2?.artist, "King Gnu", 'r2 artist');
+  assertEqual(r2?.title, "白日", 'r2 title');
+
+  // "Artist「Title」"
+  const r3 = parseArtistAndTitle("米津玄師「感電」");
+  assertEqual(r3?.artist, "米津玄師", 'r3 artist');
+  assertEqual(r3?.title, "感電", 'r3 title');
+
+  // 動画タグ付き "【MV】ずっと真夜中でいいのに。『秒針を噛む』"
+  const r4 = parseArtistAndTitle("【MV】ずっと真夜中でいいのに。『秒針を噛む』");
+  assertEqual(r4?.artist, "ずっと真夜中でいいのに。", 'r4 artist');
+  assertEqual(r4?.title, "秒針を噛む", 'r4 title');
+
+  // アーティストが YouTube 等プレースホルダーの場合は分離成功しない (Title のみとして扱う)
+  const rBad = parseArtistAndTitle("YouTube - Track Name");
+  assertEqual(rBad, null, 'プレースホルダーアーティストからの分離は弾く');
+});
+
+describe("resolveScrobbleTrack (スクロブルメタデータ総合解決 & 救済)", () => {
+  // ケース1: artist が "YouTube" だが、タイトルに "Artist - Track" が入っている場合（自動救済）
+  const t1 = { artist: "YouTube", title: "YOASOBI - アイドル", album: "YouTube" };
+  const res1 = resolveScrobbleTrack(t1);
+  assertEqual(res1.artist, "YOASOBI", 'YouTube から YOASOBI を救済');
+  assertEqual(res1.title, "アイドル", 'タイトルから曲名を抽出');
+  assertEqual(res1.album, "", 'プレースホルダー album "YouTube" は除外');
+  assertEqual(res1.isInvalid, false, '有効なスクロブルに変換完了');
+
+  // ケース2: artist が "(不明アーティスト)" だが albumArtist に "Queen" がある場合（自動救済）
+  const t2 = { artist: "(不明アーティスト)", title: "Bohemian Rhapsody", albumArtist: "Queen" };
+  const res2 = resolveScrobbleTrack(t2);
+  assertEqual(res2.artist, "Queen", 'albumArtist Queen から救済');
+  assertEqual(res2.isInvalid, false, '有効なスクロブルに変換完了');
+
+  // ケース3: artist が有効だがタイトル先頭にアーティスト名が二重に入っている場合
+  const t3 = { artist: "King Gnu", title: "King Gnu - 白日" };
+  const res3 = resolveScrobbleTrack(t3);
+  assertEqual(res3.artist, "King Gnu", 'artist は King Gnu');
+  assertEqual(res3.title, "白日", 'タイトル側の重複アーティスト名を除去');
+  assertEqual(res3.isInvalid, false, '有効');
+
+  // ケース4: 完全なプレースホルダーでタイトルからも分離できない場合 (isInvalid = true)
+  const t4 = { artist: "YouTube", title: "Track01" };
+  const res4 = resolveScrobbleTrack(t4);
+  assertEqual(res4.isInvalid, true, '分離不能なプレースホルダーは isInvalid = true');
+
+  // ケース5: albumArtist が artist と同一の場合はパラメータ除外（Last.fm 仕様: 競合防止）
+  const t5 = { artist: "Beatles", title: "Help!", albumArtist: "Beatles" };
+  const res5 = resolveScrobbleTrack(t5);
+  assertEqual(res5.albumArtist, "", '同一 albumArtist は除外');
 });
 
 /* ============ 結果 ============ */

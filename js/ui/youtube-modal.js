@@ -25,6 +25,7 @@ import { putTrack, getAllTracks, getBlob } from "../store/library-db.js";
 import { getPublic, setPublic } from "../store/settings.js";
 import { setQueueAndPlay } from "../player/audio-engine.js";
 import { findDuplicateInList } from "../store/dedup-service.js";
+import { parseArtistAndTitle, cleanArtistName, cleanTrackTitle } from "../lastfm/scrobble-cleaner.js";
 
 /**
  * YouTube ダウンロード & カット編集モーダルを開く
@@ -943,10 +944,20 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
       return false;
     }
 
-    const title = metaTitle.value.trim() || "無題";
-    const artist = metaArtist.value.trim() || "YouTube";
-    const album = metaAlbum.value.trim() || "YouTube";
+    let title = metaTitle.value.trim() || "無題";
+    let artist = metaArtist.value.trim() || "YouTube";
+    let album = metaAlbum.value.trim() || "YouTube";
     const memo = metaMemo ? metaMemo.value.trim() : "";
+
+    // もし artist が "YouTube" のままで、タイトルにアーティスト情報が含まれている場合は自動分離
+    if (artist.toLowerCase() === "youtube") {
+      const parsed = parseArtistAndTitle(title);
+      if (parsed) {
+        artist = parsed.artist;
+        title = parsed.title;
+      }
+    }
+
     const bitrate = parseInt(bitrateSelect.value, 10) || 320;
     const filename = `${artist} - ${title}.mp3`.replace(/[\\/:*?"<>|]/g, "_");
 
