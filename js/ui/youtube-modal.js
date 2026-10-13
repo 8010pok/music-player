@@ -153,8 +153,11 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
             <option value="128">MP3 128 kbps (軽量)</option>
           </select>
         </div>
-        <div style="font-size: 11px; color: var(--fg-muted);">
-          保存先: <strong>Google Drive「MUSIC-PLAYER」フォルダ</strong> (ライブラリ自動追加)
+        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="yt-download-file-cb" style="cursor: pointer; width: 15px; height: 15px;" />
+          <label for="yt-download-file-cb" style="font-size: 11px; color: var(--fg-muted); cursor: pointer; user-select: none;">
+            端末の「ファイル」にも MP3 を書き出す (未チェックなら「○○で開く」を経由せず直接保存)
+          </label>
         </div>
       </div>
     </div>
@@ -182,14 +185,14 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
         },
       },
       {
-        label: "💾 端末にダウンロード (MP3)",
+        label: "📱 ライブラリに直接保存 (即再生)",
+        primary: true,
         onClick: async () => {
-          return await handleExportAndSave("download");
+          return await handleExportAndSave("library");
         },
       },
       {
-        label: "☁ Google Drive に保存 (MP3 320kbps)",
-        primary: true,
+        label: "☁ Google Drive に保存",
         onClick: async () => {
           return await handleExportAndSave("gdrive");
         },
@@ -231,6 +234,7 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
   const endAddBtn = container.querySelector("#btn-yt-end-add");
   const cutSummaryBadge = container.querySelector("#yt-cut-summary-badge");
   const bitrateSelect = container.querySelector("#yt-bitrate-select");
+  const downloadFileCb = container.querySelector("#yt-download-file-cb");
 
   // 音声プレビュークリーンアップ
   function cleanupPreview() {
@@ -655,24 +659,26 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
         },
       });
 
-      // 端末保存 & ローカルライブラリ追加 & 即時再生の共通ヘルパー
-      async function saveToLocalAndDownload() {
-        loadingStatus.textContent = "端末へダウンロード中…";
-        loadingBar.style.width = "85%";
+      // 端末ローカル保存 & ライブラリ追加 & 即時再生の共通ヘルパー
+      async function saveToLocal({ downloadFile = false } = {}) {
+        if (downloadFile) {
+          loadingStatus.textContent = "端末へダウンロード中…";
+          loadingBar.style.width = "85%";
 
-        // 1. 端末へダウンロード
-        const dlUrl = URL.createObjectURL(mp3Blob);
-        const a = document.createElement("a");
-        a.href = dlUrl;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => {
-          a.remove();
-          URL.revokeObjectURL(dlUrl);
-        }, 1000);
+          // 1. 端末へダウンロード（iOS のファイル保存 / 共有シートがトリガーされる）
+          const dlUrl = URL.createObjectURL(mp3Blob);
+          const a = document.createElement("a");
+          a.href = dlUrl;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => {
+            a.remove();
+            URL.revokeObjectURL(dlUrl);
+          }, 1000);
+        }
 
-        // 2. ローカルライブラリ（IndexedDB）に登録
+        // 2. ローカルライブラリ（IndexedDB）に登録（「○○で開く」を経由せず直接保存）
         loadingStatus.textContent = "ライブラリに曲を追加中…";
         loadingBar.style.width = "95%";
         const trackId = `loc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -708,12 +714,21 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
           console.warn("[yt] 即時再生開始エラー:", playErr);
         }
 
-        toast(`✅ 端末にダウンロードし、ライブラリに追加しました！（再生を開始）`, "ok", 4000);
+        if (downloadFile) {
+          toast(`✅ 端末にダウンロードし、ライブラリに追加しました！（再生を開始）`, "ok", 4000);
+        } else {
+          toast(`✅ ライブラリに追加しました！（再生を開始）`, "ok", 4000);
+        }
         return true;
       }
 
+      if (destination === "library") {
+        const shouldDownload = downloadFileCb ? downloadFileCb.checked : false;
+        return await saveToLocal({ downloadFile: shouldDownload });
+      }
+
       if (destination === "download") {
-        return await saveToLocalAndDownload();
+        return await saveToLocal({ downloadFile: true });
       }
 
       // 3. Google Drive 保存
@@ -735,8 +750,8 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
       }
 
       if (!connected) {
-        toast("Google Drive 未接続のため、端末へのダウンロードとライブラリ追加に切り替えました", "info", 4500);
-        return await saveToLocalAndDownload();
+        toast("Google Drive 未接続のため、アプリ内ライブラリに直接保存しました", "info", 4500);
+        return await saveToLocal({ downloadFile: false });
       }
 
       loadingStatus.textContent = "Google Drive「MUSIC-PLAYER」へアップロード中…";
@@ -799,8 +814,8 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
         return true;
       } catch (driveErr) {
         console.error("[yt] Google Drive アップロードエラー:", driveErr);
-        toast(`Google Drive 保存に失敗したため、端末とライブラリに保存します (${driveErr.message || "通信エラー"})`, "info", 5000);
-        return await saveToLocalAndDownload();
+        toast(`Google Drive 保存に失敗したため、アプリ内ライブラリに直接保存しました (${driveErr.message || "通信エラー"})`, "info", 5000);
+        return await saveToLocal({ downloadFile: false });
       }
     } catch (err) {
       stepLoading.style.display = "none";
