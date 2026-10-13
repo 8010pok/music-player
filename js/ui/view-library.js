@@ -19,6 +19,7 @@ import { go } from "../router.js";
 import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
 import { editTrackMetadata } from "./metadata-editor.js";
 import { openDriveImportModal } from "../gdrive/drive-service.js";
+import { openYouTubeDownloadModal } from "./youtube-modal.js";
 import { groupTracksIntoAlbums, sortAlbums } from "../metadata/album-util.js";
 import { groupTracksIntoArtists, sortArtists } from "../metadata/artist-util.js";
 
@@ -236,6 +237,16 @@ export async function mount(root) {
       });
     });
   }
+  if (refs.addYouTubeBtn) {
+    refs.addYouTubeBtn.addEventListener("click", () => {
+      openYouTubeDownloadModal({
+        onSaved: async () => {
+          await reloadTracks(activeRefs || refs);
+          await refreshStorage(activeRefs || refs);
+        },
+      });
+    });
+  }
   if (refs.rescanBtn) refs.rescanBtn.addEventListener("click", () => rescanMeta(refs));
 
   // 検索
@@ -304,6 +315,7 @@ function render() {
         <div class="library-add-title">音源を追加 (Googleドライブ / iPad・iPhone内 / iCloud)</div>
         <div class="library-add-buttons">
           <button class="btn primary" id="btn-add-gdrive" style="background: var(--accent); color: #fff; font-weight: bold;" title="Google Drive から曲やフォルダを一括追加">☁ Google Drive (フォルダ・曲追加)</button>
+          <button class="btn" id="btn-add-youtube" style="background: #cc0000; color: #fff; font-weight: bold;" title="YouTubeのリンクから音源をダウンロードしてGoogle Driveに保存">▶ YouTubeから保存</button>
           <button class="btn" id="btn-add">📁 ファイルを選択</button>
           <button class="btn" id="btn-add-folder" title="PC用フォルダ選択 (iOSはGoogle Drive推奨)">📂 フォルダを選択</button>
         </div>
@@ -405,6 +417,7 @@ function collectRefs(root) {
     addBtn: root.querySelector("#btn-add"),
     addFolderBtn: root.querySelector("#btn-add-folder"),
     addGdriveBtn: root.querySelector("#btn-add-gdrive"),
+    addYouTubeBtn: root.querySelector("#btn-add-youtube"),
     rescanBtn: root.querySelector("#btn-rescan-meta"),
     rescanProgress: root.querySelector("#rescan-progress"),
     search: root.querySelector("#lib-search"),
@@ -1017,6 +1030,7 @@ function setBulkButtonsDisabled(refs, disabled) {
   if (refs.addBtn) refs.addBtn.disabled = disabled;
   if (refs.addFolderBtn) refs.addFolderBtn.disabled = disabled;
   if (refs.addGdriveBtn) refs.addGdriveBtn.disabled = disabled;
+  if (refs.addYouTubeBtn) refs.addYouTubeBtn.disabled = disabled;
   if (refs.rescanBtn) refs.rescanBtn.disabled = disabled;
 }
 

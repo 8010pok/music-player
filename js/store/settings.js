@@ -40,6 +40,8 @@ const PUBLIC_DEFAULTS = {
   gdriveAutoCache: true,      // 再生時に自動でローカル IndexedDB にキャッシュ
   gdriveUserEmail: "",        // 連携中アカウントのメール/表示名
   gdriveTokenExpiry: 0,       // トークン有効期限タイムスタンプ
+  // === YouTube 音源取得設定 ===
+  customInvidiousUrl: "",     // カスタム Invidious インスタンス URL (任意)
 };
 
 const SECRET_KEYS = ["apiKey", "apiSecret", "sessionKey", "gdriveAccessToken"];

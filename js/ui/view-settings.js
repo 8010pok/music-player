@@ -26,6 +26,7 @@ import { cancel as cancelStatsService, reset as resetStatsService, startIfNeeded
 import { toast, confirm, promptForm, escapeHtml, escapeAttr } from "./components.js";
 import { releaseAllArtwork } from "./artwork-cache.js";
 import { isDriveConnected, disconnectDrive, openDriveImportModal } from "../gdrive/drive-service.js";
+import { openYouTubeDownloadModal } from "./youtube-modal.js";
 import { shareOrDownloadLibrary, importLibraryData } from "../store/sync-service.js";
 // 属性値のエスケープは escapeHtml で代用 (quote/&/</> をエスケープ)
 // escapeAttr は components.js から import 済み
@@ -555,6 +556,17 @@ export async function mount(root) {
     }
   });
 
+  refs.btnSettingsYouTube?.addEventListener("click", () => {
+    openYouTubeDownloadModal({
+      onSaved: () => remount(),
+    });
+  });
+
+  refs.customInvidiousInput?.addEventListener("change", () => {
+    setPublic({ customInvidiousUrl: refs.customInvidiousInput.value.trim() });
+    toast("カスタム Invidious URL を保存しました", "ok");
+  });
+
   // ===== 端末間ライブラリ同期 (iPad ↔ iPhone) =====
   refs.btnSyncExport?.addEventListener("click", async () => {
     try {
@@ -789,6 +801,24 @@ function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices, dr
           </div>
           <div>
             <button class="btn" id="btn-gdrive-clear-cache" style="white-space:nowrap;">🗑 キャッシュ消去</button>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="label">YouTube 音源保存 & カット編集</div>
+            <div class="help">YouTube の URL から音源をダウンロードし、波形で不要箇所をカットして Google Drive「MUSIC-PLAYER」に MP3 320kbps で保存します。</div>
+          </div>
+          <div>
+            <button class="btn" id="btn-settings-youtube" style="background: #cc0000; color: #fff; font-weight: bold; white-space: nowrap;">▶ YouTube 保存</button>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="label">カスタム Invidious URL (任意)</div>
+            <div class="help">YouTube 音源取得に使用する Invidious プロキシインスタンス (空欄時は自動フォールバック)</div>
+          </div>
+          <div>
+            <input type="url" id="custom-invidious-input" style="width: 200px; height: 32px; font-size: 12px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-elev-2); color: var(--fg);" placeholder="https://..." value="${escapeAttr(pub.customInvidiousUrl || "")}" />
           </div>
         </div>
       </div>
@@ -1046,6 +1076,8 @@ function collect(root) {
     btnGdriveDisconnect: root.querySelector("#btn-gdrive-disconnect"),
     gdriveAutoCacheChk: root.querySelector("#gdrive-autocache-chk"),
     btnGdriveClearCache: root.querySelector("#btn-gdrive-clear-cache"),
+    btnSettingsYouTube: root.querySelector("#btn-settings-youtube"),
+    customInvidiousInput: root.querySelector("#custom-invidious-input"),
     btnSyncExport: root.querySelector("#btn-sync-export"),
     btnSyncImport: root.querySelector("#btn-sync-import"),
     syncFileInput: root.querySelector("#sync-file-input"),

@@ -222,7 +222,7 @@ export function requestGisToken(clientId) {
         try {
           const client = window.google.accounts.oauth2.initTokenClient({
             client_id: clientId,
-            scope: "https://www.googleapis.com/auth/drive.readonly",
+            scope: "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file",
             callback: async (resp) => {
               if (resp.error) {
                 reject(new Error(`Google 認証エラー: ${resp.error_description || resp.error}`));
@@ -1301,3 +1301,141 @@ export async function openDriveImportModal({ onImported } = {}) {
     if (closeBtn) closeBtn.click();
   });
 }
+
+/**
+ * Google Drive 上で指定フォルダを検索、存在しなければ自動作成
+ * @param {string} [folderName="MUSIC-PLAYER"]
+ * @param {string} [parentFolderId=null]
+ * @returns {Promise<string>} フォルダID
+ */
+export async function getOrCreateDriveFolder(folderName = "MUSIC-PLAYER", parentFolderId = null) {
+  const token = await getDriveToken();
+  if (!token) throw new Error("Google Drive に接続されていません");
+
+  // 1. 既存の同名フォルダを検索
+  const parentQuery = parentFolderId ? `'${parentFolderId}' in parents and ` : "";
+  const q = `${parentQuery}name = '${folderName.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+  const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&pageSize=1`;
+
+  const searchRes = await fetch(searchUrl, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (searchRes.ok) {
+    const searchData = await searchRes.json();
+    if (searchData.files && searchData.files.length > 0) {
+      return searchData.files[0].id;
+    }
+  }
+
+  // 2. 存在しなければ作成
+  const meta = {
+    name: folderName,
+    mimeType: "application/vnd.google-apps.folder",
+  };
+  if (parentFolderId) {
+    meta.parents = [parentFolderId];
+  }
+
+  const createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json; charset=UTF-8",
+    },
+    body: JSON.stringify(meta),
+  });
+
+  if (!createRes.ok) {
+    const errMsg = await parseGoogleApiError(createRes, "フォルダ作成失敗");
+    throw new Error(errMsg);
+  }
+
+  const created = await createRes.json();
+  return created.id;
+}
+
+/**
+ * Google Drive へ音声ファイル (Blob) をマルチパートアップロード
+ * @param {object} params
+ * @param {string} params.name アップロードするファイル名 (例: "song.mp3")
+ * @param {Blob} params.blob ファイルバイナリ
+ * @param {string} [params.mimeType="audio/mpeg"] MIME タイプ
+ * @param {string} [params.folderName="MUSIC-PLAYER"] 保存先フォルダ名（folderId 未指定時に使用）
+ * @param {string} [params.folderId] 特定フォルダのID
+ * @param {(pct: number) => void} [params.onProgress]
+ * @returns {Promise<{ id: string, name: string, mimeType: string, size?: number }>}
+ */
+export async function uploadFileToDrive({ name, blob, mimeType = "audio/mpeg", folderName = "MUSIC-PLAYER", folderId = null, onProgress = null }) {
+  const token = await getDriveToken();
+  if (!token) {
+    throw new Error("Google Drive に接続されていません。設定画面または連携ボタンから接続してください。");
+  }
+
+  if (onProgress) onProgress(10);
+
+  // 保存先フォルダの解決
+  let targetFolderId = folderId;
+  if (!targetFolderId && folderName) {
+    try {
+      targetFolderId = await getOrCreateDriveFolder(folderName);
+    } catch (e) {
+      console.warn("[gdrive] フォルダ作成フォールバック:", e);
+    }
+  }
+
+  if (onProgress) onProgress(25);
+
+  const boundary = "-------MusicPlayerBoundary" + Date.now();
+  const metadata = {
+    name: name || "audio.mp3",
+    mimeType: mimeType || "audio/mpeg",
+  };
+  if (targetFolderId) {
+    metadata.parents = [targetFolderId];
+  }
+
+  const delimiter = `\r\n--${boundary}\r\n`;
+  const closeDelimiter = `\r\n--${boundary}--`;
+
+  const multipartBody = new Blob(
+    [
+      delimiter,
+      "Content-Type: application/json; charset=UTF-8\r\n\r\n",
+      JSON.stringify(metadata),
+      delimiter,
+      `Content-Type: ${mimeType || "audio/mpeg"}\r\n\r\n`,
+      blob,
+      closeDelimiter,
+    ],
+    { type: `multipart/related; boundary=${boundary}` }
+  );
+
+  if (onProgress) onProgress(40);
+
+  const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    body: multipartBody,
+  });
+
+  if (!res.ok) {
+    const errorMsg = await parseGoogleApiError(res, "Google Drive アップロード失敗");
+    throw new Error(errorMsg);
+  }
+
+  if (onProgress) onProgress(90);
+
+  const data = await res.json();
+  if (onProgress) onProgress(100);
+
+  return {
+    id: data.id,
+    name: data.name || name,
+    mimeType: data.mimeType || mimeType,
+    size: blob.size,
+  };
+}
+

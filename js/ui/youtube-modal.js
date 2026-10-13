@@ -1,0 +1,673 @@
+/**
+ * YouTube 音源ダウンロード & カット編集 & Google Drive 保存モーダル
+ *
+ * - YouTube の URL から音源ストリームを抽出・ダウンロード
+ * - 音声のカット編集（開始位置・終了位置の指定、波形・プレビュー再生）
+ * - MP3 320kbps (標準設定) へのエンコード & ID3 タグ埋め込み
+ * - Google Drive (「MUSIC-PLAYER」フォルダ) への直接保存 & ライブラリ自動登録
+ * - 端末への直接ダウンロードにも対応
+ */
+
+import { openModal, toast, confirm, escapeHtml, escapeAttr } from "./components.js";
+import { downloadYouTubeAudio, extractYouTubeVideoId } from "../youtube/youtube-service.js";
+import { sliceAndEncodeAudio } from "../audio/mp3-encoder.js";
+import { isDriveConnected, uploadFileToDrive, requestGisToken } from "../gdrive/drive-service.js";
+import { putTrack } from "../store/library-db.js";
+import { getPublic } from "../store/settings.js";
+import { setQueueAndPlay } from "../player/audio-engine.js";
+
+/**
+ * YouTube ダウンロード & カット編集モーダルを開く
+ * @param {object} [opts]
+ * @param {() => void} [opts.onSaved] 保存完了時のコールバック（ライブラリ再描画用）
+ */
+export function openYouTubeDownloadModal({ onSaved = null } = {}) {
+  const container = document.createElement("div");
+  container.className = "yt-modal-container";
+
+  // モーダル内全体スタイル
+  container.innerHTML = `
+    <style>
+      .yt-modal-container { font-size: 13px; color: var(--fg); }
+      .yt-card { background: var(--bg-elev-1); border-radius: 12px; padding: 14px; margin-bottom: 12px; border: 1px solid var(--border); }
+      .yt-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+      .yt-input { flex: 1; height: 36px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-elev-2); color: var(--fg); font-size: 13px; }
+      .yt-input:focus { outline: none; border-color: var(--accent); }
+      .yt-progress-bar-wrap { height: 8px; border-radius: 4px; background: var(--bg-elev-2); overflow: hidden; margin: 8px 0 4px; }
+      .yt-progress-bar-fill { height: 100%; width: 0%; background: var(--accent); transition: width 0.15s ease; }
+      .yt-waveform-wrap { position: relative; width: 100%; height: 80px; background: #111; border-radius: 8px; overflow: hidden; cursor: pointer; margin: 10px 0; }
+      .yt-waveform-canvas { width: 100%; height: 100%; display: block; }
+      .yt-time-ctrls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+      .yt-time-box { background: var(--bg-elev-2); padding: 10px; border-radius: 8px; }
+      .yt-time-box label { font-size: 11px; color: var(--fg-muted); display: block; margin-bottom: 4px; }
+      .yt-num-input { width: 90px; height: 30px; padding: 0 6px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-size: 13px; font-variant-numeric: tabular-nums; }
+      .yt-badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; background: var(--bg-elev-2); color: var(--fg-muted); }
+      .yt-badge.accent { background: rgba(0, 113, 227, 0.15); color: var(--accent); }
+    </style>
+
+    <!-- ステップ 1: URL 入力エリア -->
+    <div id="yt-step-input">
+      <div style="margin-bottom: 12px; line-height: 1.5; color: var(--fg-muted); font-size: 12px;">
+        YouTube のリンクを入力して音源を取得します。<br/>
+        標準設定で <strong>最高音質 MP3 (320kbps)</strong> に変換し、不要な部分をカットして <strong>Google Drive</strong> へ直接保存できます。
+      </div>
+      <div class="yt-row">
+        <input type="text" id="yt-url-input" class="yt-input" placeholder="YouTube URL (例: https://www.youtube.com/watch?v=...)" />
+        <button class="btn primary" id="btn-yt-fetch" style="background: #cc0000; color: #fff; font-weight: 600; border: none;">音源取得</button>
+      </div>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
+        <span style="font-size: 11px; color: var(--fg-muted);">または端末内の音声ファイルを選択:</span>
+        <button class="btn" id="btn-yt-local-file" style="font-size: 11px; padding: 4px 10px;">📁 音声ファイルを選択</button>
+        <input type="file" id="yt-file-input" accept="audio/*,video/*" style="display: none;" />
+      </div>
+    </div>
+
+    <!-- 取得進行状況エリア -->
+    <div id="yt-step-loading" style="display: none; margin: 16px 0;">
+      <div id="yt-loading-status" style="font-size: 12px; margin-bottom: 6px; font-weight: 600;">動画情報を取得中…</div>
+      <div class="yt-progress-bar-wrap">
+        <div class="yt-progress-bar-fill" id="yt-loading-bar"></div>
+      </div>
+    </div>
+
+    <!-- ステップ 2: カット編集 & メタデータ & 保存設定エリア (音源取得後に表示) -->
+    <div id="yt-step-editor" style="display: none;">
+      <!-- メタデータカード -->
+      <div class="yt-card" style="display: flex; gap: 12px; align-items: center;">
+        <img id="yt-meta-art" src="" style="width: 64px; height: 64px; border-radius: 8px; object-fit: cover; background: #222;" alt="Artwork" />
+        <div style="flex: 1; min-width: 0;">
+          <input type="text" id="yt-meta-title" class="yt-input" style="height: 28px; font-weight: 600; margin-bottom: 4px;" placeholder="曲名" />
+          <input type="text" id="yt-meta-artist" class="yt-input" style="height: 26px; font-size: 12px; margin-bottom: 4px;" placeholder="アーティスト名" />
+          <input type="text" id="yt-meta-album" class="yt-input" style="height: 24px; font-size: 11px;" value="YouTube" placeholder="アルバム名" />
+        </div>
+      </div>
+
+      <!-- 波形 & プレビュープレイヤー -->
+      <div class="yt-card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+          <span style="font-weight: 600; font-size: 12px;">✂ 音源カット編集</span>
+          <span id="yt-cur-time-display" style="font-size: 12px; font-variant-numeric: tabular-nums;">0:00.0 / 0:00.0</span>
+        </div>
+
+        <div class="yt-waveform-wrap" id="yt-waveform-wrap" title="クリックしてシーク">
+          <canvas class="yt-waveform-canvas" id="yt-waveform-canvas" width="480" height="80"></canvas>
+        </div>
+
+        <!-- 再生コントロール -->
+        <div style="display: flex; gap: 8px; align-items: center; justify-content: space-between;">
+          <div style="display: flex; gap: 6px;">
+            <button class="btn" id="btn-yt-play-toggle" style="padding: 4px 10px;">▶ プレビュー</button>
+            <button class="btn" id="btn-yt-play-selection" style="padding: 4px 10px;" title="カット範囲のみを再生">✂ カット範囲再生</button>
+          </div>
+          <button class="btn" id="btn-yt-reset-cut" style="padding: 4px 8px; font-size: 11px;">↺ 全体を選択</button>
+        </div>
+
+        <!-- カット範囲の数値・微調整設定 -->
+        <div class="yt-time-ctrls">
+          <div class="yt-time-box">
+            <label>🚩 開始位置 (Start)</label>
+            <div style="display: flex; gap: 4px; align-items: center; margin-bottom: 4px;">
+              <input type="number" id="yt-start-num" class="yt-num-input" step="0.1" min="0" value="0.0" />
+              <span style="font-size: 11px; color: var(--fg-muted);">秒</span>
+            </div>
+            <div style="display: flex; gap: 4px; flex-wrap: wrap;">
+              <button class="btn" id="btn-yt-set-start-here" style="font-size: 10px; padding: 2px 6px;">現在位置</button>
+              <button class="btn" id="btn-yt-start-sub" style="font-size: 10px; padding: 2px 6px;">-1s</button>
+              <button class="btn" id="btn-yt-start-add" style="font-size: 10px; padding: 2px 6px;">+1s</button>
+            </div>
+          </div>
+
+          <div class="yt-time-box">
+            <label>🏁 終了位置 (End)</label>
+            <div style="display: flex; gap: 4px; align-items: center; margin-bottom: 4px;">
+              <input type="number" id="yt-end-num" class="yt-num-input" step="0.1" min="0" value="0.0" />
+              <span style="font-size: 11px; color: var(--fg-muted);">秒</span>
+            </div>
+            <div style="display: flex; gap: 4px; flex-wrap: wrap;">
+              <button class="btn" id="btn-yt-set-end-here" style="font-size: 10px; padding: 2px 6px;">現在位置</button>
+              <button class="btn" id="btn-yt-end-sub" style="font-size: 10px; padding: 2px 6px;">-1s</button>
+              <button class="btn" id="btn-yt-end-add" style="font-size: 10px; padding: 2px 6px;">+1s</button>
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top: 8px; text-align: center;">
+          <span class="yt-badge accent" id="yt-cut-summary-badge">カット後の長さ: 0:00.0</span>
+        </div>
+      </div>
+
+      <!-- 保存設定（MP3 ビットレート & 保存先） -->
+      <div class="yt-card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+          <label style="font-weight: 600; font-size: 12px;">音質設定 (MP3 ビットレート)</label>
+          <select id="yt-bitrate-select" class="yt-input" style="width: auto; height: 30px; font-weight: 600;">
+            <option value="320" selected>MP3 320 kbps (最高音質・標準)</option>
+            <option value="256">MP3 256 kbps (高音質)</option>
+            <option value="192">MP3 192 kbps (標準)</option>
+            <option value="128">MP3 128 kbps (軽量)</option>
+          </select>
+        </div>
+        <div style="font-size: 11px; color: var(--fg-muted);">
+          保存先: <strong>Google Drive「MUSIC-PLAYER」フォルダ</strong> (ライブラリ自動追加)
+        </div>
+      </div>
+    </div>
+  `;
+
+  let currentAudioBuffer = null;
+  let currentPreviewAudio = null;
+  let currentArtworkBlob = null;
+  let audioDuration = 0;
+  let cutStartTime = 0;
+  let cutEndTime = 0;
+  let isPlayingSelectionOnly = false;
+  let animFrameId = null;
+
+  // モーダル生成
+  openModal({
+    title: "YouTube 音源保存 & カット編集",
+    body: container,
+    actions: [
+      {
+        label: "閉じる",
+        onClick: () => {
+          cleanupPreview();
+          return true;
+        },
+      },
+      {
+        label: "💾 端末にダウンロード (MP3)",
+        onClick: async () => {
+          return await handleExportAndSave("download");
+        },
+      },
+      {
+        label: "☁ Google Drive に保存 (MP3 320kbps)",
+        primary: true,
+        onClick: async () => {
+          return await handleExportAndSave("gdrive");
+        },
+      },
+    ],
+  });
+
+  const stepInput = container.querySelector("#yt-step-input");
+  const stepLoading = container.querySelector("#yt-step-loading");
+  const stepEditor = container.querySelector("#yt-step-editor");
+  const loadingStatus = container.querySelector("#yt-loading-status");
+  const loadingBar = container.querySelector("#yt-loading-bar");
+
+  const urlInput = container.querySelector("#yt-url-input");
+  const fetchBtn = container.querySelector("#btn-yt-fetch");
+  const localFileBtn = container.querySelector("#btn-yt-local-file");
+  const fileInput = container.querySelector("#yt-file-input");
+
+  const metaArt = container.querySelector("#yt-meta-art");
+  const metaTitle = container.querySelector("#yt-meta-title");
+  const metaArtist = container.querySelector("#yt-meta-artist");
+  const metaAlbum = container.querySelector("#yt-meta-album");
+
+  const canvas = container.querySelector("#yt-waveform-canvas");
+  const waveformWrap = container.querySelector("#yt-waveform-wrap");
+  const curTimeDisplay = container.querySelector("#yt-cur-time-display");
+  const playToggleBtn = container.querySelector("#btn-yt-play-toggle");
+  const playSelectionBtn = container.querySelector("#btn-yt-play-selection");
+  const resetCutBtn = container.querySelector("#btn-yt-reset-cut");
+
+  const startNumInput = container.querySelector("#yt-start-num");
+  const endNumInput = container.querySelector("#yt-end-num");
+  const setStartHereBtn = container.querySelector("#btn-yt-set-start-here");
+  const setEndHereBtn = container.querySelector("#btn-yt-set-end-here");
+  const startSubBtn = container.querySelector("#btn-yt-start-sub");
+  const startAddBtn = container.querySelector("#btn-yt-start-add");
+  const endSubBtn = container.querySelector("#btn-yt-end-sub");
+  const endAddBtn = container.querySelector("#btn-yt-end-add");
+  const cutSummaryBadge = container.querySelector("#yt-cut-summary-badge");
+  const bitrateSelect = container.querySelector("#yt-bitrate-select");
+
+  // 音声プレビュークリーンアップ
+  function cleanupPreview() {
+    if (animFrameId) {
+      cancelAnimationFrame(animFrameId);
+      animFrameId = null;
+    }
+    if (currentPreviewAudio) {
+      currentPreviewAudio.pause();
+      if (currentPreviewAudio.src && currentPreviewAudio.src.startsWith("blob:")) {
+        try { URL.revokeObjectURL(currentPreviewAudio.src); } catch (_) {}
+      }
+      currentPreviewAudio = null;
+    }
+  }
+
+  // YouTube 音源取得イベント
+  fetchBtn.addEventListener("click", async () => {
+    const rawUrl = urlInput.value.trim();
+    if (!rawUrl) {
+      toast("YouTube の URL を入力してください", "info");
+      return;
+    }
+
+    stepLoading.style.display = "block";
+    fetchBtn.disabled = true;
+    loadingBar.style.width = "0%";
+    loadingStatus.textContent = "YouTube 音源を取得中…";
+
+    try {
+      const result = await downloadYouTubeAudio(rawUrl, ({ percent, statusText }) => {
+        loadingBar.style.width = `${percent}%`;
+        loadingStatus.textContent = statusText;
+      });
+
+      await loadAudioForEditing(result.audioArrayBuffer, {
+        title: result.title,
+        artist: result.artist,
+        album: result.album,
+        artworkBlob: result.artworkBlob,
+        thumbnailUrl: result.thumbnailUrl,
+      });
+
+      stepLoading.style.display = "none";
+      stepEditor.style.display = "block";
+      toast("音源の取得が完了しました！カット位置を調整できます", "ok");
+    } catch (err) {
+      stepLoading.style.display = "none";
+      fetchBtn.disabled = false;
+      toast(`音源取得失敗: ${err.message}`, "err");
+    }
+  });
+
+  // ローカル音声ファイル選択
+  localFileBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    stepLoading.style.display = "block";
+    loadingStatus.textContent = "音声ファイルをデコード中…";
+    loadingBar.style.width = "50%";
+
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const baseName = file.name.replace(/\.[^/.]+$/, "");
+      await loadAudioForEditing(arrayBuffer, {
+        title: baseName,
+        artist: "",
+        album: "Local Upload",
+      });
+
+      stepLoading.style.display = "none";
+      stepEditor.style.display = "block";
+      toast("音声ファイルを読み込みました", "ok");
+    } catch (err) {
+      stepLoading.style.display = "none";
+      toast(`ファイル読込失敗: ${err.message}`, "err");
+    }
+  });
+
+  // 音声バッファのデコードと編集準備
+  async function loadAudioForEditing(arrayBuffer, meta = {}) {
+    cleanupPreview();
+
+    // 1. Web Audio API でデコード
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    currentAudioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+    audioDuration = currentAudioBuffer.duration;
+    cutStartTime = 0;
+    cutEndTime = audioDuration;
+    currentArtworkBlob = meta.artworkBlob || null;
+
+    // 2. メタデータの反映
+    metaTitle.value = meta.title || "無題";
+    metaArtist.value = meta.artist || "YouTube";
+    metaAlbum.value = meta.album || "YouTube";
+    if (meta.thumbnailUrl) {
+      metaArt.src = meta.thumbnailUrl;
+      metaArt.style.display = "block";
+    } else {
+      metaArt.style.display = "none";
+    }
+
+    // 3. プレビュー用 HTML5 Audio
+    const sourceBlob = new Blob([arrayBuffer], { type: "audio/mp4" });
+    const audioUrl = URL.createObjectURL(sourceBlob);
+    currentPreviewAudio = new Audio(audioUrl);
+
+    // 4. 数値入力欄の初期化
+    startNumInput.max = String(Math.floor(audioDuration * 10) / 10);
+    endNumInput.max = String(Math.floor(audioDuration * 10) / 10);
+    startNumInput.value = "0.0";
+    endNumInput.value = (Math.floor(audioDuration * 10) / 10).toFixed(1);
+
+    updateCutDisplay();
+    renderWaveform();
+
+    // プレビュー再生時の時間更新ループ
+    const trackLoop = () => {
+      if (currentPreviewAudio) {
+        const cur = currentPreviewAudio.currentTime;
+        if (isPlayingSelectionOnly && cur >= cutEndTime) {
+          currentPreviewAudio.currentTime = cutStartTime;
+        } else if (cur >= audioDuration) {
+          currentPreviewAudio.pause();
+          playToggleBtn.textContent = "▶ プレビュー";
+        }
+        updateTimeDisplay();
+        renderWaveform();
+      }
+      animFrameId = requestAnimationFrame(trackLoop);
+    };
+    animFrameId = requestAnimationFrame(trackLoop);
+  }
+
+  // 時間フォーマット (分:秒.小数点1桁)
+  function formatSec(sec) {
+    const s = Math.max(0, sec);
+    const m = Math.floor(s / 60);
+    const rem = (s % 60).toFixed(1);
+    const padRem = parseFloat(rem) < 10 ? `0${rem}` : rem;
+    return `${m}:${padRem}`;
+  }
+
+  function updateTimeDisplay() {
+    const cur = currentPreviewAudio ? currentPreviewAudio.currentTime : 0;
+    curTimeDisplay.textContent = `${formatSec(cur)} / ${formatSec(audioDuration)}`;
+  }
+
+  function updateCutDisplay() {
+    startNumInput.value = cutStartTime.toFixed(1);
+    endNumInput.value = cutEndTime.toFixed(1);
+    const selDuration = Math.max(0, cutEndTime - cutStartTime);
+    cutSummaryBadge.textContent = `カット後の長さ: ${formatSec(selDuration)} (元の長さ: ${formatSec(audioDuration)})`;
+  }
+
+  // 波形描画
+  function renderWaveform() {
+    if (!canvas || !currentAudioBuffer) return;
+    const ctx = canvas.getContext("2d");
+    const width = canvas.width;
+    const height = canvas.height;
+
+    ctx.clearRect(0, 0, width, height);
+
+    // 背景
+    ctx.fillStyle = "#161616";
+    ctx.fillRect(0, 0, width, height);
+
+    const data = currentAudioBuffer.getChannelData(0);
+    const step = Math.ceil(data.length / width);
+    const amp = height / 2;
+
+    // 波形描画
+    ctx.fillStyle = "#444";
+    for (let i = 0; i < width; i++) {
+      let min = 1.0;
+      let max = -1.0;
+      for (let j = 0; j < step; j++) {
+        const datum = data[i * step + j];
+        if (datum < min) min = datum;
+        if (datum > max) max = datum;
+      }
+      const y1 = (1 + min) * amp;
+      const y2 = Math.max(1, (max - min) * amp);
+      ctx.fillRect(i, y1, 1, y2);
+    }
+
+    // カット選択範囲のハイライト (半透明アクセント色)
+    const startX = (cutStartTime / audioDuration) * width;
+    const endX = (cutEndTime / audioDuration) * width;
+    ctx.fillStyle = "rgba(0, 113, 227, 0.35)";
+    ctx.fillRect(startX, 0, Math.max(2, endX - startX), height);
+
+    // 開始マーカー線 (緑)
+    ctx.fillStyle = "#30d158";
+    ctx.fillRect(startX, 0, 2, height);
+
+    // 終了マーカー線 (赤)
+    ctx.fillStyle = "#ff453a";
+    ctx.fillRect(Math.max(0, endX - 2), 0, 2, height);
+
+    // 現在の再生ヘッド線 (白)
+    if (currentPreviewAudio) {
+      const curX = (currentPreviewAudio.currentTime / audioDuration) * width;
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(curX, 0, 2, height);
+    }
+  }
+
+  // 波形クリックでシーク
+  waveformWrap.addEventListener("click", (e) => {
+    if (!currentPreviewAudio || audioDuration <= 0) return;
+    const rect = waveformWrap.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    currentPreviewAudio.currentTime = ratio * audioDuration;
+    renderWaveform();
+    updateTimeDisplay();
+  });
+
+  // 再生トグル
+  playToggleBtn.addEventListener("click", () => {
+    if (!currentPreviewAudio) return;
+    isPlayingSelectionOnly = false;
+    if (currentPreviewAudio.paused) {
+      currentPreviewAudio.play();
+      playToggleBtn.textContent = "⏸ 一時停止";
+    } else {
+      currentPreviewAudio.pause();
+      playToggleBtn.textContent = "▶ プレビュー";
+    }
+  });
+
+  // カット範囲のみ再生
+  playSelectionBtn.addEventListener("click", () => {
+    if (!currentPreviewAudio) return;
+    isPlayingSelectionOnly = true;
+    currentPreviewAudio.currentTime = cutStartTime;
+    currentPreviewAudio.play();
+    playToggleBtn.textContent = "⏸ 一時停止";
+  });
+
+  // 現在位置を開始に設定
+  setStartHereBtn.addEventListener("click", () => {
+    if (!currentPreviewAudio) return;
+    cutStartTime = Math.min(cutEndTime - 0.1, Math.max(0, currentPreviewAudio.currentTime));
+    updateCutDisplay();
+    renderWaveform();
+  });
+
+  // 現在位置を終了に設定
+  setEndHereBtn.addEventListener("click", () => {
+    if (!currentPreviewAudio) return;
+    cutEndTime = Math.max(cutStartTime + 0.1, Math.min(audioDuration, currentPreviewAudio.currentTime));
+    updateCutDisplay();
+    renderWaveform();
+  });
+
+  // 微調整ボタン
+  startSubBtn.addEventListener("click", () => {
+    cutStartTime = Math.max(0, cutStartTime - 1.0);
+    updateCutDisplay();
+    renderWaveform();
+  });
+  startAddBtn.addEventListener("click", () => {
+    cutStartTime = Math.min(cutEndTime - 0.1, cutStartTime + 1.0);
+    updateCutDisplay();
+    renderWaveform();
+  });
+  endSubBtn.addEventListener("click", () => {
+    cutEndTime = Math.max(cutStartTime + 0.1, cutEndTime - 1.0);
+    updateCutDisplay();
+    renderWaveform();
+  });
+  endAddBtn.addEventListener("click", () => {
+    cutEndTime = Math.min(audioDuration, cutEndTime + 1.0);
+    updateCutDisplay();
+    renderWaveform();
+  });
+
+  // 数値入力直接変更
+  startNumInput.addEventListener("change", () => {
+    const val = parseFloat(startNumInput.value) || 0;
+    cutStartTime = Math.max(0, Math.min(cutEndTime - 0.1, val));
+    updateCutDisplay();
+    renderWaveform();
+  });
+  endNumInput.addEventListener("change", () => {
+    const val = parseFloat(endNumInput.value) || audioDuration;
+    cutEndTime = Math.max(cutStartTime + 0.1, Math.min(audioDuration, val));
+    updateCutDisplay();
+    renderWaveform();
+  });
+
+  // リセット
+  resetCutBtn.addEventListener("click", () => {
+    cutStartTime = 0;
+    cutEndTime = audioDuration;
+    updateCutDisplay();
+    renderWaveform();
+  });
+
+  // エクスポート & 保存処理 (Google Drive またはローカルDL)
+  async function handleExportAndSave(destination = "gdrive") {
+    if (!currentAudioBuffer) {
+      toast("先に音源を取得してください", "info");
+      return false;
+    }
+
+    const title = metaTitle.value.trim() || "無題";
+    const artist = metaArtist.value.trim() || "YouTube";
+    const album = metaAlbum.value.trim() || "YouTube";
+    const bitrate = parseInt(bitrateSelect.value, 10) || 320;
+    const filename = `${artist} - ${title}.mp3`.replace(/[\\/:*?"<>|]/g, "_");
+
+    cleanupPreview();
+
+    // 進行状況表示
+    stepEditor.style.display = "none";
+    stepLoading.style.display = "block";
+    loadingStatus.textContent = `MP3 (${bitrate}kbps) にエンコード中…`;
+    loadingBar.style.width = "0%";
+
+    try {
+      // 1. サムネイル ArrayBuffer の準備
+      let artworkBuffer = null;
+      if (currentArtworkBlob) {
+        artworkBuffer = await currentArtworkBlob.arrayBuffer();
+      }
+
+      // 2. カット範囲の PCM を MP3 320kbps にエンコード
+      const mp3Blob = sliceAndEncodeAudio(currentAudioBuffer, {
+        startTime: cutStartTime,
+        endTime: cutEndTime,
+        bitrate,
+        metadata: {
+          title,
+          artist,
+          album,
+          year: new Date().getFullYear(),
+          artworkBuffer,
+        },
+        onProgress: (pct) => {
+          loadingBar.style.width = `${Math.min(70, Math.round(pct * 0.7))}%`;
+          loadingStatus.textContent = `MP3 (${bitrate}kbps) にエンコード中… ${pct}%`;
+        },
+      });
+
+      if (destination === "download") {
+        // 端末ダウンロード
+        loadingStatus.textContent = "端末へダウンロード中…";
+        loadingBar.style.width = "100%";
+        const dlUrl = URL.createObjectURL(mp3Blob);
+        const a = document.createElement("a");
+        a.href = dlUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          a.remove();
+          URL.revokeObjectURL(dlUrl);
+        }, 1000);
+
+        toast(`「${filename}」をダウンロードしました`, "ok");
+        return true;
+      }
+
+      // 3. Google Drive 保存
+      loadingStatus.textContent = "Google Drive 接続を確認中…";
+      loadingBar.style.width = "75%";
+
+      const connected = await isDriveConnected();
+      if (!connected) {
+        loadingStatus.textContent = "Google Drive に接続してください…";
+        const pub = getPublic();
+        if (pub.gdriveClientId) {
+          await requestGisToken(pub.gdriveClientId);
+        } else {
+          toast("Google Drive 連携の初期設定が必要です。設定画面から Client ID を設定してください。", "err", 5000);
+          stepLoading.style.display = "none";
+          stepEditor.style.display = "block";
+          return false;
+        }
+      }
+
+      loadingStatus.textContent = "Google Drive「MUSIC-PLAYER」へアップロード中…";
+      const uploaded = await uploadFileToDrive({
+        name: filename,
+        blob: mp3Blob,
+        mimeType: "audio/mpeg",
+        folderName: "MUSIC-PLAYER",
+        onProgress: (pct) => {
+          loadingBar.style.width = `${75 + Math.round(pct * 0.2)}%`;
+        },
+      });
+
+      // 4. ライブラリに Google Drive トラックとして登録
+      loadingStatus.textContent = "ライブラリに曲を追加中…";
+      const trackId = `gd-${uploaded.id}`;
+      const newTrack = {
+        id: trackId,
+        title,
+        artist,
+        album,
+        albumArtist: artist,
+        duration: Math.round(cutEndTime - cutStartTime),
+        source: "gdrive",
+        format: "mp3",
+        mimeType: "audio/mpeg",
+        fileSize: mp3Blob.size,
+        addedAt: Date.now(),
+        userEdited: true,
+      };
+
+      if (currentArtworkBlob) {
+        newTrack.artworkBlob = currentArtworkBlob;
+      }
+
+      await putTrack(newTrack, mp3Blob);
+
+      loadingBar.style.width = "100%";
+      toast(`✅ Google Drive「MUSIC-PLAYER」に保存し、ライブラリに追加しました！`, "ok", 4000);
+
+      if (typeof onSaved === "function") {
+        onSaved(newTrack);
+      }
+
+      // 今すぐ再生するか確認ダイアログ
+      const playNow = await confirm(`Google Drive に保存しました！\n今すぐ「${title}」を再生しますか？`, {
+        okLabel: "▶ 今すぐ再生",
+        cancelLabel: "完了",
+      });
+
+      if (playNow) {
+        await setQueueAndPlay([newTrack], 0);
+      }
+
+      return true;
+    } catch (err) {
+      stepLoading.style.display = "none";
+      stepEditor.style.display = "block";
+      toast(`保存エラー: ${err.message}`, "err", 5000);
+      return false;
+    }
+  }
+}
