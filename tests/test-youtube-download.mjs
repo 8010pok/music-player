@@ -4,7 +4,13 @@
 
 import { strictEqual, ok } from "node:assert";
 import { extractYouTubeVideoId, DEFAULT_INVIDIOUS_INSTANCES } from "../js/youtube/youtube-service.js";
-import { buildId3Tag, encodePcmToMp3, sliceAndEncodeAudio } from "../js/audio/mp3-encoder.js";
+import {
+  buildId3Tag,
+  encodePcmToMp3,
+  sliceAndEncodeAudio,
+  analyzeAudioLoudness,
+  calculateNormalizeGain,
+} from "../js/audio/mp3-encoder.js";
 import { isDriveConnected, isDriveTrackId, driveFileIdFromTrackId } from "../js/gdrive/drive-service.js";
 
 let passed = 0;
@@ -161,7 +167,118 @@ test("AudioBuffer のカット & MP3 320kbps エンコード (モック)", () =>
   ok(mp3.size > 10000);
 });
 
-console.log("=== 4. Google Drive 連携仕様確認 ===");
+console.log("=== 4. 音量ノーマライズ & ラウドネス解析テスト ===");
+
+test("PCM サンプルから Peak と RMS を正確に解析できる", () => {
+  const sampleRate = 44100;
+  const numSamples = sampleRate; // 1秒
+  // 振幅 0.5 のサイン波
+  const channelData = new Float32Array(numSamples);
+  for (let i = 0; i < numSamples; i++) {
+    channelData[i] = 0.5 * Math.sin(2 * Math.PI * 440 * (i / sampleRate));
+  }
+
+  const mockBuffer = {
+    sampleRate,
+    numberOfChannels: 1,
+    duration: 1.0,
+    length: numSamples,
+    getChannelData: () => channelData,
+  };
+
+  const loudness = analyzeAudioLoudness(mockBuffer);
+  // peak は 0.5 (約 -6.0 dBFS)
+  ok(loudness.peak >= 0.49 && loudness.peak <= 0.51, `peak が 0.5 付近であること (${loudness.peak})`);
+  ok(loudness.peakDb >= -6.2 && loudness.peakDb <= -5.8, `peakDb が -6dB 付近であること (${loudness.peakDb})`);
+  // サイン波の実効値 (RMS) は peak / sqrt(2) = 0.5 * 0.7071 = 0.3535 (約 -9.0 dBFS)
+  ok(loudness.rms >= 0.34 && loudness.rms <= 0.37, `rms が 0.35 付近であること (${loudness.rms})`);
+  ok(loudness.rmsDb >= -9.3 && loudness.rmsDb <= -8.7, `rmsDb が -9dB 付近であること (${loudness.rmsDb})`);
+});
+
+test("基準曲モード: 目標 RMS に合わせたゲインを算出できる", () => {
+  // 元音源の RMS が -20 dBFS, ピークが -8 dBFS の場合
+  const sourceLoudness = {
+    peak: 0.398, // -8dB
+    peakDb: -8.0,
+    rms: 0.1,    // -20dB
+    rmsDb: -20.0,
+  };
+
+  // 基準曲が -14 dBFS の場合、必要なゲインは +6 dB (約 2.0倍)
+  const norm = calculateNormalizeGain({
+    sourceLoudness,
+    mode: "reference",
+    targetRmsDb: -14.0,
+    maxPeakDb: -0.3,
+  });
+
+  strictEqual(norm.gainDb, 6.0);
+  ok(norm.gain >= 1.98 && norm.gain <= 2.02);
+  strictEqual(norm.limited, false);
+  strictEqual(norm.finalPeakDb, -2.0); // -8dB + 6dB = -2dB
+  strictEqual(norm.finalRmsDb, -14.0);
+});
+
+test("クリッピング安全制限: 音割れを防ぐためピーク -0.3dB でクランプされる", () => {
+  // 元音源の RMS が -25 dBFS (非常に静か) だが、突発ピークが -2 dBFS の場合
+  const sourceLoudness = {
+    peak: 0.794, // -2dB
+    peakDb: -2.0,
+    rms: 0.056,  // -25dB
+    rmsDb: -25.0,
+  };
+
+  // 目標が -14 dBFS だと理想は +11 dB だが、+11dB するとピークが +9dB になり激しく音割れする
+  // 安全ガードにより、ピークが -0.3dB を超えないよう最大 +1.7dB に制限されること
+  const norm = calculateNormalizeGain({
+    sourceLoudness,
+    mode: "reference",
+    targetRmsDb: -14.0,
+    maxPeakDb: -0.3,
+  });
+
+  strictEqual(norm.limited, true, "音割れ防止リミッターが発動すること");
+  ok(norm.gainDb <= 1.8, `ゲインが安全範囲にクランプされていること (${norm.gainDb} dB)`);
+  ok(norm.finalPeakDb <= -0.3, `最終ピークが -0.3dB 以下であること (${norm.finalPeakDb} dB)`);
+});
+
+test("ピークノーマライズモード: 最大音量 (-0.3dB) にゲイン調整できる", () => {
+  const sourceLoudness = {
+    peak: 0.5, // -6.0dB
+    peakDb: -6.0,
+    rms: 0.25,
+    rmsDb: -12.0,
+  };
+
+  const norm = calculateNormalizeGain({
+    sourceLoudness,
+    mode: "peak",
+    maxPeakDb: -0.3,
+  });
+
+  ok(norm.gainDb >= 5.6 && norm.gainDb <= 5.8, `約 +5.7dB ゲインアップ (${norm.gainDb} dB)`);
+  ok(norm.finalPeakDb <= -0.3);
+});
+
+test("ノーマライズゲインを適用して MP3 をエンコードできる", () => {
+  const sampleRate = 44100;
+  const numSamples = sampleRate;
+  const left = new Float32Array(numSamples).fill(0.1); // 静かな音声
+  const right = new Float32Array(numSamples).fill(0.1);
+
+  // gain: 2.0 (音量を2倍に引き上げてエンコード)
+  const mp3Blob = encodePcmToMp3(2, sampleRate, left, right, {
+    bitrate: 320,
+    gain: 2.0,
+    metadata: { title: "Gain Test" },
+  });
+
+  ok(mp3Blob);
+  strictEqual(mp3Blob.type, "audio/mpeg");
+  ok(mp3Blob.size > 10000);
+});
+
+console.log("=== 5. Google Drive 連携仕様確認 ===");
 
 test("Google Drive トラック ID の判定と相互変換", () => {
   strictEqual(isDriveTrackId("gd-1234567890abcdef"), true);

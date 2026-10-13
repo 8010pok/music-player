@@ -42,6 +42,8 @@ const PUBLIC_DEFAULTS = {
   gdriveTokenExpiry: 0,       // トークン有効期限タイムスタンプ
   // === YouTube 音源取得設定 ===
   customInvidiousUrl: "",     // カスタム Invidious インスタンス URL (任意)
+  // === 音量ノーマライズ基準曲設定 ===
+  normalizeReferenceTrack: null, // { trackId, title, artist, rmsDb, peakDb }
 };
 
 const SECRET_KEYS = ["apiKey", "apiSecret", "sessionKey", "gdriveAccessToken"];

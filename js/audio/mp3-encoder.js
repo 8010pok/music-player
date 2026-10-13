@@ -117,6 +117,115 @@ export function buildId3Tag({ title = "", artist = "", album = "", year = "", ar
 }
 
 /**
+ * AudioBuffer から指定区間（または全体）の音量ラウドネス（Peak / RMS）を計測
+ * @param {AudioBuffer} audioBuffer
+ * @param {object} [opts]
+ * @param {number} [opts.startTime=0]
+ * @param {number} [opts.endTime=null]
+ * @returns {{ peak: number, peakDb: number, rms: number, rmsDb: number }}
+ */
+export function analyzeAudioLoudness(audioBuffer, { startTime = 0, endTime = null } = {}) {
+  const sampleRate = audioBuffer.sampleRate;
+  const numChannels = audioBuffer.numberOfChannels;
+
+  const startSec = Math.max(0, Number(startTime) || 0);
+  const endSec = endTime != null && Number(endTime) > startSec ? Number(endTime) : audioBuffer.duration;
+
+  const startSample = Math.max(0, Math.floor(startSec * sampleRate));
+  const endSample = Math.min(audioBuffer.length, Math.floor(endSec * sampleRate));
+  const len = Math.max(0, endSample - startSample);
+
+  if (len === 0) {
+    return { peak: 0, peakDb: -100, rms: 0, rmsDb: -100 };
+  }
+
+  // 高速化のため、最大 200,000 サンプル（またはステップサンプリング）で走査
+  const step = Math.max(1, Math.floor(len / 200000));
+  let peak = 0;
+  let sumSquare = 0;
+  let sampleCount = 0;
+
+  for (let c = 0; c < numChannels; c++) {
+    const channelData = audioBuffer.getChannelData(c);
+    for (let i = startSample; i < endSample; i += step) {
+      const val = Math.abs(channelData[i]);
+      if (val > peak) peak = val;
+      sumSquare += val * val;
+      sampleCount++;
+    }
+  }
+
+  const rms = sampleCount > 0 ? Math.sqrt(sumSquare / sampleCount) : 0;
+  const peakDb = peak > 0.000001 ? Math.round(20 * Math.log10(peak) * 10) / 10 : -100;
+  const rmsDb = rms > 0.000001 ? Math.round(20 * Math.log10(rms) * 10) / 10 : -100;
+
+  return { peak, peakDb, rms, rmsDb };
+}
+
+/**
+ * ノーマライズに必要なゲイン（倍率 & dB）を算出
+ * @param {object} params
+ * @param {{ peak: number, peakDb: number, rms: number, rmsDb: number }} params.sourceLoudness 元音源のラウドネス
+ * @param {"reference"|"peak"|"manual"|"none"} [params.mode="reference"]
+ * @param {number} [params.targetRmsDb=-14.0] 基準曲（または目標）の RMS dBFS
+ * @param {number} [params.manualGainDb=0] 手動調整時のゲイン dB
+ * @param {number} [params.maxPeakDb=-0.3] クリッピング防止上限 dBFS (デフォルト -0.3dB)
+ * @returns {{ gain: number, gainDb: number, limited: boolean, finalPeakDb: number, finalRmsDb: number }}
+ */
+export function calculateNormalizeGain({
+  sourceLoudness,
+  mode = "reference",
+  targetRmsDb = -14.0,
+  manualGainDb = 0,
+  maxPeakDb = -0.3,
+}) {
+  if (!sourceLoudness || sourceLoudness.peak <= 0.00001) {
+    return { gain: 1.0, gainDb: 0, limited: false, finalPeakDb: -100, finalRmsDb: -100 };
+  }
+
+  const maxAllowedPeakLinear = Math.pow(10, maxPeakDb / 20); // 約 0.966
+  const maxSafeGain = maxAllowedPeakLinear / Math.max(0.0001, sourceLoudness.peak);
+
+  let desiredGain = 1.0;
+
+  if (mode === "none") {
+    desiredGain = 1.0;
+  } else if (mode === "peak") {
+    // ピークを maxPeakDb (-0.3dB) に合わせる
+    desiredGain = maxSafeGain;
+  } else if (mode === "reference") {
+    // 目標 RMS との差分をゲインとして計算
+    const deltaDb = targetRmsDb - sourceLoudness.rmsDb;
+    desiredGain = Math.pow(10, deltaDb / 20);
+  } else if (mode === "manual") {
+    desiredGain = Math.pow(10, manualGainDb / 20);
+  }
+
+  // クリッピング防止のため、最大安全ゲインで制限（安全ガード）
+  let finalGain = desiredGain;
+  let limited = false;
+  if (finalGain > maxSafeGain) {
+    finalGain = maxSafeGain;
+    limited = true;
+  }
+
+  // 極端な減衰（-24dB 以下）や過大増幅（+24dB 以上）を防ぐ安全クランプ
+  finalGain = Math.max(0.063, Math.min(15.8, finalGain));
+
+  const gainDb = Math.round(20 * Math.log10(finalGain) * 10) / 10;
+  const finalPeakDb = Math.min(maxPeakDb, Math.round((sourceLoudness.peakDb + gainDb) * 10) / 10);
+  const finalRmsDb = Math.round((sourceLoudness.rmsDb + gainDb) * 10) / 10;
+
+  return {
+    gain: finalGain,
+    gainDb,
+    limited,
+    finalPeakDb,
+    finalRmsDb,
+  };
+}
+
+/**
  * PCM サンプルから MP3 Blob を生成
  * @param {number} channels 1 (mono) または 2 (stereo)
  * @param {number} sampleRate 例: 44100, 48000
@@ -124,14 +233,16 @@ export function buildId3Tag({ title = "", artist = "", album = "", year = "", ar
  * @param {Float32Array|Int16Array} [rightChannel]
  * @param {object} [opts]
  * @param {number} [opts.bitrate=320] MP3 ビットレート (kbps, デフォルト 320)
+ * @param {number} [opts.gain=1.0] 音量ゲイン倍率 (ノーマライズ用)
  * @param {object} [opts.metadata] ID3 タグ情報
  * @param {(pct: number) => void} [opts.onProgress]
  * @returns {Blob}
  */
-export function encodePcmToMp3(channels, sampleRate, leftChannel, rightChannel = null, { bitrate = 320, metadata = null, onProgress = null } = {}) {
+export function encodePcmToMp3(channels, sampleRate, leftChannel, rightChannel = null, { bitrate = 320, gain = 1.0, metadata = null, onProgress = null } = {}) {
   const encChannels = channels >= 2 && rightChannel ? 2 : 1;
   const numSamples = leftChannel.length;
   const kbps = parseInt(bitrate, 10) || 320;
+  const applyGain = typeof gain === "number" && !isNaN(gain) && gain > 0 ? gain : 1.0;
 
   const mp3encoder = new lamejs.Mp3Encoder(encChannels, sampleRate, kbps);
   const mp3Data = [];
@@ -158,18 +269,24 @@ export function encodePcmToMp3(channels, sampleRate, leftChannel, rightChannel =
     for (let j = 0; j < chunkLen; j++) {
       const idx = i + j;
       if (isLeftFloat) {
-        const s = leftChannel[idx];
+        let s = leftChannel[idx] * applyGain;
+        if (s > 1.0) s = 1.0;
+        else if (s < -1.0) s = -1.0;
         leftInt16[j] = s < 0 ? Math.max(-32768, Math.round(s * 32768)) : Math.min(32767, Math.round(s * 32767));
       } else {
-        leftInt16[j] = leftChannel[idx];
+        let s = leftChannel[idx] * applyGain;
+        leftInt16[j] = s < -32768 ? -32768 : (s > 32767 ? 32767 : Math.round(s));
       }
 
       if (encChannels === 2) {
         if (isRightFloat) {
-          const s = rightChannel[idx];
+          let s = rightChannel[idx] * applyGain;
+          if (s > 1.0) s = 1.0;
+          else if (s < -1.0) s = -1.0;
           rightInt16[j] = s < 0 ? Math.max(-32768, Math.round(s * 32768)) : Math.min(32767, Math.round(s * 32767));
         } else {
-          rightInt16[j] = rightChannel[idx];
+          let s = rightChannel[idx] * applyGain;
+          rightInt16[j] = s < -32768 ? -32768 : (s > 32767 ? 32767 : Math.round(s));
         }
       }
     }
@@ -216,11 +333,12 @@ export function encodePcmToMp3(channels, sampleRate, leftChannel, rightChannel =
  * @param {number} [opts.startTime=0] 切り出し開始時間 (秒)
  * @param {number} [opts.endTime=null] 切り出し終了時間 (秒, null の場合は曲末尾)
  * @param {number} [opts.bitrate=320] MP3 ビットレート (デフォルト 320kbps)
+ * @param {number} [opts.gain=1.0] 音量ノーマライズ用ゲイン
  * @param {object} [opts.metadata] ID3 メタデータ
  * @param {(pct: number) => void} [opts.onProgress]
  * @returns {Blob}
  */
-export function sliceAndEncodeAudio(audioBuffer, { startTime = 0, endTime = null, bitrate = 320, metadata = null, onProgress = null } = {}) {
+export function sliceAndEncodeAudio(audioBuffer, { startTime = 0, endTime = null, bitrate = 320, gain = 1.0, metadata = null, onProgress = null } = {}) {
   const sampleRate = audioBuffer.sampleRate;
   const numChannels = audioBuffer.numberOfChannels;
 
@@ -240,6 +358,7 @@ export function sliceAndEncodeAudio(audioBuffer, { startTime = 0, endTime = null
 
   return encodePcmToMp3(numChannels, sampleRate, leftChannel, rightChannel, {
     bitrate: bitrate || 320,
+    gain: typeof gain === "number" ? gain : 1.0,
     metadata,
     onProgress,
   });

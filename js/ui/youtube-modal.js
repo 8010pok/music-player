@@ -15,10 +15,14 @@ import {
   downloadYouTubeAudio,
   extractYouTubeVideoId,
 } from "../youtube/youtube-service.js";
-import { sliceAndEncodeAudio } from "../audio/mp3-encoder.js";
+import {
+  sliceAndEncodeAudio,
+  analyzeAudioLoudness,
+  calculateNormalizeGain,
+} from "../audio/mp3-encoder.js";
 import { isDriveConnected, uploadFileToDrive, requestGisToken } from "../gdrive/drive-service.js";
-import { putTrack } from "../store/library-db.js";
-import { getPublic } from "../store/settings.js";
+import { putTrack, getAllTracks, getBlob } from "../store/library-db.js";
+import { getPublic, setPublic } from "../store/settings.js";
 import { setQueueAndPlay } from "../player/audio-engine.js";
 
 /**
@@ -142,6 +146,50 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
         </div>
       </div>
 
+      <!-- 音量ノーマライズ設定 -->
+      <div class="yt-card" id="yt-norm-card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <div style="font-weight: 600; font-size: 12px; display: flex; align-items: center; gap: 6px;">
+            <span>🔊 音量ノーマライズ</span>
+            <span class="yt-badge accent" id="yt-norm-badge">自動 (+0.0 dB)</span>
+          </div>
+          <select id="yt-norm-mode" class="yt-input" style="width: auto; height: 30px; font-weight: 600;">
+            <option value="reference" selected>🎯 基準の曲に合わせる (推奨)</option>
+            <option value="peak">⚡ 最大音量にノーマライズ (0dB)</option>
+            <option value="manual">🎚 手動調整 (ゲインスライダー)</option>
+            <option value="none">オフ (元の音量のまま)</option>
+          </select>
+        </div>
+
+        <!-- 基準曲情報エリア -->
+        <div id="yt-norm-ref-area" style="background: var(--bg-elev-2); border-radius: 8px; padding: 10px; margin-bottom: 8px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <span style="font-size: 11px; color: var(--fg-muted);">基準にする曲:</span>
+            <button type="button" class="btn" id="btn-yt-pick-ref" style="font-size: 11px; padding: 2px 8px;">曲を変更…</button>
+          </div>
+          <div id="yt-norm-ref-title" style="font-weight: 600; font-size: 12px; margin-bottom: 2px;">
+            標準ラウドネス (-14.0 dBFS)
+          </div>
+          <div id="yt-norm-ref-desc" style="font-size: 11px; color: var(--fg-muted);">
+            ライブラリの曲を選ぶと、その曲の音量に合わせて自動調整します
+          </div>
+        </div>
+
+        <!-- 手動ゲイン調整エリア -->
+        <div id="yt-norm-manual-area" style="display: none; background: var(--bg-elev-2); border-radius: 8px; padding: 10px; margin-bottom: 8px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <span style="font-size: 11px; color: var(--fg-muted);">ゲイン調整:</span>
+            <span id="yt-norm-manual-label" style="font-weight: 600; font-size: 12px;">+0.0 dB</span>
+          </div>
+          <input type="range" id="yt-norm-gain-slider" min="-6" max="14" step="0.5" value="0" style="width: 100%; cursor: pointer;" />
+        </div>
+
+        <!-- 解析結果 & 適用サマリー -->
+        <div id="yt-norm-summary" style="font-size: 11px; color: var(--fg-muted); line-height: 1.4;">
+          音源読み込み後に音量を自動解析します
+        </div>
+      </div>
+
       <!-- 保存設定（MP3 ビットレート & 保存先） -->
       <div class="yt-card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
@@ -159,6 +207,27 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
             端末の「ファイル」にも MP3 を書き出す (未チェックなら「○○で開く」を経由せず直接保存)
           </label>
         </div>
+      </div>
+    </div>
+
+    <!-- 基準曲選択オーバーレイパネル -->
+    <div id="yt-ref-picker-overlay" style="display: none; position: absolute; inset: 0; background: var(--bg-elev-1); z-index: 100; border-radius: 12px; padding: 16px; flex-direction: column; box-shadow: 0 4px 24px rgba(0,0,0,0.3);">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <h3 style="margin: 0; font-size: 14px; font-weight: 700;">🎯 音量の基準にする曲を選択</h3>
+        <button type="button" class="btn" id="btn-yt-close-ref-picker" style="font-size: 11px; padding: 3px 8px;">✕ 閉じる</button>
+      </div>
+      <div style="font-size: 11px; color: var(--fg-muted); margin-bottom: 10px; line-height: 1.4;">
+        ライブラリの曲を選ぶと、その曲の音量（RMSラウドネス）を自動計測し、YouTubeの音源を同じ音量感に引き上げます。
+      </div>
+      <div style="margin-bottom: 8px; display: flex; gap: 6px;">
+        <input type="text" id="yt-ref-search-input" class="yt-input" placeholder="曲名やアーティスト名で検索…" style="height: 32px;" />
+        <button type="button" class="btn" id="btn-yt-reset-standard-ref" style="font-size: 11px; white-space: nowrap; padding: 0 8px;">標準 (-14dB) に戻す</button>
+      </div>
+      <div id="yt-ref-track-list" style="flex: 1; overflow-y: auto; max-height: 300px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev-2); padding: 4px;">
+        <!-- 曲一覧がここに展開される -->
+      </div>
+      <div id="yt-ref-analyzing-msg" style="display: none; margin-top: 8px; text-align: center; color: var(--accent); font-size: 12px; font-weight: 600;">
+        ⏳ 基準曲の音量を解析中…
       </div>
     </div>
   `;
@@ -236,6 +305,33 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
   const bitrateSelect = container.querySelector("#yt-bitrate-select");
   const downloadFileCb = container.querySelector("#yt-download-file-cb");
 
+  // 音量ノーマライズ関連 DOM 要素
+  const normModeSelect = container.querySelector("#yt-norm-mode");
+  const normBadge = container.querySelector("#yt-norm-badge");
+  const normRefArea = container.querySelector("#yt-norm-ref-area");
+  const normRefTitle = container.querySelector("#yt-norm-ref-title");
+  const normRefDesc = container.querySelector("#yt-norm-ref-desc");
+  const pickRefBtn = container.querySelector("#btn-yt-pick-ref");
+  const normManualArea = container.querySelector("#yt-norm-manual-area");
+  const normManualLabel = container.querySelector("#yt-norm-manual-label");
+  const normGainSlider = container.querySelector("#yt-norm-gain-slider");
+  const normSummary = container.querySelector("#yt-norm-summary");
+
+  // 基準曲ピッカーオーバーレイ関連 DOM 要素
+  const refPickerOverlay = container.querySelector("#yt-ref-picker-overlay");
+  const closeRefPickerBtn = container.querySelector("#btn-yt-close-ref-picker");
+  const refSearchInput = container.querySelector("#yt-ref-search-input");
+  const resetStandardRefBtn = container.querySelector("#btn-yt-reset-standard-ref");
+  const refTrackList = container.querySelector("#yt-ref-track-list");
+  const refAnalyzingMsg = container.querySelector("#yt-ref-analyzing-msg");
+
+  // 音量ノーマライズ状態
+  let currentSourceLoudness = null; // { peak, peakDb, rms, rmsDb }
+  let currentCalculatedGain = 1.0;
+  let previewAudioCtx = null;
+  let previewGainNode = null;
+  let previewMediaSource = null;
+
   // 音声プレビュークリーンアップ
   function cleanupPreview() {
     if (animFrameId) {
@@ -249,7 +345,230 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
       }
       currentPreviewAudio = null;
     }
+    if (previewAudioCtx) {
+      try { previewAudioCtx.close(); } catch (_) {}
+      previewAudioCtx = null;
+      previewGainNode = null;
+      previewMediaSource = null;
+    }
   }
+
+  // プレビュー再生時の GainNode 適用
+  function ensurePreviewGain() {
+    if (!currentPreviewAudio) return;
+    try {
+      if (!previewAudioCtx) {
+        previewAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        previewMediaSource = previewAudioCtx.createMediaElementSource(currentPreviewAudio);
+        previewGainNode = previewAudioCtx.createGain();
+        previewMediaSource.connect(previewGainNode);
+        previewGainNode.connect(previewAudioCtx.destination);
+      }
+      if (previewGainNode) {
+        previewGainNode.gain.value = currentCalculatedGain;
+      }
+      if (previewAudioCtx.state === "suspended") {
+        previewAudioCtx.resume();
+      }
+    } catch (e) {
+      console.warn("[yt] プレビュー Web Audio 接続フォールバック:", e);
+    }
+  }
+
+  // 音量ノーマライズの計算 & UI 表示更新
+  function updateNormalizeDisplay() {
+    if (!currentAudioBuffer) {
+      normSummary.textContent = "音源読み込み後に音量を自動解析します";
+      normBadge.textContent = "待機中";
+      return;
+    }
+
+    // カット範囲内の音源ラウドネスを解析
+    currentSourceLoudness = analyzeAudioLoudness(currentAudioBuffer, {
+      startTime: cutStartTime,
+      endTime: cutEndTime,
+    });
+
+    const mode = normModeSelect.value;
+    const pub = getPublic();
+    const refTrack = pub.normalizeReferenceTrack;
+
+    // 基準曲のターゲット RMS dBFS
+    let targetRmsDb = -14.0;
+    let refLabel = "標準ラウドネス (-14.0 dBFS)";
+    let refSub = "ライブラリの曲を選ぶと、その曲の音量に合わせて自動調整します";
+    if (refTrack && typeof refTrack.rmsDb === "number") {
+      targetRmsDb = refTrack.rmsDb;
+      refLabel = `「${refTrack.title}」(${refTrack.artist || "不明"})`;
+      refSub = `基準曲の音量: ${refTrack.rmsDb.toFixed(1)} dBFS (Peak: ${refTrack.peakDb ? refTrack.peakDb.toFixed(1) : "-"} dBFS)`;
+    }
+
+    normRefTitle.textContent = refLabel;
+    normRefDesc.textContent = refSub;
+    normRefArea.style.display = mode === "reference" ? "block" : "none";
+    normManualArea.style.display = mode === "manual" ? "block" : "none";
+
+    const manualGainDb = parseFloat(normGainSlider.value) || 0;
+    normManualLabel.textContent = `${manualGainDb >= 0 ? "+" : ""}${manualGainDb.toFixed(1)} dB`;
+
+    const result = calculateNormalizeGain({
+      sourceLoudness: currentSourceLoudness,
+      mode,
+      targetRmsDb,
+      manualGainDb,
+      maxPeakDb: -0.3,
+    });
+
+    currentCalculatedGain = result.gain;
+
+    if (previewGainNode) {
+      try { previewGainNode.gain.value = currentCalculatedGain; } catch (_) {}
+    }
+
+    // バッジ & サマリー表示
+    if (mode === "none") {
+      normBadge.textContent = "オフ";
+      normBadge.className = "yt-badge";
+      normSummary.innerHTML = `音量調整なし (元音源 Peak: <strong>${currentSourceLoudness.peakDb.toFixed(1)} dBFS</strong>, RMS: <strong>${currentSourceLoudness.rmsDb.toFixed(1)} dBFS</strong>)`;
+    } else {
+      const sign = result.gainDb >= 0 ? "+" : "";
+      normBadge.textContent = `${sign}${result.gainDb.toFixed(1)} dB (${result.gain.toFixed(2)}x)`;
+      normBadge.className = "yt-badge accent";
+
+      let detailMsg = "";
+      if (mode === "reference") {
+        detailMsg = `基準曲 (${targetRmsDb.toFixed(1)} dBFS) に合わせ <strong>${sign}${result.gainDb.toFixed(1)} dB</strong> (${result.gain.toFixed(2)}倍) 調整`;
+      } else if (mode === "peak") {
+        detailMsg = `ピークを最大音量 (-0.3 dBFS) まで <strong>${sign}${result.gainDb.toFixed(1)} dB</strong> (${result.gain.toFixed(2)}倍) ノーマライズ`;
+      } else if (mode === "manual") {
+        detailMsg = `手動ゲイン: <strong>${sign}${result.gainDb.toFixed(1)} dB</strong> (${result.gain.toFixed(2)}倍)`;
+      }
+
+      if (result.limited) {
+        detailMsg += ` <span style="color: var(--accent); font-weight:600;">(⚠️ 音割れ防止のためピーク -0.3dB で安全制限)</span>`;
+      }
+
+      normSummary.innerHTML = `
+        元音源: Peak ${currentSourceLoudness.peakDb.toFixed(1)} dB / RMS ${currentSourceLoudness.rmsDb.toFixed(1)} dB<br/>
+        👉 ${detailMsg} → 調整後 Peak: <strong>${result.finalPeakDb.toFixed(1)} dB</strong>, RMS: <strong>${result.finalRmsDb.toFixed(1)} dB</strong>
+      `;
+    }
+  }
+
+  // 基準曲ピッカーのオープン
+  async function openReferenceTrackPicker() {
+    refPickerOverlay.style.display = "flex";
+    refAnalyzingMsg.style.display = "none";
+    refSearchInput.value = "";
+    await renderReferenceTrackList("");
+  }
+
+  // 基準曲候補リストの描画
+  async function renderReferenceTrackList(query = "") {
+    refTrackList.innerHTML = '<div style="padding: 10px; color: var(--fg-muted); text-align: center;">曲リストを読み込み中…</div>';
+    try {
+      const allTracks = await getAllTracks();
+      if (!allTracks || allTracks.length === 0) {
+        refTrackList.innerHTML = '<div style="padding: 14px; color: var(--fg-muted); text-align: center; line-height: 1.5;">ライブラリに曲がまだありません。<br/>音源をライブラリに追加すると基準曲に選べるようになります。</div>';
+        return;
+      }
+
+      const q = query.toLowerCase().trim();
+      const filtered = allTracks.filter((t) => {
+        if (!q) return true;
+        return (t.title && t.title.toLowerCase().includes(q)) ||
+               (t.artist && t.artist.toLowerCase().includes(q)) ||
+               (t.album && t.album.toLowerCase().includes(q));
+      });
+
+      if (filtered.length === 0) {
+        refTrackList.innerHTML = '<div style="padding: 14px; color: var(--fg-muted); text-align: center;">一致する曲が見つかりませんでした</div>';
+        return;
+      }
+
+      refTrackList.innerHTML = "";
+      for (const track of filtered.slice(0, 50)) {
+        const item = document.createElement("div");
+        item.style.padding = "8px 10px";
+        item.style.borderBottom = "1px solid var(--border)";
+        item.style.cursor = "pointer";
+        item.style.display = "flex";
+        item.style.justifyContent = "space-between";
+        item.style.alignItems = "center";
+        item.style.borderRadius = "6px";
+        item.style.transition = "background 0.15s ease";
+        item.onmouseenter = () => { item.style.background = "var(--bg-elev-3)"; };
+        item.onmouseleave = () => { item.style.background = "transparent"; };
+
+        item.innerHTML = `
+          <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; margin-right: 8px;">
+            <div style="font-weight: 600; font-size: 12px; color: var(--fg); overflow: hidden; text-overflow: ellipsis;">${escapeHtml(track.title || "無題")}</div>
+            <div style="font-size: 11px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis;">${escapeHtml(track.artist || "不明")} — ${escapeHtml(track.album || "")}</div>
+          </div>
+          <button type="button" class="btn" style="font-size: 10px; padding: 3px 8px; white-space: nowrap;">選択</button>
+        `;
+
+        item.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          await selectReferenceTrack(track);
+        });
+        refTrackList.appendChild(item);
+      }
+    } catch (err) {
+      refTrackList.innerHTML = `<div style="padding: 10px; color: var(--danger); text-align: center;">読込エラー: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  // 基準曲の選択 & ラウドネス解析
+  async function selectReferenceTrack(track) {
+    refAnalyzingMsg.style.display = "block";
+    refTrackList.style.pointerEvents = "none";
+    try {
+      const blob = await getBlob(track.id);
+      if (!blob) throw new Error("曲の音声データが見つかりませんでした");
+
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const arrayBuf = await blob.arrayBuffer();
+      const decBuf = await audioCtx.decodeAudioData(arrayBuf);
+      const loudness = analyzeAudioLoudness(decBuf);
+
+      const refData = {
+        trackId: track.id,
+        title: track.title || "無題",
+        artist: track.artist || "不明",
+        rmsDb: loudness.rmsDb,
+        peakDb: loudness.peakDb,
+      };
+
+      setPublic({ normalizeReferenceTrack: refData });
+      toast(`「${refData.title}」を音量の基準曲に設定しました (${loudness.rmsDb.toFixed(1)} dBFS)`, "ok", 4000);
+      refPickerOverlay.style.display = "none";
+      updateNormalizeDisplay();
+    } catch (err) {
+      console.error("[yt] 基準曲解析エラー:", err);
+      toast(`基準曲の解析に失敗しました: ${err.message}`, "err", 4000);
+    } finally {
+      refAnalyzingMsg.style.display = "none";
+      refTrackList.style.pointerEvents = "auto";
+    }
+  }
+
+  // ノーマライズイベントリスナー設定
+  pickRefBtn.addEventListener("click", openReferenceTrackPicker);
+  closeRefPickerBtn.addEventListener("click", () => {
+    refPickerOverlay.style.display = "none";
+  });
+  refSearchInput.addEventListener("input", () => {
+    renderReferenceTrackList(refSearchInput.value);
+  });
+  resetStandardRefBtn.addEventListener("click", () => {
+    setPublic({ normalizeReferenceTrack: null });
+    refPickerOverlay.style.display = "none";
+    toast("基準曲を標準ラウドネス (-14.0 dBFS) にリセットしました", "info");
+    updateNormalizeDisplay();
+  });
+  normModeSelect.addEventListener("change", updateNormalizeDisplay);
+  normGainSlider.addEventListener("input", updateNormalizeDisplay);
 
   // YouTube 音源取得イベント
   fetchBtn.addEventListener("click", async () => {
@@ -426,6 +745,7 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
 
     updateCutDisplay();
     renderWaveform();
+    updateNormalizeDisplay();
 
     // プレビュー再生時の時間更新ループ
     const trackLoop = () => {
@@ -464,6 +784,7 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
     endNumInput.value = cutEndTime.toFixed(1);
     const selDuration = Math.max(0, cutEndTime - cutStartTime);
     cutSummaryBadge.textContent = `カット後の長さ: ${formatSec(selDuration)} (元の長さ: ${formatSec(audioDuration)})`;
+    updateNormalizeDisplay();
   }
 
   // 波形描画
@@ -535,6 +856,7 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
     if (!currentPreviewAudio) return;
     isPlayingSelectionOnly = false;
     if (currentPreviewAudio.paused) {
+      ensurePreviewGain();
       currentPreviewAudio.play();
       playToggleBtn.textContent = "⏸ 一時停止";
     } else {
@@ -548,6 +870,7 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
     if (!currentPreviewAudio) return;
     isPlayingSelectionOnly = true;
     currentPreviewAudio.currentTime = cutStartTime;
+    ensurePreviewGain();
     currentPreviewAudio.play();
     playToggleBtn.textContent = "⏸ 一時停止";
   });
@@ -641,11 +964,12 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
         artworkBuffer = await currentArtworkBlob.arrayBuffer();
       }
 
-      // 2. カット範囲の PCM を MP3 320kbps にエンコード
+      // 2. カット範囲の PCM を MP3 320kbps にエンコード (音量ノーマライズ適用)
       const mp3Blob = sliceAndEncodeAudio(currentAudioBuffer, {
         startTime: cutStartTime,
         endTime: cutEndTime,
         bitrate,
+        gain: currentCalculatedGain,
         metadata: {
           title,
           artist,
