@@ -88,32 +88,6 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
         </div>
       </div>
 
-      <!-- 音源読み込みアシストカード (直接ストリーム取得が制限された場合に表示) -->
-      <div id="yt-audio-assist-card" class="yt-card" style="display: none; border: 1px solid var(--accent); background: rgba(0, 113, 227, 0.08); padding: 14px;">
-        <div style="font-weight: 600; margin-bottom: 6px; color: var(--accent); font-size: 13px;">
-          🎵 動画情報を取得しました！音源ファイルを指定してください
-        </div>
-        <div style="font-size: 12px; line-height: 1.5; color: var(--fg); margin-bottom: 10px;">
-          YouTube の通信制限により、以下のいずれかの方法で音源ファイル（MP3/M4A）を指定してください。<br/>
-          読み込み後、<strong>波形プレビューでの不要部分カット</strong>や<strong>最高音質 MP3 (320kbps) 変換</strong>、<strong>Google Drive「MUSIC-PLAYER」フォルダへの自動保存</strong>が行えます。
-        </div>
-        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;">
-          <a id="btn-yt-open-dirpy" href="https://dirpy.com" target="_blank" rel="noopener noreferrer" class="btn primary" style="font-size: 12px; padding: 6px 12px; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; background: #cc0000; color: #fff; font-weight: 600;">
-            ⚡ Dirpy で音源を取得
-          </a>
-          <a href="https://cobalt.tools" target="_blank" rel="noopener noreferrer" class="btn" style="font-size: 12px; padding: 6px 12px; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
-            ⚡ Cobalt を開く
-          </a>
-          <button class="btn" id="btn-yt-pick-audio-file" style="font-size: 12px; padding: 6px 12px; font-weight: 600; background: var(--bg-elev-2);">
-            📁 保存したファイルを選択
-          </button>
-        </div>
-        <div style="display: flex; gap: 6px; align-items: center;">
-          <input type="text" id="yt-direct-audio-url" class="yt-input" style="height: 32px; font-size: 12px;" placeholder="または音源の直接 URL (MP3/M4A) を入力" />
-          <button class="btn" id="btn-yt-load-direct-url" style="height: 32px; font-size: 12px; white-space: nowrap;">URL読込</button>
-        </div>
-      </div>
-
       <!-- 波形 & プレビュープレイヤー -->
       <div class="yt-card" id="yt-waveform-card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
@@ -308,15 +282,9 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
         metaArt.style.display = "block";
       }
 
-      // 外部アシストリンク (Dirpy) を動画URL付きで設定
-      const dirpyLink = container.querySelector("#btn-yt-open-dirpy");
-      if (dirpyLink) {
-        dirpyLink.href = `https://dirpy.com/studio?url=https://www.youtube.com/watch?v=${info.videoId}`;
-      }
-
-      // 2. 音声ストリームの自動ダウンロード試行 (Savetube 320kbps または InnerTube 直接ストリーム)
+      // 2. 音声ストリームの自動ダウンロード (Savetube 320kbps MP3 または直接ストリーム)
       loadingBar.style.width = "40%";
-      loadingStatus.textContent = "高音質音源をダウンロード中…";
+      loadingStatus.textContent = "高音質音源 (320kbps) をダウンロード中…";
 
       let audioArrayBuffer = null;
       let streamUrl = info.audioUrl || null;
@@ -340,12 +308,28 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
             loadingStatus.textContent = statusText;
           });
         } catch (streamErr) {
-          console.warn("[yt] 自動ストリーム取得制限、手動アシストへ移行:", streamErr);
+          console.warn("[yt] 第1ストリーム取得失敗、代替ソースを試行中…:", streamErr);
         }
       }
 
-      // 3. 自動ストリームダウンロード成功時
+      // 代替取得試行 (ストリームプロキシ経由)
+      if (!audioArrayBuffer && info.videoId) {
+        loadingStatus.textContent = "代替サーバーから高音質音源を取得中…";
+        try {
+          const fallbackStreamUrl = `/api/youtube?action=stream&id=${info.videoId}`;
+          audioArrayBuffer = await downloadAudioStream(fallbackStreamUrl, 0, ({ percent, statusText }) => {
+            loadingBar.style.width = `${50 + Math.round(percent * 0.45)}%`;
+            loadingStatus.textContent = statusText;
+          });
+        } catch (fErr) {
+          console.warn("[yt] 代替ストリーム取得失敗:", fErr);
+        }
+      }
+
+      // 3. ダウンロード成功時: 即座に編集画面へ移行！
       if (audioArrayBuffer) {
+        loadingStatus.textContent = "波形エディタを準備中…";
+        loadingBar.style.width = "100%";
         await loadAudioForEditing(audioArrayBuffer, {
           title: info.title,
           artist: info.author,
@@ -360,22 +344,12 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
         return;
       }
 
-      // 4. 自動ストリーム取得が YouTube の制限等でブロックされた場合:
-      // メタデータを保持したままアシストカードを表示して音源ファイルをロードできるようにする
-      stepLoading.style.display = "none";
-      stepEditor.style.display = "block";
-      fetchBtn.disabled = false;
-
-      const assistCard = container.querySelector("#yt-audio-assist-card");
-      const waveformCard = container.querySelector("#yt-waveform-card");
-      if (assistCard) assistCard.style.display = "block";
-      if (waveformCard) waveformCard.style.display = "none";
-
-      toast("動画情報を反映しました！音源ファイルを読み込んでください", "info", 5000);
+      // 4. 取得失敗時: Dirpy 画面は出さず、再試行可能な明確なエラーを表示
+      throw new Error("音源の自動取得に失敗しました。動画URLを確認して再試行してください。");
     } catch (err) {
       stepLoading.style.display = "none";
       fetchBtn.disabled = false;
-      toast(`動画情報の取得失敗: ${err.message}`, "err");
+      toast(err.message || "動画情報の取得に失敗しました", "err", 5000);
     }
   });
 
@@ -409,48 +383,11 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
     }
   });
 
-  const pickAudioFileBtn = container.querySelector("#btn-yt-pick-audio-file");
-  const loadDirectUrlBtn = container.querySelector("#btn-yt-load-direct-url");
-  const directAudioUrlInput = container.querySelector("#yt-direct-audio-url");
-
-  if (pickAudioFileBtn) {
-    pickAudioFileBtn.addEventListener("click", () => fileInput.click());
-  }
-
-  if (loadDirectUrlBtn) {
-    loadDirectUrlBtn.addEventListener("click", async () => {
-      const dUrl = directAudioUrlInput.value.trim();
-      if (!dUrl) return;
-      stepLoading.style.display = "block";
-      loadingStatus.textContent = "音源 URL からダウンロード中…";
-      loadingBar.style.width = "50%";
-      try {
-        const res = await fetch(dUrl);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const ab = await res.arrayBuffer();
-        await loadAudioForEditing(ab, {
-          title: metaTitle.value,
-          artist: metaArtist.value,
-          album: metaAlbum.value,
-          artworkBlob: currentArtworkBlob,
-          thumbnailUrl: metaArt.src,
-        });
-        stepLoading.style.display = "none";
-        toast("音源を読み込みました！カット位置を調整できます", "ok");
-      } catch (e) {
-        stepLoading.style.display = "none";
-        toast(`音源 URL 読込失敗: ${e.message}`, "err");
-      }
-    });
-  }
-
   // 音声バッファのデコードと編集準備
   async function loadAudioForEditing(arrayBuffer, meta = {}) {
     cleanupPreview();
 
-    const assistCard = container.querySelector("#yt-audio-assist-card");
     const waveformCard = container.querySelector("#yt-waveform-card");
-    if (assistCard) assistCard.style.display = "none";
     if (waveformCard) waveformCard.style.display = "block";
 
     // 1. Web Audio API でデコード

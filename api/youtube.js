@@ -59,76 +59,95 @@ async function decryptSavetubeData(encBase64) {
   return JSON.parse(decryptedText);
 }
 
-// 1. Savetube による MP3 320kbps 音源解決
+// 1. Savetube による MP3 320kbps 音源解決 (複数 CDN 自動ローテーション)
 async function resolveSavetube(videoId) {
-  const cdnRes = await fetch("https://media.savetube.vip/api/random-cdn", {
-    signal: AbortSignal.timeout(5000),
-  });
-  if (!cdnRes.ok) throw new Error(`Savetube random-cdn HTTP ${cdnRes.status}`);
-  const { cdn } = await cdnRes.json();
-  if (!cdn) throw new Error("Savetube CDN not found");
+  const cdns = [
+    "cdn400.savetube.vip",
+    "cdn405.savetube.vip",
+    "cdn406.savetube.vip",
+    "cdn401.savetube.vip",
+    "cdn403.savetube.vip",
+  ];
+  try {
+    const cdnRes = await fetch("https://media.savetube.vip/api/random-cdn", {
+      signal: AbortSignal.timeout(2500),
+    });
+    if (cdnRes.ok) {
+      const { cdn } = await cdnRes.json();
+      if (cdn && !cdns.includes(cdn)) cdns.unshift(cdn);
+    }
+  } catch (_) {}
 
-  const infoRes = await fetch(`https://${cdn}/v2/info`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      "Referer": "https://save-tube.com/",
-    },
-    body: JSON.stringify({ url: `https://www.youtube.com/watch?v=${videoId}` }),
-    signal: AbortSignal.timeout(7000),
-  });
-  if (!infoRes.ok) throw new Error(`Savetube info HTTP ${infoRes.status}`);
-  const infoJson = await infoRes.json();
-  if (!infoJson.data) throw new Error("Savetube info data empty");
+  let lastErr = null;
+  for (const cdn of cdns) {
+    try {
+      const infoRes = await fetch(`https://${cdn}/v2/info`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Referer": "https://save-tube.com/",
+        },
+        body: JSON.stringify({ url: `https://www.youtube.com/watch?v=${videoId}` }),
+        signal: AbortSignal.timeout(4000),
+      });
+      if (!infoRes.ok) continue;
+      const infoJson = await infoRes.json();
+      if (!infoJson.data) continue;
 
-  const info = await decryptSavetubeData(infoJson.data);
-  if (!info || !info.key) throw new Error("Savetube decrypt failed or key missing");
+      const info = await decryptSavetubeData(infoJson.data);
+      if (!info || !info.key) continue;
 
-  // 320kbps MP3 変換リンク発行
-  const dlRes = await fetch(`https://${cdn}/download`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      "Referer": "https://save-tube.com/",
-    },
-    body: JSON.stringify({
-      downloadType: "audio",
-      quality: "320",
-      key: info.key,
-    }),
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!dlRes.ok) throw new Error(`Savetube download HTTP ${dlRes.status}`);
-  const dlJson = await dlRes.json();
-  const audioUrl = dlJson.data?.downloadUrl;
-  if (!audioUrl) throw new Error("Savetube downloadUrl missing");
+      // 320kbps MP3 変換リンク発行
+      const dlRes = await fetch(`https://${cdn}/download`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Referer": "https://save-tube.com/",
+        },
+        body: JSON.stringify({
+          downloadType: "audio",
+          quality: "320",
+          key: info.key,
+        }),
+        signal: AbortSignal.timeout(4000),
+      });
+      if (!dlRes.ok) continue;
+      const dlJson = await dlRes.json();
+      const audioUrl = dlJson.data?.downloadUrl;
+      if (!audioUrl) continue;
 
-  let title = info.title || "";
-  let author = "";
-  if (title.includes(" - ")) {
-    const parts = title.split(" - ");
-    author = parts[0].trim();
-    title = parts.slice(1).join(" - ").trim();
+      let title = info.title || "";
+      let author = "";
+      if (title.includes(" - ")) {
+        const parts = title.split(" - ");
+        author = parts[0].trim();
+        title = parts.slice(1).join(" - ").trim();
+      }
+
+      return {
+        videoId,
+        title: title || "無題",
+        author: author || "YouTube",
+        duration: parseInt(info.duration || "0", 10),
+        thumbnailUrl: info.thumbnail || `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+        audioUrl,
+        adaptiveFormats: [
+          {
+            url: audioUrl,
+            type: "audio/mp3",
+            itag: "320",
+          },
+        ],
+        source: "savetube",
+      };
+    } catch (e) {
+      lastErr = e;
+    }
   }
 
-  return {
-    videoId,
-    title: title || "無題",
-    author: author || "YouTube",
-    duration: parseInt(info.duration || "0", 10),
-    thumbnailUrl: info.thumbnail || `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
-    audioUrl,
-    adaptiveFormats: [
-      {
-        url: audioUrl,
-        type: "audio/mp3",
-        itag: "320",
-      },
-    ],
-    source: "savetube",
-  };
+  throw lastErr || new Error("Savetube CDN 解決失敗");
 }
 
 // 2. InnerTube ANDROID_VR クライアントによる直接音声ストリーム解決

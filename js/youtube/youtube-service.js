@@ -105,75 +105,118 @@ async function decryptSavetubeData(encBase64) {
   return JSON.parse(decryptedText);
 }
 
+// 既知の高速・安定 Savetube CDN リスト
+const SAVETUBE_HEALTHY_CDNS = [
+  "cdn400.savetube.vip",
+  "cdn405.savetube.vip",
+  "cdn406.savetube.vip",
+  "cdn401.savetube.vip",
+  "cdn403.savetube.vip",
+];
+
+async function getSavetubeCdnCandidates() {
+  const cdns = [...SAVETUBE_HEALTHY_CDNS];
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 2000);
+    const cdnRes = await fetch("https://media.savetube.vip/api/random-cdn", { signal: ctrl.signal });
+    clearTimeout(t);
+    if (cdnRes.ok) {
+      const { cdn } = await cdnRes.json();
+      if (cdn && !cdns.includes(cdn)) {
+        cdns.unshift(cdn);
+      }
+    }
+  } catch (_) {}
+  return cdns;
+}
+
 /**
- * クライアント直接 Savetube による MP3 320kbps 音源解決
+ * クライアント直接 Savetube による MP3 320kbps 音源解決 (複数 CDN 自動ローテーション)
  * @param {string} cleanId
  * @returns {Promise<object>}
  */
 async function fetchSavetubeDirect(cleanId) {
-  const cdnRes = await fetch("https://media.savetube.vip/api/random-cdn");
-  if (!cdnRes.ok) throw new Error(`Savetube random-cdn HTTP ${cdnRes.status}`);
-  const { cdn } = await cdnRes.json();
-  if (!cdn) throw new Error("Savetube CDN not found");
+  const cdns = await getSavetubeCdnCandidates();
+  let lastErr = null;
 
-  const infoRes = await fetch(`https://${cdn}/v2/info`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      "Referer": "https://save-tube.com/",
-    },
-    body: JSON.stringify({ url: `https://www.youtube.com/watch?v=${cleanId}` }),
-  });
-  if (!infoRes.ok) throw new Error(`Savetube info HTTP ${infoRes.status}`);
-  const infoJson = await infoRes.json();
-  if (!infoJson.data) throw new Error("Savetube info data empty");
+  for (const cdn of cdns) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 4000);
 
-  const info = await decryptSavetubeData(infoJson.data);
-  if (!info || !info.key) throw new Error("Savetube decrypt failed or key missing");
+      const infoRes = await fetch(`https://${cdn}/v2/info`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Referer": "https://save-tube.com/",
+        },
+        body: JSON.stringify({ url: `https://www.youtube.com/watch?v=${cleanId}` }),
+        signal: ctrl.signal,
+      });
+      clearTimeout(t);
 
-  // 320kbps MP3 変換リンク発行
-  const dlRes = await fetch(`https://${cdn}/download`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      "Referer": "https://save-tube.com/",
-    },
-    body: JSON.stringify({
-      downloadType: "audio",
-      quality: "320",
-      key: info.key,
-    }),
-  });
-  if (!dlRes.ok) throw new Error(`Savetube download HTTP ${dlRes.status}`);
-  const dlJson = await dlRes.json();
-  const audioUrl = dlJson.data?.downloadUrl;
-  if (!audioUrl) throw new Error("Savetube downloadUrl missing");
+      if (!infoRes.ok) continue;
+      const infoJson = await infoRes.json();
+      if (!infoJson.data) continue;
 
-  let title = info.title || "";
-  let author = "";
-  if (title.includes(" - ")) {
-    const parts = title.split(" - ");
-    author = parts[0].trim();
-    title = parts.slice(1).join(" - ").trim();
+      const info = await decryptSavetubeData(infoJson.data);
+      if (!info || !info.key) continue;
+
+      // 320kbps MP3 変換リンク発行
+      const dlCtrl = new AbortController();
+      const dlTimer = setTimeout(() => dlCtrl.abort(), 4000);
+      const dlRes = await fetch(`https://${cdn}/download`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Referer": "https://save-tube.com/",
+        },
+        body: JSON.stringify({
+          downloadType: "audio",
+          quality: "320",
+          key: info.key,
+        }),
+        signal: dlCtrl.signal,
+      });
+      clearTimeout(dlTimer);
+
+      if (!dlRes.ok) continue;
+      const dlJson = await dlRes.json();
+      const audioUrl = dlJson.data?.downloadUrl;
+      if (!audioUrl) continue;
+
+      let title = info.title || "";
+      let author = "";
+      if (title.includes(" - ")) {
+        const parts = title.split(" - ");
+        author = parts[0].trim();
+        title = parts.slice(1).join(" - ").trim();
+      }
+
+      return {
+        videoId: cleanId,
+        title: title || "無題",
+        author: author || "YouTube",
+        duration: parseInt(info.duration || "0", 10),
+        thumbnailUrl: info.thumbnail || `https://img.youtube.com/vi/${cleanId}/hqdefault.jpg`,
+        audioUrl,
+        adaptiveFormats: [
+          {
+            url: audioUrl,
+            type: "audio/mp3",
+            itag: "320",
+          },
+        ],
+      };
+    } catch (err) {
+      lastErr = err;
+    }
   }
 
-  return {
-    videoId: cleanId,
-    title: title || "無題",
-    author: author || "YouTube",
-    duration: parseInt(info.duration || "0", 10),
-    thumbnailUrl: info.thumbnail || `https://img.youtube.com/vi/${cleanId}/hqdefault.jpg`,
-    audioUrl,
-    adaptiveFormats: [
-      {
-        url: audioUrl,
-        type: "audio/mp3",
-        itag: "320",
-      },
-    ],
-  };
+  throw lastErr || new Error("Savetube CDN 接続失敗");
 }
 
 /**
@@ -187,13 +230,15 @@ export async function fetchVideoInfo(videoId) {
     throw new Error("有効な YouTube URL または動画IDを指定してください");
   }
 
-  // 1. 同一オリジンの Vercel Serverless/Edge API (/api/youtube) を最優先で試行 (CORSフリー・高速・320kbps音源URL同梱)
+  let baseMeta = null;
+
+  // 1. 同一オリジンの Vercel Serverless/Edge API (/api/youtube) を試行
   try {
     const apiRes = await fetch(`/api/youtube?action=info&id=${cleanId}`);
     if (apiRes.ok) {
       const data = await apiRes.json();
       if (data && data.title) {
-        return {
+        baseMeta = {
           videoId: cleanId,
           title: data.title || "",
           author: data.author || "",
@@ -204,18 +249,27 @@ export async function fetchVideoInfo(videoId) {
           instanceUsed: "/api/youtube",
           raw: data,
         };
+        // 音源 URL が既に確実に取得できている場合のみ即時返却
+        const hasAudio = !!data.audioUrl || (data.adaptiveFormats || []).some((f) => f.type && f.type.includes("audio") && f.url);
+        if (hasAudio) {
+          return baseMeta;
+        }
       }
     }
   } catch (_) {
     // /api/youtube がローカル等で未配置の場合はクライアント直接通信へフォールバック
   }
 
-  // 2. ブラウザ直接 Savetube (Web Crypto 復号) による MP3 320kbps 音源解決
+  // 2. ブラウザ直接 Savetube (Web Crypto 復号 & Multi-CDN 自動ローテーション) による MP3 320kbps 音源解決
   try {
     const stData = await fetchSavetubeDirect(cleanId);
     if (stData && stData.audioUrl) {
       return {
+        ...baseMeta,
         ...stData,
+        title: stData.title && stData.title !== "無題" ? stData.title : (baseMeta?.title || stData.title),
+        author: stData.author && stData.author !== "YouTube" ? stData.author : (baseMeta?.author || stData.author),
+        thumbnailUrl: stData.thumbnailUrl || baseMeta?.thumbnailUrl,
         instanceUsed: "client-savetube",
         raw: stData,
       };
@@ -350,66 +404,76 @@ export async function downloadAudioStream(audioUrl, totalBytes = 0, onProgress =
     } catch (_) {}
   }
 
-  // 1. totalBytes が既知の場合は Range リクエストで分割取得
-  if (knownTotal > 0) {
-    while (offset < knownTotal) {
-      const end = Math.min(offset + chunkSize - 1, knownTotal - 1);
-      let res;
+  async function fetchWithFallback(headers = {}) {
+    // 1. /api/youtube?action=stream
+    try {
+      const r = await fetch(resolvedUrl, { headers });
+      if (r.ok || r.status === 206) return r;
+    } catch (_) {}
+
+    // 2. 直接 audioUrl
+    if (resolvedUrl !== audioUrl) {
       try {
-        res = await fetch(resolvedUrl, {
-          headers: { Range: `bytes=${offset}-${end}` },
-        });
-      } catch (err) {
-        if (resolvedUrl !== audioUrl) {
-          res = await fetch(audioUrl, {
-            headers: { Range: `bytes=${offset}-${end}` },
+        const r = await fetch(audioUrl, { headers });
+        if (r.ok || r.status === 206) return r;
+      } catch (_) {}
+    }
+
+    // 3. 公開 CORS プロキシ
+    const proxies = [
+      `https://corsproxy.io/?url=${encodeURIComponent(audioUrl)}`,
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(audioUrl)}`,
+    ];
+    for (const p of proxies) {
+      try {
+        const r = await fetch(p, { headers });
+        if (r.ok || r.status === 206) return r;
+      } catch (_) {}
+    }
+
+    throw new Error("音声データのダウンロードに失敗しました (全プロキシ接続失敗)");
+  }
+
+  // 1. totalBytes が既知の場合は Range リクエストで分割取得を試行
+  if (knownTotal > 0) {
+    try {
+      while (offset < knownTotal) {
+        const end = Math.min(offset + chunkSize - 1, knownTotal - 1);
+        const res = await fetchWithFallback({ Range: `bytes=${offset}-${end}` });
+
+        if (!res.ok && res.status !== 206) {
+          throw new Error(`Range取得不可: HTTP ${res.status}`);
+        }
+
+        const buf = await res.arrayBuffer();
+        chunks.push(buf);
+        offset = end + 1;
+
+        const pct = Math.min(100, Math.round((offset / knownTotal) * 100));
+        if (onProgress) {
+          onProgress({
+            percent: pct,
+            loaded: offset,
+            total: knownTotal,
+            statusText: `音源をダウンロード中 (${Math.round((offset / 1024 / 1024) * 10) / 10}MB / ${Math.round((knownTotal / 1024 / 1024) * 10) / 10}MB)`,
           });
-        } else {
-          throw err;
         }
       }
 
-      if (!res.ok && res.status !== 206) {
-        throw new Error(`音声データの取得に失敗しました (${res.status} ${res.statusText})`);
+      const finalBuffer = new Uint8Array(knownTotal);
+      let cur = 0;
+      for (const c of chunks) {
+        finalBuffer.set(new Uint8Array(c), cur);
+        cur += c.byteLength;
       }
-
-      const buf = await res.arrayBuffer();
-      chunks.push(buf);
-      offset = end + 1;
-
-      const pct = Math.min(100, Math.round((offset / knownTotal) * 100));
-      if (onProgress) {
-        onProgress({
-          percent: pct,
-          loaded: offset,
-          total: knownTotal,
-          statusText: `音源をダウンロード中 (${Math.round((offset / 1024 / 1024) * 10) / 10}MB / ${Math.round((knownTotal / 1024 / 1024) * 10) / 10}MB)`,
-        });
-      }
+      return finalBuffer.buffer;
+    } catch (rangeErr) {
+      console.warn("[yt] Range 分割ダウンロード失敗、単一ストリーム取得へ移行:", rangeErr);
     }
-
-    const finalBuffer = new Uint8Array(knownTotal);
-    let cur = 0;
-    for (const c of chunks) {
-      finalBuffer.set(new Uint8Array(c), cur);
-      cur += c.byteLength;
-    }
-    return finalBuffer.buffer;
   }
 
-  // 2. totalBytes が不明な場合のフォールバック直接ストリーム読込 (Streams API で進捗通知)
-  let res;
-  try {
-    res = await fetch(resolvedUrl);
-  } catch (_) {
-    res = await fetch(audioUrl);
-  }
-  if (!res.ok && resolvedUrl !== audioUrl) {
-    res = await fetch(audioUrl);
-  }
-  if (!res.ok) {
-    throw new Error(`音声データの取得に失敗しました (${res.status})`);
-  }
+  // 2. 単一ストリーム読込 (Streams API で進捗通知)
+  const res = await fetchWithFallback();
 
   const cl = res.headers.get("content-length");
   const streamTotal = cl ? parseInt(cl, 10) : 0;
