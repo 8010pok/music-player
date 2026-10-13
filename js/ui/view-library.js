@@ -13,13 +13,14 @@ import { extractMetadata, readDurationViaAudio } from "../metadata/index.js";
 import { mimeFromName, formatFromName } from "../metadata/util.js";
 import { putTrack, getTrack, getAllTracks, updateTrack, setTracksOrder, deleteTrack, getStorageEstimate, getBlob, removeTrackFromAllPlaylists } from "../store/library-db.js";
 import { setQueueAndPlay, stopPlayback } from "../player/audio-engine.js";
-import { toast, confirm, escapeHtml, escapeAttr } from "./components.js";
+import { toast, confirm, openModal, escapeHtml, escapeAttr } from "./components.js";
 import { appState } from "../state.js";
 import { go } from "../router.js";
 import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
 import { editTrackMetadata } from "./metadata-editor.js";
-import { openDriveImportModal } from "../gdrive/drive-service.js";
+import { openDriveImportModal, isDriveConnected } from "../gdrive/drive-service.js";
 import { openYouTubeDownloadModal } from "./youtube-modal.js";
+import { exportLibraryToDrive, importLibraryFromDrive, getDriveSyncFileInfo } from "../store/sync-service.js";
 import { groupTracksIntoAlbums, sortAlbums } from "../metadata/album-util.js";
 import { groupTracksIntoArtists, sortArtists } from "../metadata/artist-util.js";
 
@@ -247,6 +248,9 @@ export async function mount(root) {
       });
     });
   }
+  if (refs.syncQuickBtn) {
+    refs.syncQuickBtn.addEventListener("click", () => openSyncModal(refs));
+  }
   if (refs.rescanBtn) refs.rescanBtn.addEventListener("click", () => rescanMeta(refs));
 
   // 検索
@@ -316,6 +320,7 @@ function render() {
         <div class="library-add-buttons">
           <button class="btn primary" id="btn-add-gdrive" style="background: var(--accent); color: #fff; font-weight: bold;" title="Google Drive から曲やフォルダを一括追加">☁ Google Drive (フォルダ・曲追加)</button>
           <button class="btn" id="btn-add-youtube" style="background: #cc0000; color: #fff; font-weight: bold;" title="YouTubeのリンクから音源をダウンロードしてGoogle Driveに保存">▶ YouTubeから保存</button>
+          <button class="btn" id="btn-sync-quick" style="font-weight: 600;" title="iPad ↔ iPhone 端末間同期 (Google Drive で変更内容を反映)">🔄 端末間同期</button>
           <button class="btn" id="btn-add">📁 ファイルを選択</button>
           <button class="btn" id="btn-add-folder" title="PC用フォルダ選択 (iOSはGoogle Drive推奨)">📂 フォルダを選択</button>
         </div>
@@ -418,6 +423,7 @@ function collectRefs(root) {
     addFolderBtn: root.querySelector("#btn-add-folder"),
     addGdriveBtn: root.querySelector("#btn-add-gdrive"),
     addYouTubeBtn: root.querySelector("#btn-add-youtube"),
+    syncQuickBtn: root.querySelector("#btn-sync-quick"),
     rescanBtn: root.querySelector("#btn-rescan-meta"),
     rescanProgress: root.querySelector("#rescan-progress"),
     search: root.querySelector("#lib-search"),
@@ -1032,6 +1038,7 @@ function setBulkButtonsDisabled(refs, disabled) {
   if (refs.addFolderBtn) refs.addFolderBtn.disabled = disabled;
   if (refs.addGdriveBtn) refs.addGdriveBtn.disabled = disabled;
   if (refs.addYouTubeBtn) refs.addYouTubeBtn.disabled = disabled;
+  if (refs.syncQuickBtn) refs.syncQuickBtn.disabled = disabled;
   if (refs.rescanBtn) refs.rescanBtn.disabled = disabled;
 }
 
@@ -1311,3 +1318,126 @@ function formatBytes(n) {
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
   return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
 }
+
+/* ============ 端末間同期モーダル ============ */
+
+async function openSyncModal(refs) {
+  const driveOk = isDriveConnected();
+
+  const wrap = document.createElement("div");
+  wrap.className = "sync-quick-modal";
+  wrap.style.cssText = "display: flex; flex-direction: column; gap: 14px;";
+
+  if (driveOk) {
+    wrap.innerHTML = `
+      <div style="font-size: 13px; line-height: 1.5; color: var(--fg);">
+        iPad と iPhone の間で、曲名・メモ・お気に入り・プレイリスト・並び順などの<strong>変更差分を Google Drive を介して同期</strong>します。
+      </div>
+      <div id="quick-sync-status" style="font-size: 12px; color: var(--fg-muted); background: var(--bg-surface); padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border-color);">
+        クラウド同期データを確認中…
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <button class="btn primary" id="btn-quick-import" style="padding: 10px; font-weight: bold; font-size: 13px; text-align: center;">
+          📥 Google Drive から同期 (変更を受信・反映)
+        </button>
+        <button class="btn" id="btn-quick-export" style="padding: 9px; font-size: 13px; text-align: center;">
+          📤 Google Drive へ保存 (この端末の変更を送信)
+        </button>
+      </div>
+      <div style="font-size: 11px; color: var(--fg-muted); line-height: 1.5; border-top: 1px solid var(--border-color); padding-top: 10px;">
+        💡 <strong>iPad ↔ iPhone 同期のやり方:</strong><br/>
+        1. 編集した側の端末（iPad）で <strong>「Google Drive へ保存」</strong> を押す<br/>
+        2. 反映したい側の端末（iPhone）で <strong>「Google Drive から同期」</strong> を押す<br/>
+        ※ 端末内の音源ファイルやアートワーク画像は保護され、変更された曲名・メモ・お気に入り等のメタデータが確実に反映されます。
+      </div>
+    `;
+
+    const statusEl = wrap.querySelector("#quick-sync-status");
+    getDriveSyncFileInfo().then((info) => {
+      if (!statusEl) return;
+      if (info.exists && info.modifiedTime) {
+        const dt = new Date(info.modifiedTime).toLocaleString("ja-JP");
+        statusEl.innerHTML = `☁️ クラウド上の同期データ: <strong>${escapeHtml(dt)}</strong> (${info.tracksCount || 0} 曲)`;
+      } else {
+        statusEl.textContent = "☁️ クラウド上に同期データがまだありません。送信元の端末から「Google Drive へ保存」を実行してください。";
+      }
+    }).catch(() => {});
+
+    const importBtn = wrap.querySelector("#btn-quick-import");
+    const exportBtn = wrap.querySelector("#btn-quick-export");
+    let isBusy = false;
+
+    importBtn.addEventListener("click", async () => {
+      if (isBusy) return;
+      isBusy = true;
+      importBtn.disabled = true;
+      importBtn.textContent = "同期中…";
+      toast("Google Drive から最新データを取得・反映中…", "info");
+      try {
+        const res = await importLibraryFromDrive();
+        const diffMsg = `${res.updatedCount} 曲の変更（曲名・メモ等）を反映、${res.addedCount} 曲を追加、${res.playlistsCount} 件のプレイリストを同期しました`;
+        toast(diffMsg, "ok");
+        await reloadTracks(activeRefs || refs);
+        await refreshStorage(activeRefs || refs);
+        const closeBtn = document.querySelector("#modal-root .modal-actions .btn");
+        if (closeBtn) closeBtn.click();
+      } catch (err) {
+        toast(`同期エラー: ${err.message}`, "err");
+        importBtn.disabled = false;
+        importBtn.textContent = "📥 Google Drive から同期 (変更を受信・反映)";
+        isBusy = false;
+      }
+    });
+
+    exportBtn.addEventListener("click", async () => {
+      if (isBusy) return;
+      isBusy = true;
+      exportBtn.disabled = true;
+      exportBtn.textContent = "保存中…";
+      toast("Google Drive にライブラリ情報を保存中…", "info");
+      try {
+        const res = await exportLibraryToDrive();
+        toast(`Google Drive に同期データを保存しました (${res.tracksCount} 曲)`, "ok");
+        if (statusEl) {
+          const dt = new Date(res.modifiedTime).toLocaleString("ja-JP");
+          statusEl.innerHTML = `☁️ クラウド上の同期データ: <strong>${escapeHtml(dt)}</strong> (${res.tracksCount} 曲)`;
+        }
+      } catch (err) {
+        toast(`保存エラー: ${err.message}`, "err");
+      } finally {
+        exportBtn.disabled = false;
+        exportBtn.textContent = "📤 Google Drive へ保存 (この端末の変更を送信)";
+        isBusy = false;
+      }
+    });
+  } else {
+    wrap.innerHTML = `
+      <div style="font-size: 13px; line-height: 1.5; color: var(--fg);">
+        Google Drive と連携すると、AirDrop やファイル保存の手間なく、iPad と iPhone の間でワンタップで変更内容（曲名・メモ・お気に入り等）を同期できます。
+      </div>
+      <div style="font-size: 12px; color: var(--fg-muted); background: var(--bg-surface); padding: 10px; border-radius: 6px; border: 1px solid var(--border-color); line-height: 1.5;">
+        現在 Google Drive が未接続です。設定画面から Google Drive にログインするか、設定画面のファイル書き出し・読み込みをご利用ください。
+      </div>
+    `;
+  }
+
+  await openModal({
+    title: "🔄 端末間ライブラリ同期",
+    body: wrap,
+    actions: [
+      {
+        label: "設定画面を開く",
+        onClick: () => {
+          go("settings");
+          return true;
+        },
+      },
+      {
+        label: "閉じる",
+        primary: !driveOk,
+        onClick: () => true,
+      },
+    ],
+  });
+}
+

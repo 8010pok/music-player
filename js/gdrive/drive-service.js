@@ -1515,3 +1515,106 @@ export async function uploadFileToDrive({ name, blob, mimeType = "audio/mpeg", f
   };
 }
 
+/**
+ * Google Drive 内の特定名前のファイルを検索
+ * @param {string} fileName
+ * @param {string} [folderId]
+ * @returns {Promise<{ id: string, name: string, modifiedTime?: string, size?: number }|null>}
+ */
+export async function findDriveFileByName(fileName, folderId = null) {
+  const token = await getDriveToken();
+  if (!token) return null;
+
+  let q = `trashed = false and name = '${fileName.replace(/'/g, "")}'`;
+  if (folderId) {
+    q += ` and '${folderId}' in parents`;
+  }
+
+  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1&fields=files(id,name,mimeType,size,modifiedTime)&orderBy=modifiedTime desc`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data.files && data.files.length > 0 ? data.files[0] : null;
+}
+
+/**
+ * Google Drive 上のテキストファイル (JSON 等) の中身を取得
+ * @param {string} fileId
+ * @returns {Promise<string>}
+ */
+export async function fetchDriveTextFile(fileId) {
+  const token = await getDriveToken();
+  if (!token) throw new Error("Google Drive に接続されていません");
+
+  const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!res.ok) {
+    const errMsg = await parseGoogleApiError(res, "同期ファイルの取得に失敗しました");
+    throw new Error(errMsg);
+  }
+
+  return await res.text();
+}
+
+/**
+ * Google Drive 上の同期ファイル (JSON) を保存または上書き更新
+ * @param {string} fileName
+ * @param {string} textContent
+ * @param {string} [folderName="MUSIC-PLAYER"]
+ * @returns {Promise<{ id: string, name: string, modifiedTime: string }>}
+ */
+export async function saveOrUpdateDriveSyncFile(fileName, textContent, folderName = "MUSIC-PLAYER") {
+  const token = await getDriveToken();
+  if (!token) throw new Error("Google Drive に接続されていません");
+
+  const targetFolderId = await getOrCreateDriveFolder(folderName);
+  const existing = await findDriveFileByName(fileName, targetFolderId);
+
+  const blob = new Blob([textContent], { type: "application/json; charset=utf-8" });
+
+  if (existing && existing.id) {
+    // 既存ファイルを PATCH で上書き更新
+    const uploadUrl = `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(existing.id)}?uploadType=media`;
+    const res = await fetch(uploadUrl, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: blob,
+    });
+
+    if (!res.ok) {
+      const errMsg = await parseGoogleApiError(res, "Google Drive 同期ファイルの更新に失敗しました");
+      throw new Error(errMsg);
+    }
+
+    const updated = await res.json();
+    return {
+      id: existing.id,
+      name: fileName,
+      modifiedTime: updated.modifiedTime || new Date().toISOString(),
+    };
+  }
+
+  // 新規作成
+  const uploaded = await uploadFileToDrive({
+    name: fileName,
+    blob,
+    mimeType: "application/json",
+    folderId: targetFolderId,
+  });
+
+  return {
+    id: uploaded.id,
+    name: fileName,
+    modifiedTime: new Date().toISOString(),
+  };
+}
+

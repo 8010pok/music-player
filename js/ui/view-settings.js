@@ -27,7 +27,7 @@ import { toast, confirm, promptForm, escapeHtml, escapeAttr } from "./components
 import { releaseAllArtwork } from "./artwork-cache.js";
 import { isDriveConnected, disconnectDrive, openDriveImportModal } from "../gdrive/drive-service.js";
 import { openYouTubeDownloadModal } from "./youtube-modal.js";
-import { shareOrDownloadLibrary, importLibraryData } from "../store/sync-service.js";
+import { shareOrDownloadLibrary, importLibraryData, exportLibraryToDrive, importLibraryFromDrive, getDriveSyncFileInfo } from "../store/sync-service.js";
 // 属性値のエスケープは escapeHtml で代用 (quote/&/</> をエスケープ)
 // escapeAttr は components.js から import 済み
 import {
@@ -568,6 +568,61 @@ export async function mount(root) {
   });
 
   // ===== 端末間ライブラリ同期 (iPad ↔ iPhone) =====
+  // 1. Google Drive クラウド同期 (iPad ↔ iPhone 間ワンタップ同期)
+  if (refs.btnDriveSyncExport) {
+    refs.btnDriveSyncExport.addEventListener("click", async () => {
+      refs.btnDriveSyncExport.disabled = true;
+      refs.btnDriveSyncExport.textContent = "保存中…";
+      toast("Google Drive にライブラリデータを保存中…", "info");
+      try {
+        const res = await exportLibraryToDrive();
+        toast(`Google Drive に同期データを保存しました (${res.tracksCount} 曲)`, "ok");
+        if (refs.driveSyncStatus) {
+          const dt = new Date(res.modifiedTime).toLocaleString("ja-JP");
+          refs.driveSyncStatus.innerHTML = `☁️ 最新の同期データ: <strong>${escapeHtml(dt)}</strong> (${res.tracksCount} 曲)`;
+        }
+      } catch (err) {
+        toast(`Google Drive 保存失敗: ${err.message}`, "err");
+      } finally {
+        refs.btnDriveSyncExport.disabled = false;
+        refs.btnDriveSyncExport.textContent = "📤 Google Drive へ保存 (送信)";
+      }
+    });
+  }
+
+  if (refs.btnDriveSyncImport) {
+    refs.btnDriveSyncImport.addEventListener("click", async () => {
+      refs.btnDriveSyncImport.disabled = true;
+      refs.btnDriveSyncImport.textContent = "同期中…";
+      toast("Google Drive から最新データを取得中…", "info");
+      try {
+        const res = await importLibraryFromDrive();
+        const diffMsg = `${res.updatedCount} 曲の変更（曲名・メモ等）を反映、${res.addedCount} 曲を追加、${res.playlistsCount} 件のプレイリストを同期しました`;
+        toast(diffMsg, "ok");
+        remount();
+      } catch (err) {
+        toast(`Google Drive 同期失敗: ${err.message}`, "err");
+      } finally {
+        refs.btnDriveSyncImport.disabled = false;
+        refs.btnDriveSyncImport.textContent = "📥 Google Drive から同期 (受信・反映)";
+      }
+    });
+  }
+
+  // Google Drive 上の同期ファイル情報の初期表示
+  if (driveConnected && refs.driveSyncStatus) {
+    getDriveSyncFileInfo().then((info) => {
+      if (!refs.driveSyncStatus) return;
+      if (info.exists && info.modifiedTime) {
+        const dt = new Date(info.modifiedTime).toLocaleString("ja-JP");
+        refs.driveSyncStatus.innerHTML = `☁️ クラウド上の同期データ: <strong>${escapeHtml(dt)}</strong> (同期可能)`;
+      } else {
+        refs.driveSyncStatus.textContent = "☁️ クラウド上に同期データがまだありません。iPad等の送信元から「Google Drive へ保存」を実行してください。";
+      }
+    }).catch(() => {});
+  }
+
+  // 2. オフライン / ファイル同期 (AirDrop / iCloud)
   refs.btnSyncExport?.addEventListener("click", async () => {
     try {
       toast("ライブラリを書き出し中…", "info");
@@ -593,7 +648,8 @@ export async function mount(root) {
       toast("ライブラリを同期中…", "info");
       const text = await file.text();
       const res = await importLibraryData(text);
-      toast(`${res.tracksCount} 曲、${res.playlistsCount} 件のプレイリストを同期・復元しました`, "ok");
+      const diffMsg = `${res.updatedCount} 曲の変更（曲名・メモ等）を反映、${res.addedCount} 曲を追加、${res.playlistsCount} 件のプレイリストを同期しました`;
+      toast(diffMsg, "ok");
       remount();
     } catch (err) {
       toast(`読み込みエラー: ${err.message}`, "err");
@@ -825,19 +881,50 @@ function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices, dr
 
       <div class="settings-section">
         <h2>📱 端末間ライブラリ同期 (iPad ↔ iPhone)</h2>
+        ${driveConnected ? `
+          <!-- Google Drive クラウド同期 -->
+          <div style="background: rgba(var(--accent-rgb, 79, 140, 255), 0.08); border: 1px solid var(--accent); border-radius: 8px; padding: 12px; margin-bottom: 14px;">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 8px;">
+              <div>
+                <div style="font-weight: 600; font-size: 13px; color: var(--accent); display: flex; align-items: center; gap: 6px;">
+                  <span>☁️ Google Drive クラウド同期 (おすすめ)</span>
+                </div>
+                <div style="font-size: 11px; color: var(--fg-muted); margin-top: 4px; line-height: 1.4;">
+                  iPad で編集した内容（曲名・メモ・お気に入り・プレイリスト）を Google Drive に保存し、iPhone でワンタップでそのまま同期・反映できます（AirDrop不要）。
+                </div>
+              </div>
+            </div>
+            <div id="drive-sync-status" style="font-size: 11px; color: var(--fg-muted); margin-bottom: 10px;">
+              クラウド同期状態を確認中…
+            </div>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+              <button class="btn" id="btn-drive-sync-export" style="font-size: 12px; padding: 6px 12px; white-space: nowrap;">
+                📤 Google Drive へ保存 (送信)
+              </button>
+              <button class="btn primary" id="btn-drive-sync-import" style="font-size: 12px; padding: 6px 12px; white-space: nowrap; font-weight: 600;">
+                📥 Google Drive から同期 (受信・反映)
+              </button>
+            </div>
+          </div>
+        ` : `
+          <div style="font-size: 11px; color: var(--fg-muted); margin-bottom: 12px; line-height: 1.4; background: var(--bg-surface); padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border-color);">
+            💡 <strong>Google Drive に接続すると:</strong> AirDrop やファイル操作不要で、ボタン1つで iPad ↔ iPhone 間をクラウド同期できるようになります。
+          </div>
+        `}
+
         <div class="settings-row">
           <div>
-            <div class="label">ライブラリを書き出す (iPad → iPhone)</div>
-            <div class="help">曲一覧、Google Drive 接続情報、プレイリスト、お気に入り、編集メタデータを書き出します。AirDrop や iCloud ドライブで別の端末にそのまま共有できます。</div>
+            <div class="label">ファイルで書き出す (AirDrop / iCloud 保存)</div>
+            <div class="help">曲一覧、プレイリスト、メモ、お気に入り、編集メタデータを JSON ファイルとして書き出します。</div>
           </div>
           <div>
-            <button class="btn primary" id="btn-sync-export" style="white-space:nowrap;">📤 書き出す</button>
+            <button class="btn" id="btn-sync-export" style="white-space:nowrap;">📤 書き出す</button>
           </div>
         </div>
         <div class="settings-row">
           <div>
-            <div class="label">ライブラリを読み込む (復元 / 同期)</div>
-            <div class="help">AirDrop や iCloud で受信した同期ファイル (.json) を選択して取り込みます。Google Drive 音源はそのまま即座にストリーミング＆キャッシュ再生可能です。</div>
+            <div class="label">ファイルから読み込む (差分マージ反映)</div>
+            <div class="help">AirDrop や iCloud で受信した同期ファイル (.json) を選択して取り込み、曲名やメモの変更点を反映します。</div>
           </div>
           <div>
             <button class="btn" id="btn-sync-import" style="white-space:nowrap;">📥 読み込む</button>
@@ -1081,6 +1168,9 @@ function collect(root) {
     btnSyncExport: root.querySelector("#btn-sync-export"),
     btnSyncImport: root.querySelector("#btn-sync-import"),
     syncFileInput: root.querySelector("#sync-file-input"),
+    btnDriveSyncExport: root.querySelector("#btn-drive-sync-export"),
+    btnDriveSyncImport: root.querySelector("#btn-drive-sync-import"),
+    driveSyncStatus: root.querySelector("#drive-sync-status"),
     scrobbleChk: root.querySelector("#scrobble-chk"),
     nowPlayingChk: root.querySelector("#nowplaying-chk"),
     btnHelpToggle: root.querySelector("#btn-help-toggle"),
