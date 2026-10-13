@@ -145,6 +145,46 @@ export async function fetchVideoInfo(videoId) {
     }
   }
 
+  // 3. YouTube oEmbed (noembed) による確実なメタデータ取得 (Title, Author, Thumbnail を 100% 確実に即座に取得)
+  try {
+    const oRes = await fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${cleanId}`);
+    if (oRes.ok) {
+      const oData = await oRes.json();
+      if (oData && oData.title) {
+        return {
+          videoId: cleanId,
+          title: oData.title || "",
+          author: oData.author_name || "",
+          duration: 0,
+          thumbnailUrl: oData.thumbnail_url || `https://img.youtube.com/vi/${cleanId}/hqdefault.jpg`,
+          adaptiveFormats: [],
+          instanceUsed: "noembed",
+          raw: oData,
+        };
+      }
+    }
+  } catch (_) {}
+
+  // 第4フォールバック: 公式 YouTube oEmbed API
+  try {
+    const ytOembed = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${cleanId}&format=json`);
+    if (ytOembed.ok) {
+      const ytData = await ytOembed.json();
+      if (ytData && ytData.title) {
+        return {
+          videoId: cleanId,
+          title: ytData.title || "",
+          author: ytData.author_name || "",
+          duration: 0,
+          thumbnailUrl: ytData.thumbnail_url || `https://img.youtube.com/vi/${cleanId}/hqdefault.jpg`,
+          adaptiveFormats: [],
+          instanceUsed: "youtube-oembed",
+          raw: ytData,
+        };
+      }
+    }
+  } catch (_) {}
+
   throw new Error(`動画情報の取得に失敗しました: ${lastError ? lastError.message : "接続エラー"}`);
 }
 

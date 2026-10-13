@@ -82,8 +82,34 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
         </div>
       </div>
 
+      <!-- 音源読み込みアシストカード (直接ストリーム取得が制限された場合に表示) -->
+      <div id="yt-audio-assist-card" class="yt-card" style="display: none; border: 1px solid var(--accent); background: rgba(0, 113, 227, 0.08); padding: 14px;">
+        <div style="font-weight: 600; margin-bottom: 6px; color: var(--accent); font-size: 13px;">
+          🎵 動画情報を取得しました！音源ファイルを指定してください
+        </div>
+        <div style="font-size: 12px; line-height: 1.5; color: var(--fg); margin-bottom: 10px;">
+          YouTube の通信制限により、以下のいずれかの方法で音源ファイル（MP3/M4A）を指定してください。<br/>
+          読み込み後、<strong>波形プレビューでの不要部分カット</strong>や<strong>最高音質 MP3 (320kbps) 変換</strong>、<strong>Google Drive「MUSIC-PLAYER」フォルダへの自動保存</strong>が行えます。
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;">
+          <a id="btn-yt-open-dirpy" href="https://dirpy.com" target="_blank" rel="noopener noreferrer" class="btn primary" style="font-size: 12px; padding: 6px 12px; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; background: #cc0000; color: #fff; font-weight: 600;">
+            ⚡ Dirpy で音源を取得
+          </a>
+          <a href="https://cobalt.tools" target="_blank" rel="noopener noreferrer" class="btn" style="font-size: 12px; padding: 6px 12px; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
+            ⚡ Cobalt を開く
+          </a>
+          <button class="btn" id="btn-yt-pick-audio-file" style="font-size: 12px; padding: 6px 12px; font-weight: 600; background: var(--bg-elev-2);">
+            📁 保存したファイルを選択
+          </button>
+        </div>
+        <div style="display: flex; gap: 6px; align-items: center;">
+          <input type="text" id="yt-direct-audio-url" class="yt-input" style="height: 32px; font-size: 12px;" placeholder="または音源の直接 URL (MP3/M4A) を入力" />
+          <button class="btn" id="btn-yt-load-direct-url" style="height: 32px; font-size: 12px; white-space: nowrap;">URL読込</button>
+        </div>
+      </div>
+
       <!-- 波形 & プレビュープレイヤー -->
-      <div class="yt-card">
+      <div class="yt-card" id="yt-waveform-card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
           <span style="font-weight: 600; font-size: 12px;">✂ 音源カット編集</span>
           <span id="yt-cur-time-display" style="font-size: 12px; font-variant-numeric: tabular-nums;">0:00.0 / 0:00.0</span>
@@ -250,30 +276,90 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
 
     stepLoading.style.display = "block";
     fetchBtn.disabled = true;
-    loadingBar.style.width = "0%";
-    loadingStatus.textContent = "YouTube 音源を取得中…";
+    loadingBar.style.width = "20%";
+    loadingStatus.textContent = "動画情報を取得中…";
 
     try {
-      const result = await downloadYouTubeAudio(rawUrl, ({ percent, statusText }) => {
-        loadingBar.style.width = `${percent}%`;
-        loadingStatus.textContent = statusText;
-      });
+      // 1. YouTube 動画情報の取得 (oEmbed / Invidious で 100% 確実に取得)
+      const info = await fetchVideoInfo(rawUrl);
 
-      await loadAudioForEditing(result.audioArrayBuffer, {
-        title: result.title,
-        artist: result.artist,
-        album: result.album,
-        artworkBlob: result.artworkBlob,
-        thumbnailUrl: result.thumbnailUrl,
-      });
+      // サムネイル画像の取得
+      let artworkBlob = null;
+      if (info.thumbnailUrl) {
+        try {
+          const artRes = await fetch(info.thumbnailUrl);
+          if (artRes.ok) artworkBlob = await artRes.blob();
+        } catch (_) {}
+      }
+      currentArtworkBlob = artworkBlob;
 
+      metaTitle.value = info.title || "無題";
+      metaArtist.value = info.author || "YouTube";
+      metaAlbum.value = "YouTube";
+      if (info.thumbnailUrl) {
+        metaArt.src = info.thumbnailUrl;
+        metaArt.style.display = "block";
+      }
+
+      // 外部アシストリンク (Dirpy) を動画URL付きで設定
+      const dirpyLink = container.querySelector("#btn-yt-open-dirpy");
+      if (dirpyLink) {
+        dirpyLink.href = `https://dirpy.com/studio?url=https://www.youtube.com/watch?v=${info.videoId}`;
+      }
+
+      // 2. 音声ストリームの自動ダウンロード試行
+      loadingBar.style.width = "40%";
+      loadingStatus.textContent = "音源データをダウンロード中…";
+
+      let audioArrayBuffer = null;
+      const audioFormats = (info.adaptiveFormats || []).filter((f) => f.type && f.type.includes("audio"));
+      if (audioFormats.length > 0) {
+        try {
+          const bestAudio = audioFormats.find((f) => f.itag === "140") ||
+                            audioFormats.find((f) => f.itag === "251") ||
+                            audioFormats[0];
+          const totalBytes = parseInt(bestAudio.clen || "0", 10);
+          audioArrayBuffer = await downloadAudioStream(bestAudio.url, totalBytes, ({ percent, statusText }) => {
+            loadingBar.style.width = `${40 + Math.round(percent * 0.6)}%`;
+            loadingStatus.textContent = statusText;
+          });
+        } catch (streamErr) {
+          console.warn("[yt] 自動ストリーム取得制限、手動アシストへ移行:", streamErr);
+        }
+      }
+
+      // 3. 自動ストリームダウンロード成功時
+      if (audioArrayBuffer) {
+        await loadAudioForEditing(audioArrayBuffer, {
+          title: info.title,
+          artist: info.author,
+          album: "YouTube",
+          artworkBlob,
+          thumbnailUrl: info.thumbnailUrl,
+        });
+        stepLoading.style.display = "none";
+        stepEditor.style.display = "block";
+        fetchBtn.disabled = false;
+        toast("音源の取得が完了しました！カット位置を調整できます", "ok");
+        return;
+      }
+
+      // 4. 自動ストリーム取得が YouTube の制限等でブロックされた場合:
+      // メタデータを保持したままアシストカードを表示して音源ファイルをロードできるようにする
       stepLoading.style.display = "none";
       stepEditor.style.display = "block";
-      toast("音源の取得が完了しました！カット位置を調整できます", "ok");
+      fetchBtn.disabled = false;
+
+      const assistCard = container.querySelector("#yt-audio-assist-card");
+      const waveformCard = container.querySelector("#yt-waveform-card");
+      if (assistCard) assistCard.style.display = "block";
+      if (waveformCard) waveformCard.style.display = "none";
+
+      toast("動画情報を反映しました！音源ファイルを読み込んでください", "info", 5000);
     } catch (err) {
       stepLoading.style.display = "none";
       fetchBtn.disabled = false;
-      toast(`音源取得失敗: ${err.message}`, "err");
+      toast(`動画情報の取得失敗: ${err.message}`, "err");
     }
   });
 
@@ -291,23 +377,65 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
       const arrayBuffer = await file.arrayBuffer();
       const baseName = file.name.replace(/\.[^/.]+$/, "");
       await loadAudioForEditing(arrayBuffer, {
-        title: baseName,
-        artist: "",
-        album: "Local Upload",
+        title: metaTitle.value && metaTitle.value !== "無題" ? metaTitle.value : baseName,
+        artist: metaArtist.value && metaArtist.value !== "YouTube" ? metaArtist.value : "",
+        album: metaAlbum.value || "Local Upload",
+        artworkBlob: currentArtworkBlob,
+        thumbnailUrl: metaArt.src,
       });
 
       stepLoading.style.display = "none";
       stepEditor.style.display = "block";
-      toast("音声ファイルを読み込みました", "ok");
+      toast("音声ファイルを読み込みました！カット位置を調整できます", "ok");
     } catch (err) {
       stepLoading.style.display = "none";
       toast(`ファイル読込失敗: ${err.message}`, "err");
     }
   });
 
+  const pickAudioFileBtn = container.querySelector("#btn-yt-pick-audio-file");
+  const loadDirectUrlBtn = container.querySelector("#btn-yt-load-direct-url");
+  const directAudioUrlInput = container.querySelector("#yt-direct-audio-url");
+
+  if (pickAudioFileBtn) {
+    pickAudioFileBtn.addEventListener("click", () => fileInput.click());
+  }
+
+  if (loadDirectUrlBtn) {
+    loadDirectUrlBtn.addEventListener("click", async () => {
+      const dUrl = directAudioUrlInput.value.trim();
+      if (!dUrl) return;
+      stepLoading.style.display = "block";
+      loadingStatus.textContent = "音源 URL からダウンロード中…";
+      loadingBar.style.width = "50%";
+      try {
+        const res = await fetch(dUrl);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const ab = await res.arrayBuffer();
+        await loadAudioForEditing(ab, {
+          title: metaTitle.value,
+          artist: metaArtist.value,
+          album: metaAlbum.value,
+          artworkBlob: currentArtworkBlob,
+          thumbnailUrl: metaArt.src,
+        });
+        stepLoading.style.display = "none";
+        toast("音源を読み込みました！カット位置を調整できます", "ok");
+      } catch (e) {
+        stepLoading.style.display = "none";
+        toast(`音源 URL 読込失敗: ${e.message}`, "err");
+      }
+    });
+  }
+
   // 音声バッファのデコードと編集準備
   async function loadAudioForEditing(arrayBuffer, meta = {}) {
     cleanupPreview();
+
+    const assistCard = container.querySelector("#yt-audio-assist-card");
+    const waveformCard = container.querySelector("#yt-waveform-card");
+    if (assistCard) assistCard.style.display = "none";
+    if (waveformCard) waveformCard.style.display = "block";
 
     // 1. Web Audio API でデコード
     const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -315,12 +443,12 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
     audioDuration = currentAudioBuffer.duration;
     cutStartTime = 0;
     cutEndTime = audioDuration;
-    currentArtworkBlob = meta.artworkBlob || null;
+    if (meta.artworkBlob) currentArtworkBlob = meta.artworkBlob;
 
     // 2. メタデータの反映
-    metaTitle.value = meta.title || "無題";
-    metaArtist.value = meta.artist || "YouTube";
-    metaAlbum.value = meta.album || "YouTube";
+    if (meta.title && (!metaTitle.value || metaTitle.value === "無題")) metaTitle.value = meta.title;
+    if (meta.artist && (!metaArtist.value || metaArtist.value === "YouTube")) metaArtist.value = meta.artist;
+    if (meta.album && (!metaAlbum.value || metaAlbum.value === "YouTube")) metaAlbum.value = meta.album;
     if (meta.thumbnailUrl) {
       metaArt.src = meta.thumbnailUrl;
       metaArt.style.display = "block";

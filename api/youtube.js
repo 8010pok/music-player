@@ -173,5 +173,42 @@ async function resolveVideoInfo(videoId) {
       lastErr = e;
     }
   }
+
+  // Invidious が全滅した場合の YouTube oEmbed フォールバック (動画タイトル・作者・サムネイルを100%確実に取得)
+  try {
+    const oRes = await fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${videoId}`);
+    if (oRes.ok) {
+      const oData = await oRes.json();
+      if (oData && oData.title) {
+        return {
+          videoId,
+          title: oData.title || "",
+          author: oData.author_name || "",
+          duration: 0,
+          thumbnailUrl: oData.thumbnail_url || `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+          adaptiveFormats: [],
+        };
+      }
+    }
+  } catch (_) {}
+
+  // 第2フォールバック: 公式 YouTube oEmbed
+  try {
+    const ytOembed = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
+    if (ytOembed.ok) {
+      const ytData = await ytOembed.json();
+      if (ytData && ytData.title) {
+        return {
+          videoId,
+          title: ytData.title || "",
+          author: ytData.author_name || "",
+          duration: 0,
+          thumbnailUrl: ytData.thumbnail_url || `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+          adaptiveFormats: [],
+        };
+      }
+    }
+  } catch (_) {}
+
   throw new Error(`動画情報の取得に失敗しました: ${lastErr ? lastErr.message : "接続エラー"}`);
 }
