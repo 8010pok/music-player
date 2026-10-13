@@ -19,6 +19,7 @@ import { formatTime, toast, escapeHtml, openModal } from "./components.js";
 import { getBlob, updateTrack } from "../store/library-db.js";
 import { getArtworkUrl } from "./artwork-cache.js";
 import { editTrackMetadata } from "./metadata-editor.js";
+import { openNormalizeModal } from "./normalize-modal.js";
 import { fetchOnlineLyrics } from "../metadata/lrclib.js";
 import { parseLrc } from "../metadata/lyrics.js";
 
@@ -1086,6 +1087,14 @@ async function loadTrackInfo(refs, isAlive = () => true) {
     if (appState.get().currentTrack?.id !== t.id) return;
     if (!refs.infoBody) return;
     refs.infoBody.innerHTML = renderTrackInfo(t, meta);
+    const normBtn = refs.infoBody.querySelector("#btn-player-normalize");
+    if (normBtn) {
+      normBtn.addEventListener("click", () => {
+        openNormalizeModal(t, () => {
+          if (isAlive()) loadTrackInfo(refs, isAlive);
+        });
+      });
+    }
     const editBtn = refs.infoBody.querySelector("#btn-player-edit-meta");
     if (editBtn) {
       editBtn.addEventListener("click", () => {
@@ -1158,7 +1167,8 @@ function renderTrackInfo(track, meta) {
     </div>
   `;
   const editBtnHtml = `
-    <div style="margin-top: 12px; text-align: center;">
+    <div style="margin-top: 12px; display: flex; flex-direction: column; gap: 8px;">
+      <button class="btn" id="btn-player-normalize" style="width: 100%; min-height: 38px; display: inline-flex; align-items: center; justify-content: center; gap: 6px;">🔊 音量ノーマライズ…</button>
       <button class="btn primary" id="btn-player-edit-meta" style="width: 100%; min-height: 38px;">✏ メタデータを編集</button>
     </div>
   `;

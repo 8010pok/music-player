@@ -15,6 +15,7 @@ import { appState } from "../state.js";
 import { releaseArtwork, getArtworkUrl } from "./artwork-cache.js";
 import { searchTrackMetadata, searchAlbumMetadata, fetchArtworkBlob, fetchAlbumTracklist, cleanQuery } from "../metadata/musicbrainz.js";
 import { retryScrobbleForTrack } from "../lastfm/scrobble.js";
+import { openNormalizeModal } from "./normalize-modal.js";
 
 /**
  * 1曲分のメタデータ編集モーダルを表示
@@ -122,6 +123,20 @@ export function editTrackMetadata(track, onUpdated) {
           ※Last.fm の scrobble や歌詞取得には本来の曲名・アーティスト名のみが送信され、メモは影響しません。
         </div>
       </div>
+      <div class="modal-row" style="background: rgba(0, 113, 227, 0.05); border: 1px solid rgba(0, 113, 227, 0.2); border-radius: 8px; padding: 10px; margin-top: 8px; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <div style="font-weight: 600; font-size: 12px; color: var(--fg); display: flex; align-items: center; gap: 6px;">
+            <span>🔊 音量ノーマライズ</span>
+            ${track.normalized ? `<span style="font-size: 10px; background: rgba(52, 168, 83, 0.15); color: #34a853; padding: 1px 6px; border-radius: 4px; font-weight: 600;">適用済 (${track.normalizedGainDb >= 0 ? "+" : ""}${track.normalizedGainDb}dB)</span>` : ""}
+          </div>
+          <div style="font-size: 11px; color: var(--fg-muted); margin-top: 2px;">
+            基準曲に合わせて音量を均一化・最適化します
+          </div>
+        </div>
+        <button type="button" class="btn" id="btn-meta-open-normalize" style="font-size: 11px; padding: 4px 10px; white-space: nowrap;">
+          音量を調整…
+        </button>
+      </div>
     `;
 
     // アートワークプレビュー描画
@@ -186,6 +201,15 @@ export function editTrackMetadata(track, onUpdated) {
       pendingArtworkBlob = null;
       renderTrackArtPreview();
       toast("画像を削除に設定しました", "info");
+    });
+
+    body.querySelector("#btn-meta-open-normalize")?.addEventListener("click", () => {
+      openNormalizeModal(track, {
+        onCompleted: (updated) => {
+          Object.assign(track, updated);
+          if (typeof onUpdated === "function") onUpdated(track);
+        },
+      });
     });
 
     // 自動検索ハンドラ

@@ -13,6 +13,7 @@ import { extractMetadata, readDurationViaAudio } from "../metadata/index.js";
 import { formatFromName, mimeFromName } from "../metadata/util.js";
 import { openModal, toast, escapeHtml, escapeAttr } from "../ui/components.js";
 import { findDuplicateInList } from "../store/dedup-service.js";
+import { processAudioNormalization } from "../audio/normalize-service.js";
 
 let _cachedToken = null;
 let _gisTokenClient = null;
@@ -527,10 +528,10 @@ export function inferMetadataFromFileName(filename, folderName = "") {
 /**
  * 選択した Drive ファイル群を IndexedDB ライブラリにインポート
  * @param {Array<object>} driveFiles
- * @param {{ cacheBlobs?: boolean, defaultAlbumName?: string, onProgress?: (current: number, total: number, file: object) => void }} [opts]
+ * @param {{ cacheBlobs?: boolean, normalizeAudio?: boolean, defaultAlbumName?: string, onProgress?: (current: number, total: number, file: object) => void }} [opts]
  * @returns {Promise<{ added: number, failed: number }>}
  */
-export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false, defaultAlbumName = "", onProgress } = {}) {
+export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false, normalizeAudio = false, defaultAlbumName = "", onProgress } = {}) {
   let added = 0;
   let failed = 0;
   const allExistingTracks = await getAllTracks().catch(() => []);
@@ -564,9 +565,34 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
         }
       }
 
-      if (cacheBlobs) {
+      const shouldFetchBlob = cacheBlobs || normalizeAudio;
+
+      if (shouldFetchBlob) {
         // Blob をダウンロードして完全メタデータを抽出
-        const blob = await fetchDriveAudioBlob(file.id);
+        let blob = await fetchDriveAudioBlob(file.id);
+
+        if (normalizeAudio) {
+          if (typeof onProgress === "function") {
+            onProgress(i + 1, driveFiles.length, { ...file, name: `${file.name} (🔊 音量ノーマライズ中…)` });
+          }
+          try {
+            const pub = getPublic();
+            const ref = pub.normalizeReferenceTrack;
+            const targetRmsDb = (ref && typeof ref.rmsDb === "number")
+              ? ref.rmsDb
+              : (typeof pub.normalizeTargetRms === "number" ? pub.normalizeTargetRms : -14.0);
+            const normResult = await processAudioNormalization(blob, {
+              track: { ...file, title: inferred.title, artist: inferred.artist, album: folder },
+              targetRmsDb,
+            });
+            if (normResult && (normResult.normalizedBlob || normResult.blob)) {
+              blob = normResult.normalizedBlob || normResult.blob;
+            }
+          } catch (normErr) {
+            console.warn("[drive-service] 音量ノーマライズ失敗、元音源を使用します:", normErr);
+          }
+        }
+
         const meta = await extractMetadata(blob, file.name);
         let duration = meta.duration;
         if ((!duration || duration <= 0) && typeof document !== "undefined") {
@@ -588,8 +614,8 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           trackNo: meta.trackNo || inferred.trackNo || "",
           discNo: meta.discNo || "",
           duration: duration || 0,
-          mime: meta.mime || file.mimeType || mimeFromName(file.name),
-          format: meta.format || formatFromName(file.name) || "unknown",
+          mime: normalizeAudio ? "audio/mp3" : (meta.mime || file.mimeType || mimeFromName(file.name)),
+          format: normalizeAudio ? "mp3" : (meta.format || formatFromName(file.name) || "unknown"),
           addedAt: existing ? (existing.addedAt || Date.now()) : Date.now(),
           playCount: existing ? (existing.playCount || 0) : 0,
           lastPlayedAt: existing ? (existing.lastPlayedAt || 0) : 0,
@@ -868,10 +894,16 @@ export async function openDriveImportModal({ onImported } = {}) {
           <button class="btn" id="btn-drive-select-all" style="padding: 4px 8px; font-size: 11px;">全選択</button>
           <button class="btn" id="btn-drive-unselect-all" style="padding: 4px 8px; font-size: 11px;">全解除</button>
         </div>
-        <label style="display: flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer; user-select: none;">
-          <input type="checkbox" id="chk-drive-cache-now" />
-          <span title="チェックを外すと本体ストレージを消費せず、再生時に直接ストリーミングします">即時キャッシュ (OFFで容量0)</span>
-        </label>
+        <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+          <label style="display: flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer; user-select: none;">
+            <input type="checkbox" id="chk-drive-normalize" />
+            <span title="インポート時に音量を基準曲（または標準音量）に合わせて自動調整します">🔊 音量ノーマライズ</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer; user-select: none;">
+            <input type="checkbox" id="chk-drive-cache-now" />
+            <span title="チェックを外すと本体ストレージを消費せず、再生時に直接ストリーミングします">即時キャッシュ (OFFで容量0)</span>
+          </label>
+        </div>
       </div>
 
       <!-- アイテム一覧領域 -->
@@ -904,7 +936,8 @@ export async function openDriveImportModal({ onImported } = {}) {
             return false;
           }
 
-          const cacheNow = container.querySelector("#chk-drive-cache-now").checked;
+          const normalizeNow = !!container.querySelector("#chk-drive-normalize")?.checked;
+          const cacheNow = normalizeNow || !!container.querySelector("#chk-drive-cache-now")?.checked;
           const progressEl = container.querySelector("#drive-import-progress");
           progressEl.style.display = "block";
           progressEl.textContent = `追加中 0 / ${selectedFiles.length}…`;
@@ -918,6 +951,7 @@ export async function openDriveImportModal({ onImported } = {}) {
           try {
             const { added, failed } = await importDriveFilesToLibrary(selectedFiles, {
               cacheBlobs: cacheNow,
+              normalizeAudio: normalizeNow,
               defaultAlbumName: currentFolderName,
               onProgress: (cur, tot, file) => {
                 progressEl.textContent = `追加中 ${cur} / ${tot}: ${escapeHtml(file.name)}…`;
@@ -950,6 +984,15 @@ export async function openDriveImportModal({ onImported } = {}) {
   });
 
   const fileListEl = container.querySelector("#drive-file-list");
+  const chkNormalize = container.querySelector("#chk-drive-normalize");
+  const chkCache = container.querySelector("#chk-drive-cache-now");
+  if (chkNormalize && chkCache) {
+    chkNormalize.addEventListener("change", () => {
+      if (chkNormalize.checked) {
+        chkCache.checked = true;
+      }
+    });
+  }
 
   // カウント更新
   const updateCount = () => {
@@ -1060,11 +1103,13 @@ export async function openDriveImportModal({ onImported } = {}) {
         return;
       }
 
-      const cacheNow = container.querySelector("#chk-drive-cache-now").checked;
+      const normalizeNow = !!container.querySelector("#chk-drive-normalize")?.checked;
+      const cacheNow = normalizeNow || !!container.querySelector("#chk-drive-cache-now")?.checked;
       progressEl.textContent = `追加中 0 / ${audioFiles.length}…`;
 
       const { added, failed } = await importDriveFilesToLibrary(audioFiles, {
         cacheBlobs: cacheNow,
+        normalizeAudio: normalizeNow,
         defaultAlbumName: folderName,
         onProgress: (cur, tot, file) => {
           progressEl.textContent = `追加中 ${cur} / ${tot}: ${escapeHtml(file.name)}…`;
