@@ -9,7 +9,12 @@
  */
 
 import { openModal, toast, confirm, escapeHtml, escapeAttr } from "./components.js";
-import { downloadYouTubeAudio, extractYouTubeVideoId } from "../youtube/youtube-service.js";
+import {
+  fetchVideoInfo,
+  downloadAudioStream,
+  downloadYouTubeAudio,
+  extractYouTubeVideoId,
+} from "../youtube/youtube-service.js";
 import { sliceAndEncodeAudio } from "../audio/mp3-encoder.js";
 import { isDriveConnected, uploadFileToDrive, requestGisToken } from "../gdrive/drive-service.js";
 import { putTrack } from "../store/library-db.js";
