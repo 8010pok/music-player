@@ -851,8 +851,13 @@ export async function openDriveImportModal({ onImported } = {}) {
         <button class="btn" id="btn-drive-search" style="padding: 6px 12px; font-size: 12px;">検索</button>
       </div>
 
-      <!-- パンくずリスト -->
-      <div id="drive-breadcrumbs" style="display: flex; align-items: center; gap: 4px; flex-wrap: wrap; font-size: 11px; padding: 6px 8px; background: var(--bg-surface); border-radius: 6px; border: 1px solid var(--border-color); min-height: 28px;"></div>
+      <!-- ナビゲーション（戻るボタン & パンくずリスト） -->
+      <div style="display: flex; align-items: center; gap: 6px;">
+        <button class="btn" id="btn-drive-back" style="padding: 4px 10px; font-size: 11px; white-space: nowrap;" title="上の階層へ戻る" disabled>
+          ◀ 戻る
+        </button>
+        <div id="drive-breadcrumbs" style="flex: 1; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; font-size: 11px; padding: 4px 8px; background: var(--bg-surface); border-radius: 6px; border: 1px solid var(--border-color); min-height: 28px;"></div>
+      </div>
 
       <!-- アクションバー -->
       <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
@@ -885,7 +890,7 @@ export async function openDriveImportModal({ onImported } = {}) {
     title: "☁ Google Drive から追加",
     body: container,
     actions: [
-      { label: "キャンセル", onClick: () => {} },
+      { label: "閉じる", onClick: () => true },
       {
         label: "選択した曲を追加 (0件)",
         primary: true,
@@ -896,7 +901,7 @@ export async function openDriveImportModal({ onImported } = {}) {
 
           if (selectedFiles.length === 0) {
             toast("インポートする曲を選択するか、【このフォルダの曲を全追加】を押してください", "err");
-            return;
+            return false;
           }
 
           const cacheNow = container.querySelector("#chk-drive-cache-now").checked;
@@ -919,17 +924,26 @@ export async function openDriveImportModal({ onImported } = {}) {
               },
             });
 
-            toast(`${added} 件の Google Drive 音源を追加しました`, "ok");
+            toast(`✅ ${added} 件の音源を追加しました（続けてインポートできます）`, "ok");
             for (const f of selectedFiles) {
               existingTrackIds.add(trackIdFromDriveFileId(f.id));
             }
+            selectedFileIds.clear();
+            renderItems(displayedItems, false);
+            updateCount();
             if (typeof onImported === "function") onImported();
+            progressEl.textContent = `✅ ${added} 件を追加しました！続けて別のフォルダや曲もインポートできます`;
           } catch (err) {
             toast(`インポート中にエラーが発生しました: ${err.message}`, "err");
+            progressEl.style.display = "none";
           } finally {
-            const closeBtn = document.querySelector(".modal-close");
-            if (closeBtn) closeBtn.click();
+            if (importBtn) {
+              importBtn.disabled = false;
+              importBtn.textContent = "選択した曲を追加 (0件)";
+            }
           }
+          // モーダルを閉じずに連続インポートを許可
+          return false;
         },
       },
     ],
@@ -948,14 +962,49 @@ export async function openDriveImportModal({ onImported } = {}) {
     if (btn) btn.textContent = `選択した曲を追加 (${checkedCount}件)`;
   };
 
+  // 戻るボタンの更新 & ハンドラ
+  const backBtn = container.querySelector("#btn-drive-back");
+  const updateBackButton = () => {
+    if (!backBtn) return;
+    if (currentSearch) {
+      backBtn.disabled = false;
+      backBtn.textContent = "◀ 戻る";
+      backBtn.title = "検索を解除して元のフォルダへ戻る";
+    } else {
+      backBtn.disabled = breadcrumbs.length <= 1;
+      backBtn.textContent = "◀ 戻る";
+      backBtn.title = breadcrumbs.length > 1 ? "上の階層へ戻る" : "最上位階層（マイドライブ）です";
+    }
+  };
+
+  if (backBtn) {
+    backBtn.addEventListener("click", () => {
+      if (currentSearch) {
+        currentSearch = "";
+        const searchInput = container.querySelector("#drive-search-input");
+        if (searchInput) searchInput.value = "";
+        loadFolder(currentFolderId, false);
+        return;
+      }
+      if (breadcrumbs.length > 1) {
+        breadcrumbs.pop();
+        const parent = breadcrumbs[breadcrumbs.length - 1];
+        currentFolderId = parent.id;
+        currentFolderName = parent.name;
+        loadFolder(currentFolderId, false);
+      }
+    });
+  }
+
   // パンくずリスト描画
   const renderBreadcrumbs = () => {
+    updateBackButton();
     const crumbsEl = container.querySelector("#drive-breadcrumbs");
     if (!crumbsEl) return;
     if (currentSearch) {
       crumbsEl.innerHTML = `
         <span style="color:var(--accent); font-weight:600;">🔍 検索結果: "${escapeHtml(currentSearch)}"</span>
-        <button class="btn" id="btn-clear-search" style="padding:2px 8px; font-size:11px; margin-left:auto;">✕ フォルダ表示に戻る</button>
+        <button class="btn" id="btn-clear-search" style="padding:2px 8px; font-size:11px; margin-left:auto;">✕ 解除</button>
       `;
       crumbsEl.querySelector("#btn-clear-search")?.addEventListener("click", () => {
         currentSearch = "";

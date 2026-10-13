@@ -126,8 +126,16 @@ export async function mount(root) {
         history.replaceState(null, "", newHash);
       }
 
-      if (activeTab === "albums") renderAlbums(refs);
-      if (activeTab === "artists") renderArtists(refs);
+      if (activeTab === "artists" && dirtyTabs.artists) {
+        renderArtists(refs);
+        dirtyTabs.artists = false;
+      } else if (activeTab === "albums" && dirtyTabs.albums) {
+        renderAlbums(refs);
+        dirtyTabs.albums = false;
+      } else if (activeTab === "tracks" && dirtyTabs.tracks) {
+        renderList(refs);
+        dirtyTabs.tracks = false;
+      }
     });
   });
 
@@ -189,46 +197,78 @@ export async function mount(root) {
     onFiles(refs, e.target.files);
     e.target.value = "";
   });
-  refs.addBtn.addEventListener("click", () => refs.fileInput.click());
-  refs.addFolderBtn.addEventListener("click", () => {
-    if (appState.get().isIOS) {
+  if (refs.addCombinedBtn) {
+    refs.addCombinedBtn.addEventListener("click", () => {
+      if (appState.get().isIOS) {
+        // iOS はフォルダ選択非対応のため、迷わせず直接ファイル選択（複数可）を開く
+        refs.fileInput.click();
+        return;
+      }
+      // PC等: ファイルまたはフォルダを選択できるモーダル
       openModal({
-        title: "📂 フォルダ追加について",
-        body: `
-          <div style="font-size: 13px; line-height: 1.6; color: var(--fg);">
-            <div style="margin-bottom: 12px;">
-              iOS / iPadOS のブラウザ仕様により、端末の「フォルダ選択（webkitdirectory）」は曲が取得できず 0 件になります。
-            </div>
-            <div style="background: var(--bg-surface); padding: 12px; border-radius: 8px; border: 1px solid var(--border-color); margin-bottom: 12px;">
-              <strong style="color: var(--accent);">フォルダ内の曲を追加する方法:</strong>
-              <div style="margin-top: 8px; line-height: 1.6;">
-                1. <strong>☁ Google Drive から追加（推奨）:</strong><br/>
-                Google Drive 内のフォルダをタップして、フォルダ丸ごと一括追加できます（本体容量消費ゼロ！）。<br/><br/>
-                2. <strong>📁 ファイルを選択:</strong><br/>
-                「ファイル」アプリで「…」➔「選択」から、フォルダ内の曲を全選択して追加できます。
-              </div>
-            </div>
-          </div>
-        `,
+        title: "📁 端末から音楽を追加",
+        body: `<div style="font-size: 13px; line-height: 1.6; color: var(--fg);">追加する音源の選択方法を選んでください:</div>`,
         actions: [
-          { label: "キャンセル", onClick: () => {} },
           {
-            label: "📁 ファイルを複数選択",
-            onClick: () => refs.fileInput.click(),
+            label: "📁 ファイルを選択",
+            primary: true,
+            onClick: () => { refs.fileInput.click(); },
           },
           {
-            label: "☁ Google Drive からフォルダ追加",
-            primary: true,
-            onClick: () => {
-              if (refs.addGdriveBtn) refs.addGdriveBtn.click();
-            },
+            label: "📂 フォルダを選択",
+            onClick: () => { refs.folderInput.click(); },
+          },
+          {
+            label: "キャンセル",
+            onClick: () => {},
           },
         ],
       });
-      return;
-    }
-    refs.folderInput.click();
-  });
+    });
+  }
+
+  if (refs.addBtn) refs.addBtn.addEventListener("click", () => refs.fileInput.click());
+  if (refs.addFolderBtn) {
+    refs.addFolderBtn.addEventListener("click", () => {
+      if (appState.get().isIOS) {
+        openModal({
+          title: "📂 フォルダ追加について",
+          body: `
+            <div style="font-size: 13px; line-height: 1.6; color: var(--fg);">
+              <div style="margin-bottom: 12px;">
+                iOS / iPadOS のブラウザ仕様により、端末の「フォルダ選択（webkitdirectory）」は曲が取得できず 0 件になります。
+              </div>
+              <div style="background: var(--bg-surface); padding: 12px; border-radius: 8px; border: 1px solid var(--border-color); margin-bottom: 12px;">
+                <strong style="color: var(--accent);">フォルダ内の曲を追加する方法:</strong>
+                <div style="margin-top: 8px; line-height: 1.6;">
+                  1. <strong>☁ Google Drive から追加（推奨）:</strong><br/>
+                  Google Drive 内のフォルダをタップして、フォルダ丸ごと一括追加できます（本体容量消費ゼロ！）。<br/><br/>
+                  2. <strong>📁 ファイルを選択:</strong><br/>
+                  「ファイル」アプリで「…」➔「選択」から、フォルダ内の曲を全選択して追加できます。
+                </div>
+              </div>
+            </div>
+          `,
+          actions: [
+            { label: "キャンセル", onClick: () => {} },
+            {
+              label: "📁 ファイルを複数選択",
+              onClick: () => refs.fileInput.click(),
+            },
+            {
+              label: "☁ Google Drive からフォルダ追加",
+              primary: true,
+              onClick: () => {
+                if (refs.addGdriveBtn) refs.addGdriveBtn.click();
+              },
+            },
+          ],
+        });
+        return;
+      }
+      refs.folderInput.click();
+    });
+  }
   if (refs.addGdriveBtn) {
     refs.addGdriveBtn.addEventListener("click", () => {
       openDriveImportModal({
@@ -315,41 +355,76 @@ function render() {
       <!-- 「現在再生中のプレイリスト」バナー -->
       <div class="now-playing-from" id="np-banner" hidden></div>
 
-      <!-- 音源追加領域（全タブ共通） -->
-      <div class="library-add">
-        <div class="library-add-title">音源を追加 (Googleドライブ / iPad・iPhone内 / iCloud)</div>
-        <div class="library-add-buttons">
-          <button class="btn primary" id="btn-add-gdrive" style="background: var(--accent); color: #fff; font-weight: bold;" title="Google Drive から曲やフォルダを一括追加">☁ Google Drive (フォルダ・曲追加)</button>
-          <button class="btn" id="btn-add-youtube" style="background: #cc0000; color: #fff; font-weight: bold;" title="YouTubeのリンクから音源をダウンロードしてGoogle Driveに保存">▶ YouTubeから保存</button>
-          <button class="btn" id="btn-sync-quick" style="font-weight: 600;" title="iPad ↔ iPhone 端末間同期 (Google Drive で変更内容を反映)">🔄 端末間同期</button>
-          <button class="btn" id="btn-add">📁 ファイルを選択</button>
-          <button class="btn" id="btn-add-folder" title="PC用フォルダ選択 (iOSはGoogle Drive推奨)">📂 フォルダを選択</button>
+      <!-- 上部ヘッダー & 設定を同期 (別枠) -->
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <h2 style="margin: 0; font-size: 20px; font-weight: 700;">ライブラリ</h2>
+        <!-- 設定を同期 (別枠) -->
+        <button class="btn" id="btn-sync-quick" style="font-weight: 600; font-size: 12px; padding: 5px 12px; border-color: var(--accent); color: var(--accent); background: rgba(var(--accent-rgb, 79, 140, 255), 0.08);" title="iPad ↔ iPhone 端末間同期 (Google Drive で変更内容を反映)">
+          🔄 端末間同期
+        </button>
+      </div>
+
+      <!-- 音源追加領域（3つの項目にすっきり集約） -->
+      <div class="library-add" style="margin-bottom: 12px; padding: 8px 12px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+          <div style="font-size: 12px; font-weight: 600; color: var(--fg-muted);">音楽を追加</div>
+          <button class="btn" id="btn-rescan-meta" style="font-size: 11px; padding: 2px 8px;" title="保存済み全曲のファイルを再パースしてメタデータを更新">
+            📋 メタ再スキャン
+          </button>
         </div>
-        <div class="help" style="font-size: 11px; color: var(--fg-muted); margin-top: 6px; line-height: 1.6;">
-          💡 <strong>Google Drive のフォルダを丸ごと追加したい場合:</strong> 【☁ Google Drive】を開くとフォルダ階層が表示され、<strong>「📂 このフォルダの曲を全追加」</strong> ボタンで一発インポートできます（本体ストレージ消費ゼロ！）。<br/>
-          ※ iOS / iPadOS ではブラウザ仕様により「📂 フォルダを選択」が非対応です。端末内の曲は【📁 ファイルを選択】から複数選択してください。
+        <div class="library-add-buttons">
+          <button class="btn primary" id="btn-add-gdrive" style="background: var(--accent); color: #fff; font-weight: bold; flex: 1; min-width: 120px;" title="Google Drive から曲やフォルダを一括追加">☁ Google Drive</button>
+          <button class="btn" id="btn-add-youtube" style="background: #cc0000; color: #fff; font-weight: bold; flex: 1; min-width: 120px;" title="YouTubeのリンクから音源をダウンロードしてGoogle Drive/端末に保存">▶ YouTubeから保存</button>
+          <button class="btn" id="btn-add-combined" style="flex: 1; min-width: 120px; font-weight: 500;" title="端末内の音源ファイル・フォルダを追加">📁 端末から追加</button>
         </div>
         <input type="file" id="file-input" multiple
                accept=".mp3,.m4a,.m4b,.aac,.mp4,.flac,.ogg,.oga,.opus,.wav,.webm,audio/*"
                style="display:none" />
         <input type="file" id="folder-input" multiple webkitdirectory directory
                style="display:none" />
-        <div class="library-rescan-row">
-          <button class="btn" id="btn-rescan-meta" title="保存済み全曲のファイルを再パースしてメタデータを更新します">
-            📋 メタデータ再スキャン
-          </button>
-          <span id="rescan-progress" class="rescan-progress"></span>
-        </div>
+        <span id="rescan-progress" class="rescan-progress"></span>
       </div>
 
-      <!-- Apple Music スタイル ライブラリタブ (アーティスト / アルバム / 曲) -->
+      <!-- Apple Music スタイル ライブラリタブ (アーティスト最前面 / アルバム / 曲) -->
       <div class="library-tabs-bar" role="tablist">
         <button class="library-tab-btn ${activeTab === "artists" ? "is-active" : ""}" data-tab="artists" role="tab">アーティスト</button>
         <button class="library-tab-btn ${activeTab === "albums" ? "is-active" : ""}" data-tab="albums" role="tab">アルバム</button>
         <button class="library-tab-btn ${activeTab === "tracks" ? "is-active" : ""}" data-tab="tracks" role="tab">曲</button>
       </div>
 
-      <!-- タブ 1: 曲 -->
+      <!-- タブ 1: アーティスト (メイン画面) -->
+      <div class="library-tab-panel" id="panel-artists" ${activeTab !== "artists" ? "hidden" : ""}>
+        <div class="library-toolbar">
+          <input type="search" id="artist-search" placeholder="アーティスト名を検索" autocomplete="off" />
+          <select id="artist-sort">
+            <option value="name-asc">名前 (昇順)</option>
+            <option value="name-desc">名前 (降順)</option>
+            <option value="tracks-desc">曲数が多い順</option>
+            <option value="albums-desc">アルバム数が多い順</option>
+          </select>
+        </div>
+        <div class="library-stats" id="artist-stats"></div>
+        <ul class="artist-list" id="artist-list" role="list"></ul>
+      </div>
+
+      <!-- タブ 2: アルバム -->
+      <div class="library-tab-panel" id="panel-albums" ${activeTab !== "albums" ? "hidden" : ""}>
+        <div class="library-toolbar">
+          <input type="search" id="album-search" placeholder="アルバム・アーティスト・年を検索" autocomplete="off" />
+          <select id="album-sort">
+            <option value="title-asc">アルバム名 (昇順)</option>
+            <option value="title-desc">アルバム名 (降順)</option>
+            <option value="artist-asc">アーティスト名 (昇順)</option>
+            <option value="year-desc">リリース年 (新しい順)</option>
+            <option value="year-asc">リリース年 (古い順)</option>
+            <option value="recent">最近追加した順</option>
+          </select>
+        </div>
+        <div class="library-stats" id="album-stats"></div>
+        <div class="album-grid" id="album-grid" role="list"></div>
+      </div>
+
+      <!-- タブ 3: 曲 -->
       <div class="library-tab-panel" id="panel-tracks" ${activeTab !== "tracks" ? "hidden" : ""}>
         <div class="library-toolbar">
           <input type="search" id="lib-search" placeholder="検索: 曲タイトルなどを入力" />
@@ -374,38 +449,6 @@ function render() {
 
         <ul class="track-list" id="track-list"></ul>
       </div>
-
-      <!-- タブ 2: アルバム -->
-      <div class="library-tab-panel" id="panel-albums" ${activeTab !== "albums" ? "hidden" : ""}>
-        <div class="library-toolbar">
-          <input type="search" id="album-search" placeholder="アルバム・アーティスト・年を検索" autocomplete="off" />
-          <select id="album-sort">
-            <option value="title-asc">アルバム名 (昇順)</option>
-            <option value="title-desc">アルバム名 (降順)</option>
-            <option value="artist-asc">アーティスト名 (昇順)</option>
-            <option value="year-desc">リリース年 (新しい順)</option>
-            <option value="year-asc">リリース年 (古い順)</option>
-            <option value="recent">最近追加した順</option>
-          </select>
-        </div>
-        <div class="library-stats" id="album-stats"></div>
-        <div class="album-grid" id="album-grid" role="list"></div>
-      </div>
-
-      <!-- タブ 3: アーティスト -->
-      <div class="library-tab-panel" id="panel-artists" ${activeTab !== "artists" ? "hidden" : ""}>
-        <div class="library-toolbar">
-          <input type="search" id="artist-search" placeholder="アーティスト名を検索" autocomplete="off" />
-          <select id="artist-sort">
-            <option value="name-asc">名前 (昇順)</option>
-            <option value="name-desc">名前 (降順)</option>
-            <option value="tracks-desc">曲数が多い順</option>
-            <option value="albums-desc">アルバム数が多い順</option>
-          </select>
-        </div>
-        <div class="library-stats" id="artist-stats"></div>
-        <ul class="artist-list" id="artist-list" role="list"></ul>
-      </div>
     </section>
   `;
 }
@@ -417,9 +460,10 @@ function collectRefs(root) {
     panelTracks: root.querySelector("#panel-tracks"),
     panelAlbums: root.querySelector("#panel-albums"),
     panelArtists: root.querySelector("#panel-artists"),
-    // 曲タブ
+    // 音源追加
     fileInput: root.querySelector("#file-input"),
     folderInput: root.querySelector("#folder-input"),
+    addCombinedBtn: root.querySelector("#btn-add-combined"),
     addBtn: root.querySelector("#btn-add"),
     addFolderBtn: root.querySelector("#btn-add-folder"),
     addGdriveBtn: root.querySelector("#btn-add-gdrive"),
@@ -445,11 +489,33 @@ function collectRefs(root) {
   };
 }
 
+// タブごとの再描画必要フラグ（Lazy Rendering 用）
+const dirtyTabs = { tracks: true, albums: true, artists: true };
+let cachedAlbumsGroup = null;
+let cachedArtistsGroup = null;
+
 async function reloadTracks(refs) {
   tracksCache = await getAllTracks();
-  renderList(refs);
-  renderAlbums(refs);
-  renderArtists(refs);
+  dirtyTabs.tracks = true;
+  dirtyTabs.albums = true;
+  dirtyTabs.artists = true;
+  cachedAlbumsGroup = null;
+  cachedArtistsGroup = null;
+  renderActiveTab(refs);
+}
+
+function renderActiveTab(refs) {
+  if (!refs) return;
+  if (activeTab === "artists") {
+    renderArtists(refs);
+    dirtyTabs.artists = false;
+  } else if (activeTab === "albums") {
+    renderAlbums(refs);
+    dirtyTabs.albums = false;
+  } else if (activeTab === "tracks") {
+    renderList(refs);
+    dirtyTabs.tracks = false;
+  }
 }
 
 function renderList(refs) {
@@ -482,7 +548,10 @@ function renderList(refs) {
 
 function renderAlbums(refs) {
   if (!refs || !refs.albumGrid) return;
-  const allAlbums = groupTracksIntoAlbums(tracksCache);
+  if (!cachedAlbumsGroup) {
+    cachedAlbumsGroup = groupTracksIntoAlbums(tracksCache);
+  }
+  const allAlbums = cachedAlbumsGroup;
   let list = allAlbums.slice();
   if (albumFilterText) {
     list = list.filter((a) => {
@@ -531,7 +600,10 @@ function renderAlbums(refs) {
 
 function renderArtists(refs) {
   if (!refs || !refs.artistList) return;
-  const allArtists = groupTracksIntoArtists(tracksCache);
+  if (!cachedArtistsGroup) {
+    cachedArtistsGroup = groupTracksIntoArtists(tracksCache);
+  }
+  const allArtists = cachedArtistsGroup;
   let list = allArtists.slice();
   if (artistFilterText) {
     list = list.filter((a) => (a.name || "").toLowerCase().includes(artistFilterText));
@@ -576,7 +648,7 @@ function rowHtml(t, cur) {
   // アートワーク URL（無ければ <img> 自体を出さず空の枠を残す）
   const artUrl = getArtworkUrl(t);
   const artImg = artUrl
-    ? `<img class="track-art" src="${escapeAttr(artUrl)}" alt="" />`
+    ? `<img class="track-art" src="${escapeAttr(artUrl)}" alt="" loading="lazy" decoding="async" />`
     : `<div class="track-art"></div>`;
   // 手動並び替えモード時のみドラッグハンドル表示（アートワークの左隣に配置）。
   // ★ ただし検索/「無効非表示」フィルタが効いていると一覧は部分集合になり、
@@ -1035,6 +1107,7 @@ async function playEnabledFrom(track) {
 // 実際の二重実行防止は bulkBusy が担保するが、rescanBtn だけ無効化して追加ボタンが
 // 押せてしまう不整合を避けるための視覚フィードバック(.btn:disabled の CSS が効く)。
 function setBulkButtonsDisabled(refs, disabled) {
+  if (refs.addCombinedBtn) refs.addCombinedBtn.disabled = disabled;
   if (refs.addBtn) refs.addBtn.disabled = disabled;
   if (refs.addFolderBtn) refs.addFolderBtn.disabled = disabled;
   if (refs.addGdriveBtn) refs.addGdriveBtn.disabled = disabled;
