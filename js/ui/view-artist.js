@@ -192,7 +192,7 @@ function renderTrackRows(tracks) {
         <li class="artist-track-item ${t.enabled === false ? "is-disabled" : ""}" data-id="${escapeAttr(t.id)}">
           <span class="track-index">${index + 1}</span>
           <div class="track-main">
-            <div class="track-title">${escapeHtml(t.title || "(無題)")}</div>
+            <div class="track-title">${escapeHtml(t.title || "(無題)")}${t.memo ? ` <span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
             <div class="track-meta">${escapeHtml(albTitle)}</div>
           </div>
           <button class="track-btn-edit" data-action="edit" title="曲の情報を編集" aria-label="曲の情報を編集">✏</button>

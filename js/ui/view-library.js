@@ -460,7 +460,8 @@ function renderList(refs) {
     list = list.filter((t) =>
       (t.title || "").toLowerCase().includes(filterText) ||
       (t.artist || "").toLowerCase().includes(filterText) ||
-      (t.album || "").toLowerCase().includes(filterText)
+      (t.album || "").toLowerCase().includes(filterText) ||
+      (t.memo || "").toLowerCase().includes(filterText)
     );
   }
   if (!showDisabled) list = list.filter((t) => t.enabled !== false);
@@ -596,7 +597,7 @@ function rowHtml(t, cur) {
       ${handle}
       ${artImg}
       <div class="track-info">
-        <div class="track-title">${gdriveMark}${escapeHtml(t.title || "(無題)")}</div>
+        <div class="track-title">${gdriveMark}${escapeHtml(t.title || "(無題)")}${t.memo ? ` <span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
         <div class="track-sub">${escapeHtml(sub)}</div>
       </div>
       <div class="track-actions">

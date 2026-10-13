@@ -111,6 +111,16 @@ export function editTrackMetadata(track, onUpdated) {
           <input type="text" id="meta-genre" value="${escapeAttr(track.genre || "")}" placeholder="ジャンル" />
         </div>
       </div>
+      <div class="modal-row" style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; padding: 8px 10px; margin-top: 6px;">
+        <label for="meta-memo" style="font-weight: 600; color: var(--accent); display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+          <span>📝 メモ / バージョン情報 (Scrobble非対象)</span>
+          <span style="font-size: 10px; font-weight: normal; color: var(--fg-muted);">曲名の横にバッジ表示</span>
+        </label>
+        <input type="text" id="meta-memo" value="${escapeAttr(track.memo || "")}" placeholder="例: 京都大作戦2025、Acoustic Ver.、Live at 武道館" style="width: 100%; box-sizing: border-box;" />
+        <div style="font-size: 10px; color: var(--fg-muted); margin-top: 4px; line-height: 1.3;">
+          ※Last.fm の scrobble や歌詞取得には本来の曲名・アーティスト名のみが送信され、メモは影響しません。
+        </div>
+      </div>
     `;
 
     // アートワークプレビュー描画
@@ -305,6 +315,7 @@ export function editTrackMetadata(track, onUpdated) {
             const discNo = body.querySelector("#meta-disc-no").value.trim();
             const year = body.querySelector("#meta-year").value.trim();
             const genre = body.querySelector("#meta-genre").value.trim();
+            const memo = body.querySelector("#meta-memo")?.value.trim() || "";
 
             const patch = {
               title,
@@ -315,6 +326,7 @@ export function editTrackMetadata(track, onUpdated) {
               discNo,
               year,
               genre,
+              memo,
               userEdited: true,
             };
 
@@ -441,9 +453,10 @@ export function editAlbumMetadata(album, onUpdated) {
         <div class="meta-album-tracklist" id="meta-alb-tracklist" style="display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow-y: auto; padding-right: 4px;">
           ${album.tracks.map((t, i) => `
             <div class="meta-album-track-row" data-track-id="${escapeAttr(t.id)}" style="display: flex; gap: 6px; align-items: center; background: var(--bg-surface); padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border-color);">
-              <input type="text" class="meta-track-no-input" value="${escapeAttr(t.trackNo || String(i + 1))}" placeholder="番号" style="width: 44px; text-align: center; font-size: 11px; padding: 4px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" title="トラック番号" />
+              <input type="text" class="meta-track-no-input" value="${escapeAttr(t.trackNo || String(i + 1))}" placeholder="番号" style="width: 38px; text-align: center; font-size: 11px; padding: 4px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" title="トラック番号" />
               <input type="text" class="meta-track-title-input" value="${escapeAttr(t.title || "")}" placeholder="曲名" style="flex: 1; min-width: 0; font-size: 11px; padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" title="曲名" />
-              <input type="text" class="meta-track-artist-input" value="${escapeAttr(t.artist || "")}" placeholder="アーティスト" style="width: 100px; font-size: 11px; padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" title="アーティスト（空欄ならアルバムアーティスト）" />
+              <input type="text" class="meta-track-artist-input" value="${escapeAttr(t.artist || "")}" placeholder="アーティスト" style="width: 85px; font-size: 11px; padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" title="アーティスト（空欄ならアルバムアーティスト）" />
+              <input type="text" class="meta-track-memo-input" value="${escapeAttr(t.memo || "")}" placeholder="メモ" style="width: 85px; font-size: 11px; padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" title="メモ (例: Live, Acoustic ※Scrobble非対象)" />
             </div>
           `).join("")}
         </div>
@@ -662,10 +675,12 @@ export function editAlbumMetadata(album, onUpdated) {
               const noVal = row.querySelector(".meta-track-no-input")?.value.trim();
               const titleVal = row.querySelector(".meta-track-title-input")?.value.trim();
               const artistVal = row.querySelector(".meta-track-artist-input")?.value.trim();
+              const memoVal = row.querySelector(".meta-track-memo-input")?.value.trim();
               trackPatchMap.set(tid, {
                 trackNo: noVal,
                 title: titleVal,
                 artist: artistVal,
+                memo: memoVal !== undefined ? memoVal : undefined,
               });
             });
 
@@ -687,6 +702,7 @@ export function editAlbumMetadata(album, onUpdated) {
               if (perTrack.trackNo !== undefined && perTrack.trackNo !== "") individualPatch.trackNo = perTrack.trackNo;
               if (perTrack.artist) individualPatch.artist = perTrack.artist;
               else if (trackArtist) individualPatch.artist = trackArtist;
+              if (perTrack.memo !== undefined) individualPatch.memo = perTrack.memo;
 
               await updateTrack(t.id, individualPatch);
               releaseArtwork(t.id);

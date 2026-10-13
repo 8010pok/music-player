@@ -3095,6 +3095,40 @@
   font-size: 12px;
 }
 
+/* 曲メモ・バージョン情報バッジ (Scrobble非対象・Apple Music 風ピルバッジ) */
+.track-memo-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  line-height: 1.2;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--accent);
+  border: 1px solid rgba(0, 113, 227, 0.3);
+  margin-left: 6px;
+  vertical-align: 1px;
+  letter-spacing: 0.02em;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root[data-theme="light"] .track-memo-badge {
+  background: rgba(0, 113, 227, 0.08);
+  border-color: rgba(0, 113, 227, 0.25);
+  color: var(--accent);
+}
+
+.player-title .track-memo-badge {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  vertical-align: 2px;
+}
+
 /* ===== ライブラリ タブバー (Apple Music スタイル) ===== */
 .library-tabs-bar {
   display: flex;

@@ -83,7 +83,8 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
         <div style="flex: 1; min-width: 0;">
           <input type="text" id="yt-meta-title" class="yt-input" style="height: 28px; font-weight: 600; margin-bottom: 4px;" placeholder="曲名" />
           <input type="text" id="yt-meta-artist" class="yt-input" style="height: 26px; font-size: 12px; margin-bottom: 4px;" placeholder="アーティスト名" />
-          <input type="text" id="yt-meta-album" class="yt-input" style="height: 24px; font-size: 11px;" value="YouTube" placeholder="アルバム名" />
+          <input type="text" id="yt-meta-album" class="yt-input" style="height: 24px; font-size: 11px; margin-bottom: 4px;" value="YouTube" placeholder="アルバム名" />
+          <input type="text" id="yt-meta-memo" class="yt-input" style="height: 24px; font-size: 11px;" placeholder="メモ (例: 京都大作戦2025 / ライブ盤等 ※Scrobble非干渉)" />
         </div>
       </div>
 
@@ -237,6 +238,7 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
   const metaTitle = container.querySelector("#yt-meta-title");
   const metaArtist = container.querySelector("#yt-meta-artist");
   const metaAlbum = container.querySelector("#yt-meta-album");
+  const metaMemo = container.querySelector("#yt-meta-memo");
 
   const canvas = container.querySelector("#yt-waveform-canvas");
   const waveformWrap = container.querySelector("#yt-waveform-wrap");
@@ -679,6 +681,7 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
     const title = metaTitle.value.trim() || "無題";
     const artist = metaArtist.value.trim() || "YouTube";
     const album = metaAlbum.value.trim() || "YouTube";
+    const memo = metaMemo ? metaMemo.value.trim() : "";
     const bitrate = parseInt(bitrateSelect.value, 10) || 320;
     const filename = `${artist} - ${title}.mp3`.replace(/[\\/:*?"<>|]/g, "_");
 
@@ -780,6 +783,9 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
         addedAt: Date.now(),
         userEdited: true,
       };
+      if (memo) {
+        newTrack.memo = memo;
+      }
 
       if (currentArtworkBlob) {
         newTrack.artworkBlob = currentArtworkBlob;

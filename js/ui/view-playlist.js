@@ -23,7 +23,7 @@ import {
 } from "../store/library-db.js";
 import { setQueueAndPlay, setShuffleMode, setRepeatMode } from "../player/audio-engine.js";
 import { go } from "../router.js";
-import { toast, confirm, promptForm, escapeHtml } from "./components.js";
+import { toast, confirm, promptForm, escapeHtml, escapeAttr } from "./components.js";
 
 /**
  * プレイリスト合計時間の表示用フォーマッタ。
@@ -243,7 +243,7 @@ function trackRowHtml(t, cur) {
       ${handle}
       ${artImg}
       <div class="track-info">
-        <div class="track-title">${escapeHtml(t.title || "(無題)")}</div>
+        <div class="track-title">${escapeHtml(t.title || "(無題)")}${t.memo ? ` <span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
         <div class="track-sub">${escapeHtml(sub)}</div>
       </div>
       <div class="track-actions">

@@ -10,6 +10,7 @@ import { appState } from "../state.js";
 import { togglePlay, playNext, playPrev } from "../player/audio-engine.js";
 import { go } from "../router.js";
 import { getArtworkUrl } from "./artwork-cache.js";
+import { escapeHtml } from "./components.js";
 
 let initialized = false;
 
@@ -50,7 +51,11 @@ export function initMiniPlayer() {
       return;
     }
     root.hidden = false;
-    titleEl.textContent = track.title || "(無題)";
+    if (track.memo) {
+      titleEl.innerHTML = `${escapeHtml(track.title || "(無題)")} <span class="track-memo-badge" title="${escapeHtml(track.memo)}">${escapeHtml(track.memo)}</span>`;
+    } else {
+      titleEl.textContent = track.title || "(無題)";
+    }
     artistEl.textContent = track.artist || "(不明)";
     playBtn.classList.toggle("is-playing", !!s.isPlaying);
     playBtn.setAttribute("aria-label", s.isPlaying ? "一時停止" : "再生");

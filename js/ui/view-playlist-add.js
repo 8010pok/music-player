@@ -167,7 +167,7 @@ function trackRowHtml(t, added) {
     <li class="track-row" data-act="track" data-id="${escapeAttr(t.id)}">
       ${artImg}
       <div class="track-info">
-        <div class="track-title">${escapeHtml(t.title || "(無題)")}</div>
+        <div class="track-title">${escapeHtml(t.title || "(無題)")}${t.memo ? ` <span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
         <div class="track-sub">${escapeHtml(sub)}</div>
       </div>
       <div class="track-actions">

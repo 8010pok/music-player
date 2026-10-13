@@ -785,7 +785,11 @@ function updateUI(refs, s) {
     return;
   }
 
-  refs.title.textContent = t.title || "(無題)";
+  if (t.memo) {
+    refs.title.innerHTML = `${escapeHtml(t.title || "(無題)")} <span class="track-memo-badge" title="${escapeHtml(t.memo)}">${escapeHtml(t.memo)}</span>`;
+  } else {
+    refs.title.textContent = t.title || "(無題)";
+  }
   refs.artist.textContent = t.artist || "(不明)";
   refs.album.textContent = t.album || "";
 
