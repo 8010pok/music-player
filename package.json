@@ -2,5 +2,8 @@
   "name": "music-player",
   "version": "1.5.2",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "scripts": {
+    "test": "node run-all-tests.mjs"
+  }
 }

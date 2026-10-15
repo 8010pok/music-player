@@ -27,10 +27,52 @@ export function register(name, handler) {
   routes.set(name, handler);
 }
 
+export const LAST_VIEW_KEY = "music_player_last_view";
+
+export function getLastView() {
+  try {
+    const raw = localStorage.getItem(LAST_VIEW_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (data && typeof data.hash === "string" && data.hash.startsWith("#/")) {
+      return data;
+    }
+  } catch {}
+  return null;
+}
+
+export function saveLastView(data) {
+  try {
+    if (!data || !data.hash) return;
+    if (data.name === "welcome" || data.hash === "#/welcome") return;
+    const existing = getLastView() || {};
+    const payload = { ...existing, ...data, timestamp: Date.now() };
+    localStorage.setItem(LAST_VIEW_KEY, JSON.stringify(payload));
+  } catch {}
+}
+
 /**
  * ルーターの起動
  */
 export function start(root, fallback = "player") {
+  // スクロール位置の自動追従保存
+  let scrollSaveTimer = null;
+  if (root) {
+    root.addEventListener("scroll", () => {
+      clearTimeout(scrollSaveTimer);
+      scrollSaveTimer = setTimeout(() => {
+        if (currentRoute && currentRoute !== "welcome") {
+          saveLastView({
+            hash: location.hash || `"#/${currentRoute}"`,
+            name: currentRoute,
+            query: currentQuery || "",
+            scrollTop: root.scrollTop || 0,
+          });
+        }
+      }, 150);
+    }, { passive: true });
+  }
+
   const handle = async () => {
     const hash = location.hash || "";
     // 形式: #/name または #/name?query
@@ -41,7 +83,12 @@ export function start(root, fallback = "player") {
   };
   window.addEventListener("hashchange", handle);
   if (!location.hash) {
-    location.hash = `#/${fallback}`;
+    const last = getLastView();
+    if (last && last.hash && last.name !== "welcome") {
+      location.hash = last.hash;
+    } else {
+      location.hash = `#/${fallback}`;
+    }
   } else {
     handle();
   }
@@ -97,7 +144,32 @@ async function navigate(name, query, root, fallback) {
       currentCleanup = typeof cleanup === "function" ? cleanup : null;
       // currentRoute/currentQuery は採番直後に確定済み（上記）。ここでは表示のみ確定。
       updateNavActive(name);
-      root.scrollTop = 0;
+
+      // 保存されていたスクロール位置を復元（同じ画面への復元時）
+      let restoredScroll = false;
+      const last = getLastView();
+      if (last && (last.hash === location.hash || (last.name === name && last.query === query))) {
+        if (typeof last.scrollTop === "number" && last.scrollTop > 0) {
+          root.scrollTop = last.scrollTop;
+          restoredScroll = true;
+          // DOM の非同期レンダリング完了を待って確実にスクロール位置を復元
+          setTimeout(() => { if (myNav === navSeq) root.scrollTop = last.scrollTop; }, 50);
+          setTimeout(() => { if (myNav === navSeq) root.scrollTop = last.scrollTop; }, 180);
+        }
+      }
+      if (!restoredScroll) {
+        root.scrollTop = 0;
+      }
+
+      // 現在画面の状態を保存（welcome画面以外）
+      if (name !== "welcome") {
+        saveLastView({
+          hash: location.hash,
+          name,
+          query,
+          scrollTop: root.scrollTop,
+        });
+      }
     } catch (err) {
       // 陳腐化した遷移のエラーは握りつぶす（後発遷移の表示を壊さない）
       if (myNav !== navSeq) return;

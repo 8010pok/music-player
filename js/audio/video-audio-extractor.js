@@ -153,9 +153,9 @@ export function inferMetadataFromFilename(filename) {
   let title = "";
 
   // 数字のみのアーティスト（西暦や通番等）は誤認のため弾く
-  const isNumericOnly = parsed.artist ? /^\d+$/.test(parsed.artist.trim()) : false;
+  const isNumericOnly = parsed?.artist ? /^\d+$/.test(parsed.artist.trim()) : false;
 
-  if (parsed.artist && !isNumericOnly && !isPlaceholderArtist(parsed.artist)) {
+  if (parsed?.artist && !isNumericOnly && !isPlaceholderArtist(parsed.artist)) {
     artist = cleanArtistName(parsed.artist);
     title = cleanTrackTitle(parsed.title);
   }

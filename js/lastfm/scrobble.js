@@ -14,6 +14,7 @@ import { getAuth } from "./auth.js";
 import { appState } from "../state.js";
 import { toast } from "../ui/components.js";
 import { resolveScrobbleTrack, isPlaceholderArtist } from "./scrobble-cleaner.js";
+import { getTrack } from "../store/library-db.js";
 
 const MAX_BATCH = 50;
 let flushing = false;
@@ -105,6 +106,26 @@ function inspectScrobbleResponse(response) {
 }
 
 /**
+ * 送信直前の最新メタデータ再取得（ハイドレーション）
+ * 再生キュー内の古いスナップショットではなく、IndexedDBから最新のartist/title/albumを取得
+ */
+async function hydrateTrack(track) {
+  if (!track || !track.id) return track;
+  try {
+    const latest = await getTrack(track.id);
+    if (latest) {
+      return { ...track, ...latest };
+    }
+  } catch {}
+  return track;
+}
+
+function sanitizeLastFmValue(val) {
+  if (val == null) return "";
+  return String(val).replace(/[\u0000-\u001F\u007F-\u009F\uFEFF]/g, "").trim();
+}
+
+/**
  * Now Playing を送信
  *
  * - Last.fm の updateNowPlaying は「リアルタイム再生中ステータス」なので、
@@ -112,12 +133,14 @@ function inspectScrobbleResponse(response) {
  * - navigator.onLine が false の場合は最初から送信しない（無駄な fetch
  *   を回避）。オンライン復帰時は installOnlineListener が再送信する。
  */
-export async function sendNowPlaying(track) {
-  if (!track) return;
+export async function sendNowPlaying(rawTrack) {
+  if (!rawTrack) return;
   // オフライン時は黙ってスキップ
   if (typeof navigator !== "undefined" && navigator.onLine === false) return;
   const { apiKey, apiSecret, sessionKey } = await getAuth();
   if (!apiKey || !apiSecret || !sessionKey) return; // 認証なしは黙ってスキップ
+
+  const track = await hydrateTrack(rawTrack);
   try {
     await callPost("track.updateNowPlaying", buildTrackParams(track), apiKey, apiSecret, sessionKey);
   } catch (e) {
@@ -128,7 +151,7 @@ export async function sendNowPlaying(track) {
 
 /**
  * スクロブル送信（失敗時はキューへ）
- * @param {object} track
+ * @param {object} rawTrack
  * @param {number} _durationSec  実再生秒数（参考）
  * @param {number} [startedAtMs] 曲の再生開始時刻 (ms)。省略時は現在時刻
  * @returns {Promise<"sent" | "ignored" | "queued" | "failed" | "skipped">}
@@ -145,8 +168,11 @@ export async function sendNowPlaying(track) {
  *   startedAtMs を渡せば曲の再生開始時刻が使われ、Last.fm 上のスクロブル
  *   時刻がユーザの体感と一致する。
  */
-export async function sendScrobble(track, _durationSec, startedAtMs) {
-  if (!track) return "skipped";
+export async function sendScrobble(rawTrack, _durationSec, startedAtMs) {
+  if (!rawTrack) return "skipped";
+
+  // 送信直前に最新メタデータでハイドレーション（Google Drive曲や編集直後の情報を反映）
+  const track = await hydrateTrack(rawTrack);
 
   // Last.fm 最適化の正規化 & プレースホルダー救済（タイトルからの自動抽出等）
   const resolved = resolveScrobbleTrack(track);
@@ -171,10 +197,10 @@ export async function sendScrobble(track, _durationSec, startedAtMs) {
     ? Math.floor(startedAtMs / 1000)
     : Math.floor(Date.now() / 1000);
   const payload = {
-    artist: resolved.artist,
-    track: resolved.title,
-    album: resolved.album || "",
-    albumArtist: resolved.albumArtist || "",
+    artist: sanitizeLastFmValue(resolved.artist),
+    track: sanitizeLastFmValue(resolved.title),
+    album: sanitizeLastFmValue(resolved.album),
+    albumArtist: sanitizeLastFmValue(resolved.albumArtist),
     timestamp,
     duration: track.duration ? Math.floor(track.duration) : undefined,
     trackNumber: normalizeTrackNumber(track.trackNo),
@@ -282,11 +308,13 @@ export async function flushQueue() {
           albumArtist: p.albumArtist,
         }) || p;
 
-        params[`artist[${i}]`] = resolved.artist || p.artist || "";
-        params[`track[${i}]`] = resolved.title || p.track || "";
+        params[`artist[${i}]`] = sanitizeLastFmValue(resolved.artist || p.artist || "");
+        params[`track[${i}]`] = sanitizeLastFmValue(resolved.title || p.track || "");
         params[`timestamp[${i}]`] = String(p.timestamp || 0);
-        if (resolved.album) params[`album[${i}]`] = resolved.album;
-        if (resolved.albumArtist) params[`albumArtist[${i}]`] = resolved.albumArtist;
+        const alb = sanitizeLastFmValue(resolved.album || p.album || "");
+        if (alb) params[`album[${i}]`] = alb;
+        const albArt = sanitizeLastFmValue(resolved.albumArtist || p.albumArtist || "");
+        if (albArt) params[`albumArtist[${i}]`] = albArt;
         if (p.duration) params[`duration[${i}]`] = String(p.duration);
         // 既にキューにある旧データが "5/12" 形式の trackNumber を持つ可能性があるため
         // 送信時にも整数へ正規化する（新規 enqueue 分は payload 構築時に正規化済み）。
@@ -427,10 +455,10 @@ export async function retryScrobbleForTrack(track) {
 function buildTrackParams(track) {
   const resolved = resolveScrobbleTrack(track) || track;
   return flatten({
-    artist: resolved.artist || "",
-    track: resolved.title || "",
-    album: resolved.album || "",
-    albumArtist: resolved.albumArtist || "",
+    artist: sanitizeLastFmValue(resolved.artist),
+    track: sanitizeLastFmValue(resolved.title),
+    album: sanitizeLastFmValue(resolved.album),
+    albumArtist: sanitizeLastFmValue(resolved.albumArtist),
     duration: track.duration ? Math.floor(track.duration) : undefined,
     trackNumber: normalizeTrackNumber(track.trackNo),
   });

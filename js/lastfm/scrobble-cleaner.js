@@ -22,6 +22,9 @@ export function isPlaceholderArtist(artist) {
   const s = trimmed.toLowerCase().replace(/[\s\-_・/／\\()（）[\]「」『』]+/g, "");
   if (!s) return true;
 
+  // 数字のみ（例: "01", "2", "001"）やトラック番号形式（例: "01.", "Track 1"）はアーティスト名とみなさない
+  if (/^\d+$/.test(s) || /^track\s*\d+$/i.test(trimmed)) return true;
+
   const placeholders = new Set([
     "youtube",
     "savetube",
@@ -31,6 +34,7 @@ export function isPlaceholderArtist(artist) {
     "bilibili",
     "googledrive",
     "gdrive",
+    "drive",
     "unknownartist",
     "unknown",
     "unknownsong",
@@ -76,8 +80,8 @@ export function cleanArtistName(artist) {
   if (!artist || typeof artist !== "string") return "";
   let s = artist;
 
-  // 1. 不可視文字・ゼロ幅文字・ASCII制御文字・BOMの除去
-  s = s.replace(/[\u200B-\u200D\uFEFF\u0000-\u001F\u007F]/g, "");
+  // 1. 不可視文字・ゼロ幅文字・ASCII/C1制御文字・NULL文字・BOMの完全除去
+  s = s.replace(/[\u0000-\u001F\u007F-\u009F\uFEFF\u200B-\u200D]/g, "");
 
   // 2. URL の除去
   s = s.replace(/https?:\/\/[^\s]+/gi, "").replace(/www\.[^\s]+/gi, "");
@@ -109,8 +113,8 @@ export function cleanTrackTitle(title) {
   if (!title || typeof title !== "string") return "";
   let s = title;
 
-  // 1. 不可視文字・ゼロ幅文字・制御文字の除去
-  s = s.replace(/[\u200B-\u200D\uFEFF\u0000-\u001F\u007F]/g, "");
+  // 1. 不可視文字・ゼロ幅文字・ASCII/C1制御文字・NULL文字・BOMの完全除去
+  s = s.replace(/[\u0000-\u001F\u007F-\u009F\uFEFF\u200B-\u200D]/g, "");
 
   // 2. 末尾の拡張子除去
   s = s.replace(/\.(mp3|flac|m4a|wav|aac|ogg|opus|webm|wma)$/i, "");
@@ -146,7 +150,8 @@ export function parseArtistAndTitle(rawTitle) {
   if (delimiterMatch) {
     const p1 = cleanArtistName(delimiterMatch[1]);
     const p2 = cleanTrackTitle(delimiterMatch[2]);
-    if (p1 && p2 && !isPlaceholderArtist(p1)) {
+    // 先頭がトラック番号（例: "01", "02 - Title", "1. Title" など数字のみ）の場合はアーティスト名と誤認しない
+    if (p1 && p2 && !isPlaceholderArtist(p1) && !/^\d+$/.test(p1.replace(/[\s._-]+/g, ""))) {
       return { artist: p1, title: p2 };
     }
   }
@@ -156,7 +161,7 @@ export function parseArtistAndTitle(rawTitle) {
   if (bracketMatch) {
     const candArtist = cleanArtistName(bracketMatch[1]);
     const candTitle = cleanTrackTitle(bracketMatch[2]);
-    if (candArtist && candTitle && !isPlaceholderArtist(candArtist)) {
+    if (candArtist && candTitle && !isPlaceholderArtist(candArtist) && !/^\d+$/.test(candArtist.replace(/[\s._-]+/g, ""))) {
       return { artist: candArtist, title: candTitle };
     }
   }
@@ -166,7 +171,7 @@ export function parseArtistAndTitle(rawTitle) {
   if (revBracketMatch) {
     const candTitle = cleanTrackTitle(revBracketMatch[1]);
     const candArtist = cleanArtistName(revBracketMatch[2]);
-    if (candArtist && candTitle && !isPlaceholderArtist(candArtist)) {
+    if (candArtist && candTitle && !isPlaceholderArtist(candArtist) && !/^\d+$/.test(candArtist.replace(/[\s._-]+/g, ""))) {
       return { artist: candArtist, title: candTitle };
     }
   }
@@ -202,21 +207,13 @@ export function resolveScrobbleTrack(track) {
   let albumArtist = cleanArtistName(originalAlbumArtist);
   let resolved = false;
 
-  // 1. アーティスト名がプレースホルダー（"YouTube", "不明", etc.）の場合の自動救済
-  if (isPlaceholderArtist(artist)) {
-    // a. タイトルからの自動分離を試みる (例: "YOASOBI - アイドル" → artist: "YOASOBI", track: "アイドル")
-    const parsed = parseArtistAndTitle(originalTitle);
-    if (parsed && !isPlaceholderArtist(parsed.artist)) {
-      artist = parsed.artist;
-      title = parsed.title;
-      resolved = true;
-    } else if (!isPlaceholderArtist(albumArtist)) {
-      // b. albumArtist が有効ならそれをアーティスト名に採用
-      artist = albumArtist;
-      resolved = true;
-    }
-  } else {
-    // アーティスト名は有効だが、タイトル先頭にアーティスト名が二重に入っている場合のクリーンアップ
+  // アーティスト名決定ロジックの厳格化（誤上書き防止）:
+  // track.artist（または track.albumArtist）に有効な文字列（プレースホルダー以外の値）が
+  // 既に設定されている場合は、ファイル名やタイトルからの推測ロジックで上書きせず、
+  // 登録されている artist（なければ albumArtist）を最優先でそのまま使用する。
+  if (!isPlaceholderArtist(artist)) {
+    // 登録されたアーティスト名が有効な場合:
+    // タイトル先頭にアーティスト名が二重に入っている場合のみタイトル側をクリーンアップする
     // 例: artist: "YOASOBI", title: "YOASOBI - 夜に駆ける" → title: "夜に駆ける"
     const esc = artist.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const prefixRegex = new RegExp(`^${esc}\\s*(?:[-–—:]|\\s[\\/／]\\s)\\s*`, "i");
@@ -226,6 +223,18 @@ export function resolveScrobbleTrack(track) {
         title = stripped;
         resolved = true;
       }
+    }
+  } else if (!isPlaceholderArtist(albumArtist)) {
+    // artist が無効だが albumArtist が有効な場合
+    artist = albumArtist;
+    resolved = true;
+  } else {
+    // artist も albumArtist もプレースホルダー（無効）の場合のみ、タイトルからの自動分離を試みる
+    const parsed = parseArtistAndTitle(originalTitle);
+    if (parsed && !isPlaceholderArtist(parsed.artist)) {
+      artist = parsed.artist;
+      title = parsed.title;
+      resolved = true;
     }
   }
 

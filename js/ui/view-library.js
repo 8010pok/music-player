@@ -15,7 +15,7 @@ import { putTrack, getTrack, getAllTracks, updateTrack, setTracksOrder, deleteTr
 import { setQueueAndPlay, stopPlayback } from "../player/audio-engine.js";
 import { toast, confirm, openModal, escapeHtml, escapeAttr } from "./components.js";
 import { appState } from "../state.js";
-import { go } from "../router.js";
+import { go, getLastView, saveLastView } from "../router.js";
 import { getArtworkUrl, releaseArtwork, markArtworkBroken } from "./artwork-cache.js";
 import { editTrackMetadata } from "./metadata-editor.js";
 import { openDriveImportModal, isDriveConnected } from "../gdrive/drive-service.js";
@@ -75,12 +75,17 @@ export async function mount(root) {
   // mount 開始時に必ずクリアする。
   resetDragState();
 
-  // URL クエリからタブ復元 (デフォルト: artists)
+  // URL クエリまたは保存状態からタブ復元 (デフォルト: artists)
   const tabMatch = location.hash.match(/\btab=([a-z]+)/);
   if (tabMatch && ["tracks", "albums", "artists"].includes(tabMatch[1])) {
     activeTab = tabMatch[1];
   } else {
-    activeTab = "artists";
+    const last = getLastView();
+    if (last && ["tracks", "albums", "artists"].includes(last.tab)) {
+      activeTab = last.tab;
+    } else {
+      activeTab = "artists";
+    }
   }
   albumFilterText = "";
   albumSortKey = "title-asc";
@@ -142,6 +147,13 @@ export async function mount(root) {
       if (location.hash !== newHash) {
         history.replaceState(null, "", newHash);
       }
+      saveLastView({
+        hash: newHash,
+        name: "library",
+        query: `tab=${activeTab}`,
+        tab: activeTab,
+        scrollTop: 0,
+      });
 
       if (activeTab === "artists" && dirtyTabs.artists) {
         renderArtists(refs);
@@ -1575,12 +1587,30 @@ function installArtistIndexBar(refs) {
   let isInteracting = false;
   let lastChar = null;
   let hideBubbleTimer = null;
+  let activeItemEl = null;
 
-  function scrollToChar(char) {
-    if (!char || char === lastChar) return;
+  function scrollToChar(char, targetY, itemEl) {
+    if (!char) return;
+
+    // 触れている文字アイテムのアクティブ表示切替 (拡大 & アクセントカラー)
+    if (activeItemEl && activeItemEl !== itemEl) {
+      activeItemEl.classList.remove("is-touch-active");
+    }
+    if (itemEl) {
+      itemEl.classList.add("is-touch-active");
+      activeItemEl = itemEl;
+    }
+
+    // バブルの位置を指のY座標に追従（画面端のはみ出しガード）
+    if (typeof targetY === "number") {
+      const clampedY = Math.max(36, Math.min(window.innerHeight - 36, targetY));
+      bubble.style.top = `${clampedY}px`;
+    }
+
+    if (char === lastChar) return;
     lastChar = char;
 
-    // 中央バブル表示
+    // 左横フローティングバブル表示
     bubble.textContent = char;
     bubble.hidden = false;
     clearTimeout(hideBubbleTimer);
@@ -1619,6 +1649,10 @@ function installArtistIndexBar(refs) {
   function finishInteraction() {
     isInteracting = false;
     lastChar = null;
+    if (activeItemEl) {
+      activeItemEl.classList.remove("is-touch-active");
+      activeItemEl = null;
+    }
     clearTimeout(hideBubbleTimer);
     hideBubbleTimer = setTimeout(() => {
       bubble.hidden = true;
@@ -1626,11 +1660,37 @@ function installArtistIndexBar(refs) {
   }
 
   function handlePointerAt(clientX, clientY) {
+    let item = null;
     const el = document.elementFromPoint(clientX, clientY);
-    if (!el) return;
-    const item = el.closest(".index-char-item");
+    if (el) {
+      item = el.closest(".index-char-item");
+    }
+
+    // 隙間や少し左右に指がずれた場合、バーの最寄りアイテムにスナップ
+    if (!item) {
+      const barRect = bar.getBoundingClientRect();
+      if (
+        clientX >= barRect.left - 24 &&
+        clientX <= barRect.right + 24 &&
+        clientY >= barRect.top - 10 &&
+        clientY <= barRect.bottom + 10
+      ) {
+        const items = Array.from(bar.querySelectorAll(".index-char-item"));
+        let minDist = Infinity;
+        for (const it of items) {
+          const r = it.getBoundingClientRect();
+          const center = r.top + r.height / 2;
+          const dist = Math.abs(clientY - center);
+          if (dist < minDist) {
+            minDist = dist;
+            item = it;
+          }
+        }
+      }
+    }
+
     if (item && item.dataset.char) {
-      scrollToChar(item.dataset.char);
+      scrollToChar(item.dataset.char, clientY, item);
     }
   }
 
@@ -1681,6 +1741,10 @@ function installArtistIndexBar(refs) {
     window.removeEventListener("mousemove", onMouseMove);
     window.removeEventListener("mouseup", onMouseUp);
     clearTimeout(hideBubbleTimer);
+    if (activeItemEl) {
+      activeItemEl.classList.remove("is-touch-active");
+      activeItemEl = null;
+    }
   };
 }
 

@@ -337,14 +337,20 @@ export async function playNext() {
   const repeat = appState.get().repeatMode;
   let next = state.queueIndex + 1;
   if (next >= state.queue.length) {
-    if (repeat === "all") {
+    if (repeat === "all" || state.queue.length === 1) {
       next = 0;
     } else {
-      // 手動「次へ」でキュー末尾を超えた（リピートなし）。
-      // advanceFromEnded と同じくプレイリストコンテキストをクリアする。
-      appState.set({ isPlaying: false, currentPlaylistId: null, currentPlaylistName: null });
-      return;
+      // 複数曲・リピートなしの末尾で「次へ」が押された場合:
+      // iOS ロック画面でスキップボタンが消える・無効化されるのを防ぐため先頭曲へ戻す
+      next = 0;
     }
+  }
+  // 単一曲キューで同一曲の場合は頭出しシーク＆再生
+  if (state.queue.length === 1 || next === state.queueIndex) {
+    state.userPausedExplicitly = false;
+    try { audioEl.currentTime = 0; } catch {}
+    try { await audioEl.play(); } catch {}
+    return;
   }
   const t = state.queue[next];
   if (!t) return;
@@ -1201,6 +1207,7 @@ function onPlay() {
   appState.set({ isPlaying: true });
   state.lastTickAt = Date.now();
   if (navigator.mediaSession) navigator.mediaSession.playbackState = "playing";
+  ensureMediaSessionActions();
   saveSessionState();
   // ★ ここでは updateMediaPositionState を呼ばない。
   //   呼ぶと audio.currentTime（前曲の終端値が一瞬残る場合がある）が
@@ -1529,69 +1536,65 @@ async function resumeSessionActivator() {
   }
 }
 
-function setupMediaSession() {
-  if (!("mediaSession" in navigator)) return;
+export function ensureMediaSessionActions() {
+  if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
   try {
-    // === ここが iOS ロック画面挙動の要 ===
-    // play / pause は「discrete」: toggle しない、純粋に play / pause のみ
-    // これにより、何らかの理由で iOS が play action と pause action を続けて
-    // 投げてもトグル誤動作を起こさない。
+    // 1. seekbackward / seekforward の明示的無効化
+    //    iOS WebKit はこれらが登録されているとポッドキャストと判定し、
+    //    previoustrack / nexttrack ボタンを隠して10秒スキップボタンにしてしまう
+    try {
+      navigator.mediaSession.setActionHandler("seekbackward", null);
+      navigator.mediaSession.setActionHandler("seekforward", null);
+    } catch {}
+
+    // 2. previoustrack / nexttrack の常時有効登録
+    navigator.mediaSession.setActionHandler("previoustrack", () => playPrev());
+    navigator.mediaSession.setActionHandler("nexttrack", () => playNext());
+
+    // 3. seekto (シークバー操作用)
+    try {
+      navigator.mediaSession.setActionHandler("seekto", (d) => {
+        if (d && d.seekTime != null) seekTo(d.seekTime);
+      });
+    } catch {}
+
+    // 4. play / pause は「discrete」: toggle しない、純粋に play / pause のみ
     navigator.mediaSession.setActionHandler("play", async () => {
-      // currentTrack が無ければ自動で先頭曲を開始
       if (!appState.get().currentTrack) {
         await autoStartFirstTrack();
         return;
       }
       state.userPausedExplicitly = false;
-      // ★ ロック画面 pause→resume で iOS の audio session が抑制状態のまま
-      //   play() しても「進捗だけ進んで無音」になる問題への保険。
-      //   ユーザー操作(play action)起点で audioSession.type="playback" を
-      //   再宣言し、抑制状態の session 再アクティブ化を iOS に促す。
-      //   feature-detection + try/catch 済みで非対応環境・非iOSでは no-op。
-      //   この経路はロック画面の play ボタン押下時のみで、ended→次曲の自動
-      //   遷移(loadAndPlay/playPreloadedSync は本ハンドラを経由しない)には
-      //   一切干渉しない。playbackState/metadata にも触れないため一時停止
-      //   表示・visibility resume 抑止も不変。
       setupAudioSession();
-      // ★ セッションアクティベータ: 何も接続していない AudioContext を resume して
-      //   iOS の audio session を再活性化してから play() する。コールドスタート後の
-      //   最初のリモート再開が「進捗は進むが無音」になる実機不具合の根治策
-      //   (ベースの mp3player と同じ方式。resumeSessionActivator のコメント参照)。
       await resumeSessionActivator();
-      // ★ 再開ウォッチドッグ: play() が「失敗」または「無進行ストール」した場合に
-      //   pause→play を自動再試行する保険。正常時は no-op。
       armResumeWatchdog();
       try {
         await audioEl.play();
       } catch (e) {
-        // 失敗してもウォッチドッグが自動再試行するため、ここではログのみ残す
         console.warn("[audio-engine] remote play 失敗(ウォッチドッグが再試行します)", e);
       }
     });
+
     navigator.mediaSession.setActionHandler("pause", () => {
-      // 明示pause を記録（visibility 復帰時の自動resume 抑止に使う）
       state.userPausedExplicitly = true;
-      // 保留中の自動再試行がこの明示 pause を覆さないように解除
       clearResumeWatchdog();
       try { audioEl.pause(); } catch {}
     });
-    navigator.mediaSession.setActionHandler("previoustrack", () => playPrev());
-    navigator.mediaSession.setActionHandler("nexttrack", () => playNext());
-    try {
-      navigator.mediaSession.setActionHandler("seekto", (d) => {
-        if (d.seekTime != null) seekTo(d.seekTime);
-      });
-    } catch {}
+
     try {
       navigator.mediaSession.setActionHandler("stop", () => {
         state.userPausedExplicitly = true;
-        clearResumeWatchdog(); // 保留中の自動再試行が stop を覆さないように解除
+        clearResumeWatchdog();
         try { audioEl.pause(); } catch {}
       });
     } catch {}
   } catch (e) {
-    console.warn("mediaSession setActionHandler 失敗", e);
+    console.warn("[audio-engine] ensureMediaSessionActions 失敗", e);
   }
+}
+
+function setupMediaSession() {
+  ensureMediaSessionActions();
 }
 
 /**
@@ -1811,4 +1814,7 @@ function updateMediaSessionMetadata(track) {
   //   audio.duration ではなく track.duration を渡すことで、
   //   iOS Safari の loadedmetadata 直後の audio.duration 微小遅延を回避する。
   updateMediaPositionState({ position: 0, duration: track.duration });
+
+  // 曲メタデータ更新時にも確実にスキップボタンを維持
+  ensureMediaSessionActions();
 }
