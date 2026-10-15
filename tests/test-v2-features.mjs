@@ -148,41 +148,14 @@ async function runTests() {
 
   console.log("\n=== 4. 五十音・アルファベット縦インデックスバーとフローティングバッジ ===");
 
-  it("css/views.css: .artist-index-bar が幅30px、右余白5px、ピル型グラスモーフィズムで定義されている", () => {
+  it("view-library.js & css/views.css: 右端の縦インデックスバーとポップアップバッジが完全に削除され、余白が整理されている", () => {
     const css = fs.readFileSync(path.join(__dirname, "../css/views.css"), "utf8");
-    assert.match(css, /\.artist-index-bar\s*{[^}]*right:\s*5px;/);
-    assert.match(css, /\.artist-index-bar\s*{[^}]*width:\s*30px;/);
-    assert.match(css, /\.artist-index-bar\s*{[^}]*border-radius:\s*16px;/);
-    assert.match(css, /\.artist-index-bar\s*{[^}]*backdrop-filter:\s*blur\(12px\);/);
-  });
-
-  it("css/views.css: .index-char-item が文字サイズ12px、.is-touch-active で scale(1.3) とアクセント色になる", () => {
-    const css = fs.readFileSync(path.join(__dirname, "../css/views.css"), "utf8");
-    assert.match(css, /\.index-char-item\s*{[^}]*font-size:\s*12px;/);
-    assert.match(css, /\.is-touch-active\s*{[^}]*transform:\s*scale\(1\.3\);/);
-    assert.match(css, /\.is-touch-active\s*{[^}]*color:\s*var\(--accent\);/);
-  });
-
-  it("css/views.css: .artist-index-bubble が幅52px、高さ52px、right: 44px、文字サイズ24px、アクセント背景で定義されている", () => {
-    const css = fs.readFileSync(path.join(__dirname, "../css/views.css"), "utf8");
-    assert.match(css, /\.artist-index-bubble\s*{[^}]*right:\s*44px;/);
-    assert.match(css, /\.artist-index-bubble\s*{[^}]*width:\s*52px;/);
-    assert.match(css, /\.artist-index-bubble\s*{[^}]*height:\s*52px;/);
-    assert.match(css, /\.artist-index-bubble\s*{[^}]*font-size:\s*24px;/);
-    assert.match(css, /\.artist-index-bubble\s*{[^}]*background:\s*var\(--accent\);/);
-  });
-
-  it("css/views.css: .artist-list の右側余白がインデックスバーと干渉しないよう 38px に拡張されている", () => {
-    const css = fs.readFileSync(path.join(__dirname, "../css/views.css"), "utf8");
-    assert.match(css, /\.artist-list\s*{[^}]*padding:\s*0\s+38px\s+0\s+0;/);
-  });
-
-  it("view-library.js: installArtistIndexBar が Y座標追従、.is-touch-active 切り替え、スナップ吸着を実装している", () => {
     const code = fs.readFileSync(path.join(__dirname, "../js/ui/view-library.js"), "utf8");
-    assert.match(code, /bubble\.style\.top\s*=\s*`\${clampedY}px`/);
-    assert.match(code, /itemEl\.classList\.add\("is-touch-active"\)/);
-    assert.match(code, /activeItemEl\.classList\.remove\("is-touch-active"\)/);
-    assert.match(code, /bar\.querySelectorAll\("\.index-char-item"\)/); // スナップ探索
+    assert.doesNotMatch(css, /\.artist-index-bar/);
+    assert.doesNotMatch(css, /\.artist-index-bubble/);
+    assert.doesNotMatch(code, /artist-index-bar/);
+    assert.doesNotMatch(code, /artist-index-bubble/);
+    assert.doesNotMatch(code, /installArtistIndexBar/);
   });
 
   console.log("\n============================================================");

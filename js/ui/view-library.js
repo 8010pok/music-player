@@ -12,7 +12,7 @@
 import { extractMetadata, readDurationViaAudio } from "../metadata/index.js";
 import { mimeFromName, formatFromName } from "../metadata/util.js";
 import { putTrack, getTrack, getAllTracks, updateTrack, setTracksOrder, deleteTrack, getStorageEstimate, getBlob, removeTrackFromAllPlaylists } from "../store/library-db.js";
-import { setQueueAndPlay, stopPlayback } from "../player/audio-engine.js";
+import { setQueueAndPlay, stopPlayback, prewarmTrack } from "../player/audio-engine.js";
 import { toast, confirm, openModal, escapeHtml, escapeAttr } from "./components.js";
 import { appState } from "../state.js";
 import { go, getLastView, saveLastView } from "../router.js";
@@ -375,12 +375,15 @@ export async function mount(root) {
 
   // 一覧クリック委譲
   refs.list.addEventListener("click", (e) => onListClick(e, refs));
+  refs.list.addEventListener("pointerdown", (e) => {
+    const row = e.target.closest(".track-row");
+    if (row && row.dataset.id) {
+      prewarmTrack(row.dataset.id);
+    }
+  }, { passive: true });
 
   // 並び替え（手動ソート時のみ動作）
   const cleanupReorder = installReorder(refs);
-
-  // 五十音・アルファベット高速インデックスバー
-  const cleanupIndexBar = installArtistIndexBar(refs);
 
   // 再生中ハイライト
   unsubState = appState.subscribe(["currentTrack"], () => renderList(refs));
@@ -396,7 +399,6 @@ export async function mount(root) {
     unsubState = null;
     if (unsubPlaylist) unsubPlaylist();
     if (cleanupReorder) cleanupReorder();
-    if (cleanupIndexBar) cleanupIndexBar();
     if (virtualList) {
       virtualList.destroy();
       virtualList = null;
@@ -481,9 +483,7 @@ function render() {
         <div class="library-stats" id="artist-stats"></div>
         <div class="artist-list-container" id="artist-list-container">
           <ul class="artist-list" id="artist-list" role="list"></ul>
-          <div class="artist-index-bar" id="artist-index-bar" aria-label="五十音・アルファベット索引" hidden></div>
         </div>
-        <div class="artist-index-bubble" id="artist-index-bubble" hidden></div>
       </div>
 
       <!-- タブ 2: アルバム -->
@@ -577,8 +577,6 @@ function collectRefs(root) {
     artistStats: root.querySelector("#artist-stats"),
     artistListContainer: root.querySelector("#artist-list-container"),
     artistList: root.querySelector("#artist-list"),
-    artistIndexBar: root.querySelector("#artist-index-bar"),
-    artistIndexBubble: root.querySelector("#artist-index-bubble"),
   };
 }
 
@@ -731,10 +729,6 @@ function renderArtists(refs) {
       </li>
     `;
     if (refs.artistStats) refs.artistStats.textContent = `0 / ${allArtists.length} アーティスト`;
-    if (refs.artistIndexBar) {
-      refs.artistIndexBar.hidden = true;
-      refs.artistIndexBar.innerHTML = "";
-    }
     return;
   }
 
@@ -780,20 +774,6 @@ function renderArtists(refs) {
   }
 
   refs.artistList.innerHTML = htmlParts.join("");
-
-  // インデックスバーの描画
-  if (refs.artistIndexBar) {
-    if (showIndex) {
-      refs.artistIndexBar.hidden = false;
-      refs.artistIndexBar.innerHTML = JAPANESE_INDEX_CHARS.map((ch) => {
-        const has = presentChars.has(ch);
-        return `<span class="index-char-item ${has ? "has-data" : "is-empty"}" data-char="${escapeAttr(ch)}">${escapeHtml(ch)}</span>`;
-      }).join("");
-    } else {
-      refs.artistIndexBar.hidden = true;
-      refs.artistIndexBar.innerHTML = "";
-    }
-  }
 }
 
 function rowHtml(t, cur) {
@@ -1571,182 +1551,7 @@ function formatBytes(n) {
   return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
 }
 
-/* ============ 五十音・アルファベット高速インデックスバー ============ */
 
-/**
- * アーティスト画面右端の縦型インデックスバーのタッチ・スワイプ・クリック制御
- * @param {object} refs
- * @returns {() => void} cleanup
- */
-function installArtistIndexBar(refs) {
-  const bar = refs.artistIndexBar;
-  const bubble = refs.artistIndexBubble;
-  const list = refs.artistList;
-  if (!bar || !bubble || !list) return () => {};
-
-  let isInteracting = false;
-  let lastChar = null;
-  let hideBubbleTimer = null;
-  let activeItemEl = null;
-
-  function scrollToChar(char, targetY, itemEl) {
-    if (!char) return;
-
-    // 触れている文字アイテムのアクティブ表示切替 (拡大 & アクセントカラー)
-    if (activeItemEl && activeItemEl !== itemEl) {
-      activeItemEl.classList.remove("is-touch-active");
-    }
-    if (itemEl) {
-      itemEl.classList.add("is-touch-active");
-      activeItemEl = itemEl;
-    }
-
-    // バブルの位置を指のY座標に追従（画面端のはみ出しガード）
-    if (typeof targetY === "number") {
-      const clampedY = Math.max(36, Math.min(window.innerHeight - 36, targetY));
-      bubble.style.top = `${clampedY}px`;
-    }
-
-    if (char === lastChar) return;
-    lastChar = char;
-
-    // 左横フローティングバブル表示
-    bubble.textContent = char;
-    bubble.hidden = false;
-    clearTimeout(hideBubbleTimer);
-
-    // 触覚フィードバック
-    if (typeof navigator !== "undefined" && navigator.vibrate) {
-      try { navigator.vibrate(8); } catch {}
-    }
-
-    // 該当文字のセクションヘッダーまたは行を検索
-    let targetEl = list.querySelector(`.artist-index-header[data-index-char="${cssEscape(char)}"]`);
-    if (!targetEl) {
-      targetEl = list.querySelector(`.artist-row[data-index-char="${cssEscape(char)}"]`);
-    }
-
-    // 該当文字がリストに無い場合は、JAPANESE_INDEX_CHARS の順序で後続の直近セクションを探す
-    if (!targetEl) {
-      const idx = JAPANESE_INDEX_CHARS.indexOf(char);
-      if (idx !== -1) {
-        for (let i = idx + 1; i < JAPANESE_INDEX_CHARS.length; i++) {
-          const nextCh = JAPANESE_INDEX_CHARS[i];
-          const found = list.querySelector(`[data-index-char="${cssEscape(nextCh)}"]`);
-          if (found) {
-            targetEl = found;
-            break;
-          }
-        }
-      }
-    }
-
-    if (targetEl) {
-      targetEl.scrollIntoView({ block: "start", behavior: "auto" });
-    }
-  }
-
-  function finishInteraction() {
-    isInteracting = false;
-    lastChar = null;
-    if (activeItemEl) {
-      activeItemEl.classList.remove("is-touch-active");
-      activeItemEl = null;
-    }
-    clearTimeout(hideBubbleTimer);
-    hideBubbleTimer = setTimeout(() => {
-      bubble.hidden = true;
-    }, 280);
-  }
-
-  function handlePointerAt(clientX, clientY) {
-    let item = null;
-    const el = document.elementFromPoint(clientX, clientY);
-    if (el) {
-      item = el.closest(".index-char-item");
-    }
-
-    // 隙間や少し左右に指がずれた場合、バーの最寄りアイテムにスナップ
-    if (!item) {
-      const barRect = bar.getBoundingClientRect();
-      if (
-        clientX >= barRect.left - 24 &&
-        clientX <= barRect.right + 24 &&
-        clientY >= barRect.top - 10 &&
-        clientY <= barRect.bottom + 10
-      ) {
-        const items = Array.from(bar.querySelectorAll(".index-char-item"));
-        let minDist = Infinity;
-        for (const it of items) {
-          const r = it.getBoundingClientRect();
-          const center = r.top + r.height / 2;
-          const dist = Math.abs(clientY - center);
-          if (dist < minDist) {
-            minDist = dist;
-            item = it;
-          }
-        }
-      }
-    }
-
-    if (item && item.dataset.char) {
-      scrollToChar(item.dataset.char, clientY, item);
-    }
-  }
-
-  const onTouchStart = (e) => {
-    if (e.touches.length > 0) {
-      isInteracting = true;
-      handlePointerAt(e.touches[0].clientX, e.touches[0].clientY);
-    }
-  };
-
-  const onTouchMove = (e) => {
-    if (!isInteracting || e.touches.length === 0) return;
-    e.preventDefault(); // インデックススライド中の不要な画面スクロールを抑止
-    handlePointerAt(e.touches[0].clientX, e.touches[0].clientY);
-  };
-
-  const onTouchEnd = () => finishInteraction();
-
-  const onMouseDown = (e) => {
-    isInteracting = true;
-    handlePointerAt(e.clientX, e.clientY);
-  };
-
-  const onMouseMove = (e) => {
-    if (!isInteracting) return;
-    e.preventDefault();
-    handlePointerAt(e.clientX, e.clientY);
-  };
-
-  const onMouseUp = () => finishInteraction();
-
-  bar.addEventListener("touchstart", onTouchStart, { passive: false });
-  bar.addEventListener("touchmove", onTouchMove, { passive: false });
-  bar.addEventListener("touchend", onTouchEnd);
-  bar.addEventListener("touchcancel", onTouchEnd);
-
-  bar.addEventListener("mousedown", onMouseDown);
-  window.addEventListener("mousemove", onMouseMove);
-  window.addEventListener("mouseup", onMouseUp);
-
-  return () => {
-    bar.removeEventListener("touchstart", onTouchStart);
-    bar.removeEventListener("touchmove", onTouchMove);
-    bar.removeEventListener("touchend", onTouchEnd);
-    bar.removeEventListener("touchcancel", onTouchEnd);
-
-    bar.removeEventListener("mousedown", onMouseDown);
-    window.removeEventListener("mousemove", onMouseMove);
-    window.removeEventListener("mouseup", onMouseUp);
-    clearTimeout(hideBubbleTimer);
-    if (activeItemEl) {
-      activeItemEl.classList.remove("is-touch-active");
-      activeItemEl = null;
-    }
-  };
-}
 
 /* ============ 端末間同期モーダル ============ */
 

@@ -43,6 +43,7 @@ import { getArtworkUrl } from "../ui/artwork-cache.js";
 // 再生エラー時のスキップ通知。components.js は UI レイヤだが、
 // ユーザに「読み込めない曲をスキップした」ことを知らせるために最小依存で使う。
 import { toast } from "../ui/components.js";
+import { checkStudioLoop, loadStudioSettingsForTrack } from "./studio-service.js";
 
 let audioEl = typeof document !== "undefined" ? document.getElementById("audio-el") : null;
 let standbyAudioEl = typeof document !== "undefined" ? document.getElementById("audio-el-b") : null;
@@ -68,6 +69,9 @@ const state = {
   origQueue: null,
   onScrobble: null,
   onNowPlaying: null,
+  // 再生セッション固有ID（べき等キー）と二重Scrobble防止用同期フラグ
+  playSessionId: null,
+  hasScrobbledSession: false,
   // 「ユーザが明示的に pause した」フラグ。
   // visibility 復帰時の自動 resume 抑止に使う
   userPausedExplicitly: false,
@@ -108,6 +112,50 @@ const state = {
   preloadingId: null,     // 現在 getBlob 取得中のトラック id（二重取得防止）
   lastSessionSaveAt: 0,   // 再生セッション状態の localStorage 自動保存スロットリング用
 };
+
+// Pre-warm（先行事前取得）インメモリキャッシュ
+const prewarmCache = new Map();
+
+/**
+ * ユーザーが曲をタップ（pointerdown / touchstart）した瞬間に
+ * 先行して Blob 取得 / Object URL 生成を開始する
+ * @param {string} trackId
+ */
+export function prewarmTrack(trackId) {
+  if (!trackId || prewarmCache.has(trackId)) return;
+  const entry = {
+    promise: null,
+    objectUrl: null,
+    isStream: false,
+    createdAt: Date.now(),
+  };
+
+  entry.promise = (async () => {
+    try {
+      const blob = await getBlob(trackId);
+      if (!blob) return null;
+      const url = URL.createObjectURL(blob);
+      entry.objectUrl = url;
+      return url;
+    } catch (e) {
+      console.warn("[audio-engine] prewarm 失敗", trackId, e);
+      return null;
+    }
+  })();
+
+  prewarmCache.set(trackId, entry);
+
+  // 60秒後に自動解放
+  setTimeout(() => {
+    const e = prewarmCache.get(trackId);
+    if (e && e.objectUrl) {
+      if (e.objectUrl !== state.currentObjectUrl && e.objectUrl !== state.preloadUrl) {
+        try { URL.revokeObjectURL(e.objectUrl); } catch {}
+      }
+    }
+    prewarmCache.delete(trackId);
+  }, 60000);
+}
 
 // 連続スキップで停止する閾値。これ以上連続でスキップしたら、無限ループの
 // 可能性があると判断して停止し、ユーザに通知する。
@@ -492,7 +540,7 @@ function playPreloadedSync(index, track, url) {
     return;
   }
 
-  resetSession();
+  resetSession(track?.id);
   // この遷移の世代トークンを採番。clearTransitioning はこの世代が最新の
   // ときだけ transitioning を解除する (連打時に古い遷移が新しい遷移の
   // フラグを倒さないようにするため)。
@@ -601,6 +649,7 @@ function playPreloadedSync(index, track, url) {
           playCount: (track.playCount || 0) + 1,
           lastPlayedAt: Date.now(),
         }).catch(() => {});
+        loadStudioSettingsForTrack(track.id, audioEl).catch(() => {});
       })
       .catch((e) => {
         clearTransitioning();
@@ -648,7 +697,8 @@ function advanceFromEnded() {
     //   ローカル履歴(recordHistory)も増えない。loadAndPlay / playPreloadedSync が必ず
     //   行っている resetSession + フラグリセットと同じ扱いに揃える。
     //   音声経路(src/play/MediaSession)には触れず、集計用 state と UI ミラーのみ初期化する。
-    resetSession();
+    const curTrack = state.queue[state.queueIndex];
+    resetSession(curTrack?.id);
     appState.set({
       currentTime: 0,
       scrobbleProgress: 0,
@@ -949,32 +999,56 @@ async function loadAndPlay(track) {
   //   no-op、音声フロー(src/play/MediaSession)には一切干渉しない。
   setupAudioSession();
 
-  resetSession();
+  resetSession(track?.id);
 
-  // ★ Phase 0: blob を先に取得する（transitioning 開始前）
-  //
-  //   iOS バックグラウンド再生での無音問題の主因対策。
-  //   旧実装は「pause → 旧 URL revoke → await getBlob() → 新 URL 設定」
-  //   の順だったため、`await getBlob()` の数百 ms 〜 数秒 (iOS バック
-  //   グラウンドの IndexedDB アクセスは遅延しやすい) の間、audio.src が
-  //   revoke 済みの無効参照状態になっていた。
-  //   iOS Safari はこの状態を「audio session 終了」とみなして解放し、
-  //   後続の play() で進捗バーは進むが音だけ出ない不具合の根本原因に
-  //   なっていた。
-  //
-  //   GitHub の mp3player は `_playTrackAtIndex` 内で先に
-  //   `await this.store.getTrackData(track.id)` を実行してから
-  //   loadAudio に渡しており、loadAudio 内部の pause→revoke→新src は
-  //   すべて同期処理で完結している。Player でも同じ順序にする。
+  // ★ Phase 0: 音源 URL / Blob の取得（transitioning 開始前）
+  let targetUrl = null;
+  let isStreamUrl = false;
   let blobErr = null;
-  const blob = await getBlob(track.id).catch((e) => {
-    console.warn("[audio-engine] getBlob 失敗", track.id, e);
-    blobErr = e;
-    return null;
-  });
-  if (!blob) {
-    console.warn("blob 未発見", track.id);
-    // 確定エラー: ファイル本体が見つからない、または Google Drive 等の取得エラー → スキップ処理に進む
+
+  // 1. Prewarm キャッシュにあるか確認
+  const prewarmed = prewarmCache.get(track.id);
+  if (prewarmed) {
+    prewarmCache.delete(track.id);
+    if (prewarmed.objectUrl) {
+      targetUrl = prewarmed.objectUrl;
+    } else if (prewarmed.promise) {
+      targetUrl = await prewarmed.promise;
+    }
+  }
+
+  // 2. 未キャッシュ Google Drive 音源の場合、Service Worker のストリーミングルートで即時再生
+  const isDrive = typeof track.id === "string" && (track.id.startsWith("gd-") || track.driveFileId);
+  if (!targetUrl && isDrive && !track.cached) {
+    try {
+      const { getDriveToken } = await import("../gdrive/drive-service.js");
+      const token = await getDriveToken();
+      const driveFileId = track.driveFileId || (track.id.startsWith("gd-") ? track.id.slice(3) : track.id);
+      if (token && typeof navigator !== "undefined" && navigator.serviceWorker?.controller) {
+        targetUrl = `./gdrive-stream/${encodeURIComponent(driveFileId)}?token=${encodeURIComponent(token)}`;
+        isStreamUrl = true;
+        // バックグラウンド非ブロッキングで次回以降用キャッシュをダウンロード保存
+        getBlob(track.id).catch((e) => console.warn("[audio-engine] 背景キャッシュ保存失敗", e));
+      }
+    } catch (e) {
+      console.warn("[audio-engine] 即時ストリーム URL 生成スキップ", e);
+    }
+  }
+
+  // 3. 通常の getBlob 取得
+  if (!targetUrl) {
+    const blob = await getBlob(track.id).catch((e) => {
+      console.warn("[audio-engine] getBlob 失敗", track.id, e);
+      blobErr = e;
+      return null;
+    });
+    if (blob) {
+      targetUrl = URL.createObjectURL(blob);
+    }
+  }
+
+  if (!targetUrl) {
+    console.warn("音源データ未発見", track.id);
     const reason = (blobErr && blobErr.message) ? blobErr.message : "ファイル本体が見つかりません";
     await skipToNextOnError(reason, track);
     return;
@@ -982,18 +1056,11 @@ async function loadAndPlay(track) {
 
   // ★ 遷移中フラグを立てて、pause/timeupdate 経由の setPositionState が
   //   stale 値で iOS を汚染するのを抑止する。
-  //   getBlob 完了後にフラグ ON することで、IDB アクセス遅延中も通常の
-  //   timeupdate/pause 処理 (旧曲の) が正常動作する。
-  //   世代トークンを採番し、finally では「自分が最新遷移のとき」だけ解除する
-  //   (並行 loadAndPlay / playPreloadedSync で古い処理が新しい遷移のフラグを
-  //   倒さないようにする)。
   const myToken = ++state.transitionToken;
   state.transitioning = true;
 
   try {
     // === Phase 1〜2: 旧トラック停止 + URL 差替 (すべて同期処理) ===
-    //   ここから audioEl.play() までを「同期処理のかたまり」にすることで
-    //   audio.src が無効参照になる時間を最短化する (mp3player 流)。
     try { audioEl.pause(); } catch {}
     if (audioEl.src) {
       try { audioEl.currentTime = 0; } catch {}
@@ -1003,9 +1070,10 @@ async function loadAndPlay(track) {
       state.currentObjectUrl = null;
     }
     {
-      const url = URL.createObjectURL(blob);
-      state.currentObjectUrl = url;
-      audioEl.src = url;
+      if (!isStreamUrl) {
+        state.currentObjectUrl = targetUrl;
+      }
+      audioEl.src = targetUrl;
       try { audioEl.load(); } catch {}
       applyTrackVolume(audioEl, track);
 
@@ -1083,6 +1151,8 @@ async function loadAndPlay(track) {
           lastPlayedAt: Date.now(),
         });
       } catch {}
+
+      loadStudioSettingsForTrack(track.id, audioEl).catch(() => {});
 
       // ★ 現在の曲が再生開始した → 次曲を先読みしておく。
       //   これにより次の ended で同期的に (await なしで) 次曲へ移れる。
@@ -1197,10 +1267,12 @@ function waitForLoadedMetadata(timeoutMs = 3000) {
   });
 }
 
-function resetSession() {
+function resetSession(trackId) {
   state.sessionStartedAt = Date.now();
   state.sessionPlayed = 0;
   state.lastTickAt = state.sessionStartedAt;
+  state.hasScrobbledSession = false;
+  state.playSessionId = `${trackId || "track"}_${state.sessionStartedAt}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function onPlay() {
@@ -1239,13 +1311,6 @@ function onPause() {
 
   // ユーザー明示pause(ロック画面/アプリ内)は playbackState="paused" を設定して、
   // ロック画面に一時停止状態(再生ボタン表示・進捗停止)を正しく反映させる。
-  //   ※ 一時は「ユーザーpauseでも paused を送らない(候補A)」を試したが、ロック画面
-  //     pause→resume の無音バグは直らず(iOS 18.7.9 実機で確認)、かつ一時停止表示が
-  //     崩れるリスクがあったため復元。無音の真因はビジュアライザの AudioContext 生成
-  //     によるオーディオセッション干渉と判断し、visualizer.js 側で対処する。
-  //   ※ 旧 updateMediaPositionState({playbackRate:0}) は W3C 仕様上 setPositionState が
-  //     rate=0 で TypeError を投げる死にコードだったため復元しない(pause 位置は次の
-  //     再生再開時の更新で反映される)。
   if (navigator.mediaSession) navigator.mediaSession.playbackState = "paused";
   saveSessionState();
 }
@@ -1254,10 +1319,6 @@ function flushSessionPlayed() {
   const now = Date.now();
   if (state.lastTickAt && !audioEl.paused) {
     // ★ 再生速度を乗じて「曲コンテンツの再生秒数」を積算する。
-    //   Last.fm のスクロブル条件「曲長の半分 or 4分(早い方)」は曲の再生位置基準のため、
-    //   playbackRate≠1(本アプリは 0.25〜4x 対応)では壁時計秒のままだと 2x で取りこぼし・0.5x で早発火する。
-    //   壁時計差分に playbackRate を乗じれば曲位置換算になり仕様の発火位置と一致する(1x では従来と等価)。
-    //   pause 区間は !audioEl.paused で除外、シーク(currentTime ジャンプ)は差分加算なので影響しない点は不変。
     state.sessionPlayed += ((now - state.lastTickAt) / 1000) * (audioEl.playbackRate || 1);
   }
   state.lastTickAt = now;
@@ -1271,6 +1332,9 @@ function onTimeUpdate() {
   const dur = audioEl.duration || track.duration || 0;
   const cur = audioEl.currentTime || 0;
   appState.set({ currentTime: cur });
+
+  // A-B 区間リピート & Speed Trainer 進行チェック
+  checkStudioLoop(cur, audioEl);
 
   // 周期的に position state を更新（iOS のロック画面プログレスバーと
   // セッション維持のため）。timeupdate は ~250ms 間隔で発火するが、
@@ -1301,20 +1365,14 @@ function onTimeUpdate() {
     const progress = Math.max(ratio50, ratio4m);
     appState.set({ scrobbleProgress: progress });
 
-    if (!appState.get().scrobbledForCurrent && progress >= 1) {
-      // onScrobble は非同期で送信を開始する。完了結果（sent/queued/failed/
-      // skipped）は app.js 側で appState.scrobbleResult にセットされる。
-      // ここでは「送信中」状態を即座に反映して、UI が「送信済」と早合点しない
-      // ようにする。
-      //
-      // 第3引数 sessionStartedAt（曲の再生開始時刻 ms）を渡す:
-      //   Last.fm の timestamp 仕様は「スクロブル対象の曲が再生開始した
-      //   UNIX 時刻」が推奨。これにより Last.fm 上のスクロブル時刻が
-      //   ユーザの体感（曲を聴き始めた時刻）と一致する。
+    if (!state.hasScrobbledSession && !appState.get().scrobbledForCurrent && progress >= 1) {
+      // ★ 同期ロックフラグを即座にセット（非同期処理前の最初の1行目で多重発火を完全防止）
+      state.hasScrobbledSession = true;
       appState.set({ scrobbledForCurrent: true, scrobbleResult: "sending" });
-      if (state.onScrobble) state.onScrobble(track, dur, state.sessionStartedAt);
-      // recordHistory は Promise を返す(IDB 書込)。同期 try/catch では reject を捕捉できず
-      //   未処理 rejection になるため .catch でログ握り(updateTrack と同パターン)。
+
+      if (state.onScrobble) {
+        state.onScrobble(track, dur, state.sessionStartedAt, state.playSessionId);
+      }
       recordHistory({
         trackId: track.id,
         startedAt: state.sessionStartedAt,

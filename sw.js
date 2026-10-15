@@ -7,7 +7,7 @@
  * バージョンを上げると古いキャッシュは破棄される。
  */
 
-const CACHE_VERSION = "v1.5.2";
+const CACHE_VERSION = "v1.5.4";
 const STATIC_CACHE = `static-${CACHE_VERSION}`;
 const API_CACHE = `api-${CACHE_VERSION}`;
 const IMG_CACHE = `img-${CACHE_VERSION}`;
@@ -38,6 +38,7 @@ const PRECACHE_URLS = [
   "./js/player/audio-engine.js",
   "./js/player/visualizer.js",
   "./js/player/eq.js",
+  "./js/player/studio-service.js",
   "./js/metadata/index.js",
   "./js/metadata/util.js",
   "./js/metadata/album-util.js",
@@ -132,6 +133,12 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET") return;
 
   const url = new URL(req.url);
+
+  // 0. Google Drive 音源ストリーミング中継（Range リクエスト・アクセストークン対応）
+  if (url.pathname.includes("/gdrive-stream/")) {
+    event.respondWith(handleDriveStream(req, url));
+    return;
+  }
 
   // 1. 外部オリジン（クロスオリジン）の通信ハンドリング
   if (url.origin !== self.location.origin) {
@@ -256,3 +263,30 @@ async function trimCache(cache, maxEntries) {
     }
   } catch {}
 }
+
+/**
+ * Google Drive の alt=media を Range リクエスト対応でストリーミング中継
+ */
+async function handleDriveStream(req, url) {
+  const match = url.pathname.match(/\/gdrive-stream\/([^/?#]+)/);
+  if (!match) return new Response("Not Found", { status: 404 });
+  const fileId = decodeURIComponent(match[1]);
+  const token = url.searchParams.get("token");
+  if (!token) return new Response("Unauthorized", { status: 401 });
+
+  const headers = new Headers();
+  headers.set("Authorization", `Bearer ${token}`);
+  const range = req.headers.get("range");
+  if (range) {
+    headers.set("Range", range);
+  }
+
+  const driveUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`;
+  try {
+    const res = await fetch(driveUrl, { headers });
+    return res;
+  } catch (err) {
+    return new Response("Streaming failed", { status: 502 });
+  }
+}
+

@@ -21,7 +21,7 @@ import {
   getAllTracks,
   removeTracksFromPlaylist,
 } from "../store/library-db.js";
-import { setQueueAndPlay, setShuffleMode, setRepeatMode } from "../player/audio-engine.js";
+import { setQueueAndPlay, setShuffleMode, setRepeatMode, prewarmTrack } from "../player/audio-engine.js";
 import { go } from "../router.js";
 import { toast, confirm, promptForm, escapeHtml, escapeAttr } from "./components.js";
 
@@ -86,6 +86,12 @@ export async function mount(root) {
   refs.repeatBtn.addEventListener("click", () => toggleRepeat(refs));
   refs.addBtn.addEventListener("click", () => go("playlist-add", { id: playlist.id }));
   refs.list.addEventListener("click", (e) => onListClick(e, refs));
+  refs.list.addEventListener("pointerdown", (e) => {
+    const row = e.target.closest(".track-row");
+    if (row && row.dataset.id) {
+      prewarmTrack(row.dataset.id);
+    }
+  }, { passive: true });
   const cleanupReorder = installReorder(refs);
 
   // 初期表示: ボタン群の状態を現在のグローバル状態と同期

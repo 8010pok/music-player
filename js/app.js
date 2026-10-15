@@ -119,7 +119,7 @@ async function main() {
         console.warn("[app] sendNowPlaying 失敗", e);
       });
     },
-    onScrobble: (track, dur, startedAtMs) => {
+    onScrobble: (track, dur, startedAtMs, sessionId) => {
       const p = getPublic();
       if (p.scrobbleEnabled === false) {
         // 設定でスクロブル無効化されている場合は送信せず、UI 表示も無効を示す
@@ -135,7 +135,7 @@ async function main() {
       // startedAtMs は audio-engine から渡される曲の再生開始時刻 (ms)。
       // sendScrobble の timestamp に使われて Last.fm 上の時刻がユーザの
       // 体感に一致する。
-      sendScrobble(track, dur, startedAtMs)
+      sendScrobble(track, dur, startedAtMs, sessionId)
         .then((result) => {
           appState.set({ scrobbleResult: result || "failed" });
         })

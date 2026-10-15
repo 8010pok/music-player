@@ -9,6 +9,7 @@
  * @param {number} ms
  */
 export function toast(msg, kind = "info", ms = 2500) {
+  if (typeof document === "undefined") return;
   const root = document.getElementById("toast-root");
   if (!root) return;
   const el = document.createElement("div");

@@ -19,6 +19,17 @@ import { getTrack } from "../store/library-db.js";
 const MAX_BATCH = 50;
 let flushing = false;
 
+// 直近送信済み再生セッションIDの一覧（二重Scrobble完全防止用べき等性ガード）
+const scrobbledSessions = new Set();
+
+/**
+ * オフラインキューのフラッシュ実行中かを取得
+ * @returns {boolean}
+ */
+export function isFlushingQueue() {
+  return flushing;
+}
+
 /**
  * Last.fm の「リトライしても回復しない」永続的エラーコード。
  *
@@ -168,8 +179,20 @@ export async function sendNowPlaying(rawTrack) {
  *   startedAtMs を渡せば曲の再生開始時刻が使われ、Last.fm 上のスクロブル
  *   時刻がユーザの体感と一致する。
  */
-export async function sendScrobble(rawTrack, _durationSec, startedAtMs) {
+export async function sendScrobble(rawTrack, _durationSec, startedAtMs, sessionId) {
   if (!rawTrack) return "skipped";
+
+  // 再生セッションIDによる二重Scrobbleガード（同一セッションからの2回目以降は100%破棄）
+  if (sessionId) {
+    if (scrobbledSessions.has(sessionId)) {
+      return "skipped";
+    }
+    scrobbledSessions.add(sessionId);
+    if (scrobbledSessions.size > 500) {
+      const oldest = scrobbledSessions.values().next().value;
+      scrobbledSessions.delete(oldest);
+    }
+  }
 
   // 送信直前に最新メタデータでハイドレーション（Google Drive曲や編集直後の情報を反映）
   const track = await hydrateTrack(rawTrack);

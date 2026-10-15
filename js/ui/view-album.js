@@ -8,7 +8,7 @@
 
 import { getAllTracks, deleteTrack, removeTrackFromAllPlaylists } from "../store/library-db.js";
 import { groupTracksIntoAlbums, parseTrackIndex } from "../metadata/album-util.js";
-import { setQueueAndPlay, setShuffleMode, stopPlayback } from "../player/audio-engine.js";
+import { setQueueAndPlay, setShuffleMode, stopPlayback, prewarmTrack } from "../player/audio-engine.js";
 import { appState } from "../state.js";
 import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
 import { go } from "../router.js";
@@ -85,6 +85,12 @@ export async function mount(root) {
     refs.artWrapBtn.addEventListener("click", openAlbumEditor);
   }
   refs.list.addEventListener("click", (e) => onListClick(e, root));
+  refs.list.addEventListener("pointerdown", (e) => {
+    const row = e.target.closest(".track-row");
+    if (row && row.dataset.id) {
+      prewarmTrack(row.dataset.id);
+    }
+  }, { passive: true });
 
   // 再生中トラックのハイライト追従
   unsubState = appState.subscribe(["currentTrack", "isPlaying"], () => {
