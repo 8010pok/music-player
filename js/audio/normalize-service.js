@@ -208,12 +208,34 @@ export async function getTrackAudioBlob(track) {
 }
 
 /**
+ * 単一トラックのノーマライズ戦略を判定（非破壊か再エンコードか）
+ * @param {object} params
+ * @param {number} params.gainDb 計算された必要ゲイン (dB)
+ * @param {boolean} [params.preferNonDestructive=true]
+ * @param {boolean} [params.forceReencode=false]
+ * @returns {"non-destructive"|"reencoded"}
+ */
+export function determineNormalizationStrategy({ gainDb, preferNonDestructive = true, forceReencode = false }) {
+  if (forceReencode) return "reencoded";
+  // ゲインが 0.05dB 以下（音量を下げるか、ほぼ変化なし）なら非破壊で十分かつ音質劣化ゼロ
+  if (preferNonDestructive && gainDb <= 0.05) {
+    return "non-destructive";
+  }
+  // 音量を大きくする（プラスゲイン）場合は、iOS WebKit の <audio>.volume <= 1.0 制約のため
+  // PCM増幅＋LAME.js による MP3 320kbps 再エンコードが必要
+  return "reencoded";
+}
+
+/**
  * 単一トラックの音量をノーマライズし、IndexedDB（およびオプションで Google Drive）に保存
+ * - ハイブリッド制御: マイナスゲイン時は非破壊（音質無劣化・瞬時完了）、プラス増幅時は高品質再エンコード
  * @param {object} track
  * @param {object} [options]
  * @param {"reference"|"peak"|"manual"|"none"} [options.mode="reference"]
  * @param {number} [options.targetRmsDb] 基準音量 (未指定時は設定または -14.0dBFS)
  * @param {number} [options.manualGainDb=0]
+ * @param {boolean} [options.preferNonDestructive=true] 音量を下げる曲で非破壊を優先
+ * @param {boolean} [options.forceReencode=false] 常に再エンコードを強制
  * @param {boolean} [options.updateDrive=false] Google Drive 上のファイルも上書き更新するか
  * @param {(progress: { percent: number, statusText: string }) => void} [options.onProgress]
  * @returns {Promise<{
@@ -222,13 +244,16 @@ export async function getTrackAudioBlob(track) {
  *   gainDb: number,
  *   finalPeakDb: number,
  *   finalRmsDb: number,
- *   limited: boolean
+ *   limited: boolean,
+ *   strategy: "non-destructive"|"reencoded"
  * }>}
  */
 export async function normalizeTrackAudio(track, {
   mode = "reference",
   targetRmsDb = null,
   manualGainDb = 0,
+  preferNonDestructive = true,
+  forceReencode = false,
   updateDrive = false,
   onProgress = null,
 } = {}) {
@@ -253,8 +278,71 @@ export async function normalizeTrackAudio(track, {
 
   if (onProgress) onProgress({ percent: 15, statusText: "音量を解析中…" });
 
-  // 3. ノーマライズ処理（解析 & ゲイン算出 & MP3 320kbps エンコード）
-  const result = await processAudioNormalization(sourceBlob, {
+  // 3. ラウドネス解析
+  const { loudness: sourceLoudness, audioBuffer } = await analyzeBlobLoudness(sourceBlob);
+  if (onProgress) onProgress({ percent: 35, statusText: "ゲインを算出中…" });
+
+  // 4. ノーマライズゲイン算出
+  const gainResult = calculateNormalizeGain({
+    sourceLoudness,
+    mode,
+    targetRmsDb: effectiveTargetRmsDb,
+    manualGainDb,
+    maxPeakDb: -0.3,
+  });
+
+  // 5. ハイブリッド戦略の決定
+  const strategy = determineNormalizationStrategy({
+    gainDb: gainResult.gainDb,
+    preferNonDestructive,
+    forceReencode,
+  });
+
+  if (strategy === "non-destructive") {
+    // === 非破壊ノーマライズ (Non-destructive) ===
+    // 音量を下げるだけなので再エンコードを行わず、メタデータに normalizedGainDb を記録。
+    // 再生時に <audio>.volume をスケールさせることで音質劣化ゼロ・エンコード時間ゼロ。
+    if (onProgress) onProgress({ percent: 85, statusText: "非破壊ゲイン情報を保存中…" });
+
+    const patch = {
+      normalized: true,
+      normalizedType: "non-destructive",
+      normalizedGainDb: gainResult.gainDb,
+      normalizedAt: Date.now(),
+      originalRmsDb: sourceLoudness.rmsDb,
+      originalPeakDb: sourceLoudness.peakDb,
+      normalizedRmsDb: gainResult.finalRmsDb,
+      normalizedPeakDb: gainResult.finalPeakDb,
+    };
+
+    await updateTrack(track.id, patch);
+    const updatedTrack = { ...track, ...patch };
+
+    // 再生中の曲なら appState も更新
+    const cur = appState.get().currentTrack;
+    if (cur && cur.id === track.id) {
+      appState.set({ currentTrack: updatedTrack });
+    }
+
+    if (onProgress) onProgress({ percent: 100, statusText: "完了（非破壊・音質無劣化）！" });
+
+    return {
+      track: updatedTrack,
+      gain: gainResult.gain,
+      gainDb: gainResult.gainDb,
+      finalPeakDb: gainResult.finalPeakDb,
+      finalRmsDb: gainResult.finalRmsDb,
+      limited: gainResult.limited,
+      strategy: "non-destructive",
+    };
+  }
+
+  // === 再エンコードノーマライズ (Re-encoded) ===
+  // 音量をプラス増幅するため、iOS の <audio>.volume <= 1.0 制約を突破すべく
+  // LAME.js による MP3 320kbps 高品質再エンコードを実行
+  if (onProgress) onProgress({ percent: 45, statusText: "増幅用エンコードを開始…" });
+
+  const result = await processAudioNormalization(audioBuffer, {
     track,
     mode,
     targetRmsDb: effectiveTargetRmsDb,
@@ -264,7 +352,7 @@ export async function normalizeTrackAudio(track, {
       if (onProgress) {
         onProgress({
           percent: pct,
-          statusText: pct < 45 ? "音量を解析中…" : `ノーマライズ変換中 (${pct}%)…`,
+          statusText: `ノーマライズ変換中 (${pct}%)…`,
         });
       }
     },
@@ -272,11 +360,12 @@ export async function normalizeTrackAudio(track, {
 
   if (onProgress) onProgress({ percent: 90, statusText: "ライブラリに保存中…" });
 
-  // 4. メタデータの更新
   const patch = {
     cached: true,
     normalized: true,
-    normalizedGainDb: result.gainDb,
+    normalizedType: "reencoded",
+    normalizedGainDb: 0, // 音源自体が増幅済みのため再生時ゲインは0
+    appliedGainDb: result.gainDb,
     normalizedAt: Date.now(),
     originalRmsDb: result.sourceLoudness.rmsDb,
     originalPeakDb: result.sourceLoudness.peakDb,
@@ -298,7 +387,7 @@ export async function normalizeTrackAudio(track, {
     appState.set({ currentTrack: updatedTrack });
   }
 
-  // 5. Google Drive 上のファイルを更新（オプション）
+  // 6. Google Drive 上のファイルを更新（オプション）
   if (updateDrive && (track.driveFileId || isDriveTrackId(track.id))) {
     const driveFileId = track.driveFileId || track.id.slice(3);
     if (onProgress) onProgress({ percent: 95, statusText: "Google Drive に上書き保存中…" });
@@ -319,5 +408,6 @@ export async function normalizeTrackAudio(track, {
     finalPeakDb: result.finalPeakDb,
     finalRmsDb: result.finalRmsDb,
     limited: result.limited,
+    strategy: "reencoded",
   };
 }

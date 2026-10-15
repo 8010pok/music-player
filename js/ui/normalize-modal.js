@@ -19,6 +19,7 @@ import {
 import {
   getTrackAudioBlob,
   normalizeTrackAudio,
+  determineNormalizationStrategy,
 } from "../audio/normalize-service.js";
 
 /**
@@ -123,6 +124,12 @@ export async function openNormalizeModal(track, opts = {}) {
           <!-- 調整サマリーメッセージ -->
           <div id="norm-detail-summary" style="font-size: 11px; color: var(--fg-muted); line-height: 1.5; padding: 6px 0;">
             計算中…
+          </div>
+
+          <!-- 処理戦略バッジ (非破壊 vs 再エンコード) -->
+          <div id="norm-strategy-info" style="margin-top: 6px; padding: 8px; border-radius: 6px; background: var(--bg-elev-2); font-size: 11px; display: flex; align-items: center; justify-content: space-between;">
+            <span style="color: var(--fg-muted);">保存方式:</span>
+            <span id="norm-strategy-badge" class="norm-badge">自動判定中…</span>
           </div>
 
           <!-- 試聴プレビューバー -->
@@ -242,6 +249,7 @@ export async function openNormalizeModal(track, opts = {}) {
   const savingProgressWrap = container.querySelector("#norm-saving-progress-wrap");
   const savingStatus = container.querySelector("#norm-saving-status");
   const savingBar = container.querySelector("#norm-saving-bar");
+  const strategyBadge = container.querySelector("#norm-strategy-badge");
 
   // 基準曲ピッカー要素
   const refOverlay = container.querySelector("#norm-ref-picker-overlay");
@@ -362,11 +370,29 @@ export async function openNormalizeModal(track, opts = {}) {
     if (mode === "none") {
       gainBadge.textContent = "オフ (0dB)";
       gainBadge.className = "norm-badge";
+      if (strategyBadge) {
+        strategyBadge.textContent = "変更なし";
+        strategyBadge.className = "norm-badge";
+        strategyBadge.style.color = "var(--fg-muted)";
+      }
       detailSummary.innerHTML = `音量調整なし (元音源 Peak: <strong>${sourceLoudness.peakDb.toFixed(1)} dBFS</strong>, RMS: <strong>${sourceLoudness.rmsDb.toFixed(1)} dBFS</strong>)`;
     } else {
       const sign = result.gainDb >= 0 ? "+" : "";
       gainBadge.textContent = `${sign}${result.gainDb.toFixed(1)} dB (${result.gain.toFixed(2)}x)`;
       gainBadge.className = "norm-badge accent";
+
+      const strategy = determineNormalizationStrategy({ gainDb: result.gainDb });
+      if (strategyBadge) {
+        if (strategy === "non-destructive") {
+          strategyBadge.textContent = "✨ 非破壊 (音質無劣化・瞬時完了)";
+          strategyBadge.className = "norm-badge accent";
+          strategyBadge.style.color = "#34a853";
+        } else {
+          strategyBadge.textContent = "⚡ 高品質再エンコード (MP3 320kbps)";
+          strategyBadge.className = "norm-badge accent";
+          strategyBadge.style.color = "var(--accent)";
+        }
+      }
 
       let modeMsg = "";
       if (mode === "reference") {
@@ -488,7 +514,8 @@ export async function openNormalizeModal(track, opts = {}) {
         },
       });
 
-      toast(`✅ 「${track.title || "曲"}」の音量をノーマライズしました (${res.gainDb >= 0 ? "+" : ""}${res.gainDb.toFixed(1)} dB)`, "ok", 4000);
+      const strategyText = res.strategy === "non-destructive" ? "非破壊・無劣化" : "再エンコード";
+      toast(`✅ 「${track.title || "曲"}」の音量をノーマライズしました (${res.gainDb >= 0 ? "+" : ""}${res.gainDb.toFixed(1)} dB / ${strategyText})`, "ok", 4000);
       if (typeof onCompleted === "function") {
         onCompleted(res.track);
       }

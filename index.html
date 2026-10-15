@@ -49,8 +49,9 @@
        絶対にビューと一緒に再生成しないこと。
        AudioContext を音声経路に挟むとロック画面で停止するため、
        これは独立した最上位ノードとして DOM に常駐させる。
-       ============================================================ -->
+  <!-- デュアル <audio> による真のギャップレス（ピンポン）再生用常駐要素 -->
   <audio id="audio-el" preload="metadata" playsinline></audio>
+  <audio id="audio-el-b" preload="metadata" playsinline></audio>
 
   <!-- 全体ヘッダー（タイトル + 状態表示 + 統計取得進捗） -->
   <header class="app-header" role="banner">

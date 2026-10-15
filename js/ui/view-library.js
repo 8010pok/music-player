@@ -24,12 +24,14 @@ import { exportLibraryToDrive, importLibraryFromDrive, getDriveSyncFileInfo, syn
 import { groupTracksIntoAlbums, sortAlbums } from "../metadata/album-util.js";
 import { groupTracksIntoArtists, sortArtists, getIndexChar, JAPANESE_INDEX_CHARS } from "../metadata/artist-util.js";
 import { findDuplicateInList, cleanDuplicateTracks, findDuplicateGroups } from "../store/dedup-service.js";
+import { VirtualList } from "./virtual-scroll.js";
 
 // ファイル拡張子の許可リスト
 const ALLOW_EXT = /\.(mp3|m4a|m4b|aac|mp4|flac|ogg|oga|opus|wav|webm)$/i;
 
 let unsubState = null;
 let tracksCache = [];
+let virtualList = null;
 // 直近の renderList で生成した「画面に見えているそのままの順序の」配列。
 // 再生キューはこれを使う（ソート/フィルタを尊重する）
 let visibleTracks = [];
@@ -87,6 +89,18 @@ export async function mount(root) {
   const refs = collectRefs(root);
   // この画面を「現在表示中」として記録する(後追い完了処理/遅延失敗ハンドラの判定用)。
   activeRefs = refs;
+
+  // 仮想スクロールの初期化（60件以上で発動、DOM要素削減 & スムーズ追従）
+  if (refs.list) {
+    virtualList = new VirtualList({
+      container: refs.list,
+      itemHeight: 58,
+      buffer: 8,
+      minItemsForVirtual: 60,
+      renderItem: (track) => rowHtml(track, appState.get().currentTrack),
+      scrollParent: window,
+    });
+  }
 
   // ★ 検索/ソート/表示状態を、render() が描画したコントロールの初期値
   //   (検索空・手動並び替え・無効も表示)に合わせてリセットする。これをしないと
@@ -332,6 +346,10 @@ export async function mount(root) {
     if (unsubPlaylist) unsubPlaylist();
     if (cleanupReorder) cleanupReorder();
     if (cleanupIndexBar) cleanupIndexBar();
+    if (virtualList) {
+      virtualList.destroy();
+      virtualList = null;
+    }
     // この画面はもう表示されていない。後追い処理/遅延失敗ハンドラが誤って描画・通知しないよう
     //   activeRefs を解除する(同 refs で再マウントされた場合は mount が再セットする)。
     activeRefs = null;
@@ -553,7 +571,17 @@ function renderList(refs) {
 
   // 表示順をキャッシュ（再生時はこの順でキューを作る）
   visibleTracks = list;
-  refs.list.innerHTML = list.map((t) => rowHtml(t, cur)).join("");
+
+  // 手動並び替えモード（ドラッグ可能状態）のときは仮想スクロールをバイパスして全件レンダリング
+  const filterActive = !!filterText || !showDisabled;
+  const isManualSort = sortKey === "manual-asc" && !filterActive;
+
+  if (virtualList && virtualList.container === refs.list) {
+    virtualList.setItems(list, { bypass: isManualSort || !!dragState });
+  } else {
+    refs.list.innerHTML = list.map((t) => rowHtml(t, cur)).join("");
+  }
+
   refs.libStats.textContent = `${list.length} / ${tracksCache.length} 曲${storageInfo}`;
 }
 

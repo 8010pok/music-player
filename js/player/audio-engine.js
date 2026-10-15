@@ -44,8 +44,9 @@ import { getArtworkUrl } from "../ui/artwork-cache.js";
 // ユーザに「読み込めない曲をスキップした」ことを知らせるために最小依存で使う。
 import { toast } from "../ui/components.js";
 
-const audioEl = document.getElementById("audio-el");
-if (!audioEl) {
+let audioEl = typeof document !== "undefined" ? document.getElementById("audio-el") : null;
+let standbyAudioEl = typeof document !== "undefined" ? document.getElementById("audio-el-b") : null;
+if (!audioEl && typeof document !== "undefined") {
   // index.html の <audio id="audio-el"> は iOS バックグラウンド再生の生命線で
   // あり、これが無い場合は他の全機能が動かない。警告ではなく throw して
   // 起動シーケンス全体を中断し、ユーザに明示的に異常を伝える。
@@ -55,6 +56,7 @@ if (!audioEl) {
 
 // 内部状態
 const state = {
+  userVolume: 1.0,        // ユーザー設定音量 (0.0〜1.0)
   currentObjectUrl: null,
   // ※ artwork URL は artwork-cache モジュールが ID 単位で管理する。
   //   ここで個別に保持・revoke すると iOS ロック画面と競合するため持たない。
@@ -133,35 +135,10 @@ export function initAudioEngine({ onNowPlaying, onScrobble } = {}) {
   setupVisibilityGuard();
   setupTerminationCleanup();
 
-  audioEl.addEventListener("play", onPlay);
-  audioEl.addEventListener("pause", onPause);
-  audioEl.addEventListener("ended", onEnded);
-  audioEl.addEventListener("timeupdate", onTimeUpdate);
-  audioEl.addEventListener("durationchange", () => {
-    appState.set({ duration: audioEl.duration || 0 });
-    // ★ ここで updateMediaPositionState を呼ばない。
-    //   durationchange のタイミングでは audio.currentTime が前曲の
-    //   stale 値を引きずっていることがあり、それが iOS に流れると
-    //   ロック画面の進捗バーが MAX 等にずれる原因になる。
-    //   position state は loadAndPlay 内で track.duration を使って
-    //   明示的に更新する。
-  });
-  audioEl.addEventListener("error", (e) => {
-    // ★ ここでは自動的に次曲スキップしない（mp3player の挙動に合わせる）。
-    //
-    //   理由: iOS Safari の PWA バックグラウンド再生中、audio.error は
-    //   「再生継続中の一過性イベント」としても発火する（audio session の
-    //   一時取り上げ・src 切替時の空src経由・ネットワーク bufer 境界等）。
-    //   ここで自動的に次曲へ進めてしまうと、ユーザ報告にあるように
-    //   「1 曲目の途中で停止 → 次曲に切替 → そこも停止」のような連鎖が
-    //   発生する。ended イベントは別途正常に発火するので、自然遷移は
-    //   そちらに任せ、ここではログのみ残す。
-    console.warn("[audio-engine] audio error", e, audioEl.error);
-  });
-
   // === 再生安定化ウォッチドッグ (iOS / モバイル ストール・バッファ待ちからの自動復旧) ===
   let stallRecoveryTimer = null;
-  const onStallOrWaiting = () => {
+  const onStallOrWaiting = (target) => {
+    if (target !== audioEl) return;
     if (state.userPausedExplicitly || !appState.get().isPlaying || state.transitioning) return;
     if (stallRecoveryTimer) clearTimeout(stallRecoveryTimer);
     stallRecoveryTimer = setTimeout(() => {
@@ -172,16 +149,42 @@ export function initAudioEngine({ onNowPlaying, onScrobble } = {}) {
       }
     }, 2500);
   };
-  audioEl.addEventListener("waiting", onStallOrWaiting);
-  audioEl.addEventListener("stalled", onStallOrWaiting);
-  audioEl.addEventListener("playing", () => {
-    if (stallRecoveryTimer) {
-      clearTimeout(stallRecoveryTimer);
-      stallRecoveryTimer = null;
-    }
-  });
 
-  audioEl.volume = clampVolume(audioEl.volume);
+  // デュアル <audio> 用イベントリスナー登録
+  // スタンバイ要素のイベントがアクティブ要素の再生状態を汚染しないよう e.target === audioEl でガード
+  function attachElementListeners(el) {
+    if (!el) return;
+    el.addEventListener("play", (e) => { if (e.target === audioEl) onPlay(e); });
+    el.addEventListener("pause", (e) => { if (e.target === audioEl) onPause(e); });
+    el.addEventListener("ended", (e) => { if (e.target === audioEl) onEnded(e); });
+    el.addEventListener("timeupdate", (e) => { if (e.target === audioEl) onTimeUpdate(e); });
+    el.addEventListener("durationchange", (e) => {
+      if (e.target === audioEl) {
+        appState.set({ duration: audioEl.duration || 0 });
+      }
+    });
+    el.addEventListener("error", (e) => {
+      if (e.target === audioEl) {
+        console.warn("[audio-engine] audio error", e, audioEl.error);
+      }
+    });
+    el.addEventListener("waiting", (e) => onStallOrWaiting(e.target));
+    el.addEventListener("stalled", (e) => onStallOrWaiting(e.target));
+    el.addEventListener("playing", (e) => {
+      if (e.target === audioEl && stallRecoveryTimer) {
+        clearTimeout(stallRecoveryTimer);
+        stallRecoveryTimer = null;
+      }
+    });
+  }
+
+  attachElementListeners(audioEl);
+  if (standbyAudioEl) {
+    attachElementListeners(standbyAudioEl);
+  }
+
+  state.userVolume = clampVolume(audioEl.volume ?? 1.0);
+  applyTrackVolume(audioEl);
 
   // 起動時に EQ 設定（有効化時のみ初期化）と保存済みエフェクトを全て反映
   const pub = getPublic();
@@ -252,6 +255,42 @@ export function setPlaybackRate(rate, preservePitch = true) {
 function clampVolume(v) {
   if (!isFinite(v)) return 1;
   return Math.max(0, Math.min(1, v));
+}
+
+/**
+ * ユーザー音量設定とトラック情報から実効音量を計算
+ * 非破壊ノーマライズ適用曲の場合は normalizedGainDb (<= 0.05) に応じて減衰
+ * @param {number} userVol ユーザー設定音量 (0.0〜1.0)
+ * @param {object} [track] 対象トラック
+ * @returns {number}
+ */
+export function computeTrackVolume(userVol, track) {
+  const base = clampVolume(isFinite(userVol) ? userVol : 1.0);
+  if (!track) return base;
+  if (track.normalized && track.normalizedType === "non-destructive" && typeof track.normalizedGainDb === "number") {
+    const gainLinear = Math.min(1.0, Math.pow(10, track.normalizedGainDb / 20));
+    return clampVolume(base * gainLinear);
+  }
+  return base;
+}
+
+/**
+ * 対象の <audio> 要素に実効音量を適用
+ * @param {HTMLAudioElement} [targetEl]
+ * @param {object} [targetTrack]
+ */
+export function applyTrackVolume(targetEl = audioEl, targetTrack = appState.get().currentTrack) {
+  if (!targetEl) return;
+  targetEl.volume = computeTrackVolume(state.userVolume, targetTrack);
+}
+
+/**
+ * 保存された設定から実効再生速度を取得
+ * @returns {number}
+ */
+export function getEffectivePlaybackRate() {
+  const pub = getPublic();
+  return Math.max(0.25, Math.min(4, Number(pub.playbackRate) || 1.0));
 }
 
 /* ============ 外部API ============ */
@@ -357,6 +396,12 @@ function clearPreload() {
   state.preloadTrackId = null;
   state.preloadingId = null;
   state.preloadToken++; // in-flight の getBlob を stale 化して破棄させる
+  if (standbyAudioEl) {
+    try {
+      standbyAudioEl.removeAttribute("src");
+      standbyAudioEl.load();
+    } catch {}
+  }
 }
 
 /**
@@ -400,6 +445,15 @@ function schedulePreload() {
       }
       state.preloadTrackId = targetId;
       state.preloadUrl = url;
+
+      // ★ デュアル <audio> ピンポン: スタンバイ要素があれば裏側で先行バッファロード
+      if (standbyAudioEl) {
+        try {
+          standbyAudioEl.src = url;
+          standbyAudioEl.preload = "auto";
+          standbyAudioEl.load();
+        } catch (_) {}
+      }
     })
     .catch((e) => console.warn("[audio-engine] 次曲プリロード失敗", e))
     .finally(() => {
@@ -465,19 +519,48 @@ function playPreloadedSync(index, track, url) {
 
   state.userPausedExplicitly = false;
   // --- ここから play() まで同期 ---
-  audioEl.src = url;
-  try { audioEl.load(); } catch {}
 
-  // ★ MediaSession の metadata は play() の「前」に確定する。
-  //   play() の「後」に new MediaMetadata() を生成すると、iOS Safari が
-  //   それを「新しい audio session の開始」とみなして音声出力を切り、
-  //   ロック画面の進捗バーは進むのに音が出ない不具合になる
-  //   (v1.0.88 で loadAndPlay の Phase4 metadata 再生成を除去した時と同じ原因)。
-  //   loadAndPlay の Phase3 と同様、必ず play() 前に metadata を置く。
-  //   duration はパース済み track.duration を使うため loadedmetadata 待ち不要。
-  updateMediaSessionMetadata(track);
+  // ★ デュアル <audio> による真のピンポンギャップレス再生判定
+  // スタンバイ要素が存在し、裏側で既にこの url が先行ロードされている場合
+  const canPingPong = standbyAudioEl &&
+                      standbyAudioEl.src &&
+                      standbyAudioEl.src.includes(url.split("#")[0]);
 
-  const playPromise = audioEl.play();
+  let playPromise = null;
+  if (canPingPong) {
+    // --- ピンポン・スワップ (無音時間 0ms で裏側へ切り替え) ---
+    const oldAudio = audioEl;
+    try { oldAudio.pause(); } catch {}
+
+    audioEl = standbyAudioEl;
+    standbyAudioEl = oldAudio;
+
+    audioEl.loop = false;
+    audioEl.playbackRate = getEffectivePlaybackRate();
+    applyTrackVolume(audioEl, track);
+
+    const pub = getPublic();
+    if (pub.enableAudioEffects) {
+      try { applyEffectsSetting(audioEl, true); } catch (_) {}
+    }
+
+    updateMediaSessionMetadata(track);
+    playPromise = audioEl.play();
+
+    // 旧アクティブ要素（現スタンバイ）のリソース解放
+    try {
+      standbyAudioEl.removeAttribute("src");
+      standbyAudioEl.load();
+    } catch {}
+  } else {
+    // --- フォールバック (単一要素またはスタンバイ未ロード時) ---
+    audioEl.src = url;
+    try { audioEl.load(); } catch {}
+    audioEl.playbackRate = getEffectivePlaybackRate();
+    applyTrackVolume(audioEl, track);
+    updateMediaSessionMetadata(track);
+    playPromise = audioEl.play();
+  }
   // --- play() 発火完了。以降は同期でなくてもよい ---
 
   // play() の「後」は position state のみ再確定する (新 MediaMetadata は作らない)。
@@ -682,7 +765,10 @@ export function seekTo(sec) {
   try { audioEl.currentTime = Math.max(0, sec); } catch (e) { console.warn("seek 失敗", e); }
 }
 
-export function setVolume(v) { audioEl.volume = clampVolume(v); }
+export function setVolume(v) {
+  state.userVolume = clampVolume(v);
+  applyTrackVolume(audioEl);
+}
 
 /**
  * シャッフル ON/OFF
@@ -780,6 +866,10 @@ export function stopPlayback() {
 
   try { audioEl.pause(); } catch {}
   try { audioEl.removeAttribute("src"); audioEl.load(); } catch {}
+  if (standbyAudioEl) {
+    try { standbyAudioEl.pause(); } catch {}
+    try { standbyAudioEl.removeAttribute("src"); standbyAudioEl.load(); } catch {}
+  }
   if (state.currentObjectUrl) {
     try { URL.revokeObjectURL(state.currentObjectUrl); } catch {}
     state.currentObjectUrl = null;
@@ -817,6 +907,7 @@ export function stopPlayback() {
 }
 
 export function getAudioElement() { return audioEl; }
+export function getStandbyAudioElement() { return standbyAudioEl; }
 export function getQueue() { return state.queue.slice(); }
 
 /* ============ 内部実装 ============ */
@@ -910,6 +1001,7 @@ async function loadAndPlay(track) {
       state.currentObjectUrl = url;
       audioEl.src = url;
       try { audioEl.load(); } catch {}
+      applyTrackVolume(audioEl, track);
 
       appState.set({
         currentTrack: track,

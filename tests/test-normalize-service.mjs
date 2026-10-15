@@ -10,6 +10,7 @@ import {
 } from "../js/audio/mp3-encoder.js";
 import {
   processAudioNormalization,
+  determineNormalizationStrategy,
 } from "../js/audio/normalize-service.js";
 import {
   isDriveTrackId,
@@ -230,6 +231,36 @@ asyncTest("processAudioNormalization でモック AudioBuffer から MP3 320kbps
   ok(typeof result.finalPeakDb === "number");
   ok(typeof result.finalRmsDb === "number");
   ok(progressCalled, "進捗コールバックが呼ばれたこと");
+});
+
+console.log("=== 4. ハイブリッド ノーマライズ戦略判定テスト ===");
+
+test("determineNormalizationStrategy: マイナスゲイン時は非破壊 (non-destructive) を選択", () => {
+  // 音量を下げる曲 (-3.0dB): 非破壊・無劣化
+  const strat1 = determineNormalizationStrategy({ gainDb: -3.0 });
+  strictEqual(strat1, "non-destructive");
+
+  // ゲインがほぼ 0 の曲 (0.0dB): 非破壊
+  const strat2 = determineNormalizationStrategy({ gainDb: 0.0 });
+  strictEqual(strat2, "non-destructive");
+
+  // ゲインが +0.03dB (微小): 非破壊
+  const strat3 = determineNormalizationStrategy({ gainDb: 0.03 });
+  strictEqual(strat3, "non-destructive");
+});
+
+test("determineNormalizationStrategy: プラス増幅時は再エンコード (reencoded) を選択", () => {
+  // 音量を上げる曲 (+4.5dB): iOS の <audio>.volume <= 1.0 制約のため再エンコード
+  const strat1 = determineNormalizationStrategy({ gainDb: 4.5 });
+  strictEqual(strat1, "reencoded");
+
+  // forceReencode が指定されている場合、マイナスゲインでも強制再エンコード
+  const strat2 = determineNormalizationStrategy({ gainDb: -2.0, forceReencode: true });
+  strictEqual(strat2, "reencoded");
+
+  // preferNonDestructive が false の場合
+  const strat3 = determineNormalizationStrategy({ gainDb: -2.0, preferNonDestructive: false });
+  strictEqual(strat3, "reencoded");
 });
 
 console.log(`\n========================================`);

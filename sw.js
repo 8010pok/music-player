@@ -7,7 +7,7 @@
  * バージョンを上げると古いキャッシュは破棄される。
  */
 
-const CACHE_VERSION = "v1.4.3";
+const CACHE_VERSION = "v1.4.4";
 const STATIC_CACHE = `static-${CACHE_VERSION}`;
 const API_CACHE = `api-${CACHE_VERSION}`;
 const IMG_CACHE = `img-${CACHE_VERSION}`;
@@ -65,6 +65,7 @@ const PRECACHE_URLS = [
   "./js/workers/stats-worker.js",
   "./js/ui/components.js",
   "./js/ui/artwork-cache.js",
+  "./js/ui/virtual-scroll.js",
   "./js/ui/metadata-editor.js",
   "./js/ui/normalize-modal.js",
   "./js/ui/view-welcome.js",
