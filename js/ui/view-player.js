@@ -618,6 +618,7 @@ export async function mount(root) {
 function render() {
   return `
     <section class="player-view">
+      <div class="player-ambient-bg" id="player-ambient-bg" aria-hidden="true"></div>
       <div class="player-top-bar">
         <button class="player-dismiss-btn" id="btn-player-dismiss" aria-label="閉じる" title="閉じる">
           ${ICONS.dismiss}
@@ -744,6 +745,7 @@ function render() {
 
 function collectRefs(root) {
   return {
+    ambientBg: root.querySelector("#player-ambient-bg"),
     dismissBtn: root.querySelector("#btn-player-dismiss"),
     art: root.querySelector("#player-art"),
     title: root.querySelector("#player-title"),
@@ -785,6 +787,78 @@ function collectRefs(root) {
     flacboxQuality: root.querySelector("#flacbox-quality"),
     flacboxBitrate: root.querySelector("#flacbox-bitrate"),
   };
+}
+
+let currentAmbientUrl = null;
+const ambientCache = new Map();
+
+/**
+ * アートワーク画像から主要色を高速サンプリングし、動的アンビエント背景に適用する。
+ * オフスクリーン Canvas (16x16px) を使用し、非同期かつ try-catch で安全にフォールバック。
+ */
+function updateAmbientColor(refs, artUrl) {
+  if (!refs.ambientBg) return;
+  if (!artUrl) {
+    currentAmbientUrl = null;
+    refs.ambientBg.style.removeProperty("--ambient-color-1");
+    refs.ambientBg.style.removeProperty("--ambient-color-2");
+    return;
+  }
+  if (currentAmbientUrl === artUrl) return;
+  currentAmbientUrl = artUrl;
+
+  if (ambientCache.has(artUrl)) {
+    const { c1, c2 } = ambientCache.get(artUrl);
+    refs.ambientBg.style.setProperty("--ambient-color-1", c1);
+    refs.ambientBg.style.setProperty("--ambient-color-2", c2);
+    return;
+  }
+
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  img.onload = () => {
+    try {
+      const cvs = document.createElement("canvas");
+      cvs.width = 16;
+      cvs.height = 16;
+      const ctx = cvs.getContext("2d", { willReadFrequently: true });
+      if (!ctx) return;
+      ctx.drawImage(img, 0, 0, 16, 16);
+      const data = ctx.getImageData(0, 0, 16, 16).data;
+      let r = 0, g = 0, b = 0, count = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const pr = data[i], pg = data[i + 1], pb = data[i + 2];
+        const lum = 0.299 * pr + 0.587 * pg + 0.114 * pb;
+        if (lum > 20 && lum < 235) {
+          r += pr; g += pg; b += pb; count++;
+        }
+      }
+      if (count === 0) {
+        for (let i = 0; i < data.length; i += 4) {
+          r += data[i]; g += data[i + 1]; b += data[i + 2]; count++;
+        }
+      }
+      r = Math.round(r / (count || 1));
+      g = Math.round(g / (count || 1));
+      b = Math.round(b / (count || 1));
+
+      const c1 = `rgba(${r}, ${g}, ${b}, 0.50)`;
+      const c2r = Math.min(255, Math.max(0, Math.round(r * 0.7 + b * 0.3)));
+      const c2g = Math.min(255, Math.max(0, Math.round(g * 0.6 + r * 0.4)));
+      const c2b = Math.min(255, Math.max(0, Math.round(b * 0.8 + 50)));
+      const c2 = `rgba(${c2r}, ${c2g}, ${c2b}, 0.30)`;
+
+      ambientCache.set(artUrl, { c1, c2 });
+      if (currentAmbientUrl === artUrl && refs.ambientBg) {
+        refs.ambientBg.style.setProperty("--ambient-color-1", c1);
+        refs.ambientBg.style.setProperty("--ambient-color-2", c2);
+      }
+    } catch (e) {
+      // CORS制約等のエラー時はデフォルトスタイルを安全に維持
+    }
+  };
+  img.onerror = () => {};
+  img.src = artUrl;
 }
 
 const audioPropsCache = new Map();
@@ -906,6 +980,7 @@ function updateUI(refs, s) {
     if (refs.appleBadgeWrap) refs.appleBadgeWrap.hidden = true;
     if (refs.flacboxSpecCard) refs.flacboxSpecCard.hidden = true;
     refs._lastQualityTrackId = null;
+    updateAmbientColor(refs, null);
     // 曲が無くてもシャッフル/リピートの設定状態をアイコンに反映する
     // (下の再生モードラベルと整合させる。曲未選択で再生画面を開いた際の食い違い防止)
     refs.shuffleBtn.classList.toggle("is-active", !!s.shuffleMode);
@@ -943,6 +1018,9 @@ function updateUI(refs, s) {
   } else {
     refs.art.removeAttribute("src");
   }
+
+  // アートワーク色による動的アンビエントオーロラ背景の更新
+  updateAmbientColor(refs, artUrl);
 
   // is-playing クラスで再生/一時停止アイコン(SVG)を CSS 側で出し分ける
   refs.playBtn.classList.toggle("is-playing", !!s.isPlaying);

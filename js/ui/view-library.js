@@ -40,6 +40,7 @@ let filterText = "";
 // デフォルトは手動並び替え（曲を追加した順 = addedAt にフォールバック）
 let sortKey = "manual-asc";
 let showDisabled = true;
+let quickFilter = "all";
 
 // ライブラリタブ状態: "artists" | "albums" | "tracks" (デフォルト: アーティスト)
 let activeTab = "artists";
@@ -111,6 +112,7 @@ export async function mount(root) {
   filterText = "";
   sortKey = "manual-asc";
   showDisabled = true;
+  quickFilter = "all";
   // storageInfo も初期化する。これをしないと再マウント時、refreshStorage で
   // 更新される前の最初の描画に前回マウントの古いストレージ文字列が一瞬出る。
   storageInfo = "";
@@ -344,6 +346,21 @@ export async function mount(root) {
     renderList(refs);
   });
 
+  // クイックフィルタ（Spotify風チップバー）
+  if (refs.quickFilterBar) {
+    refs.quickFilterBar.addEventListener("click", (e) => {
+      const chip = e.target.closest(".quick-filter-chip");
+      if (!chip) return;
+      const f = chip.dataset.filter || "all";
+      if (f === quickFilter) return;
+      quickFilter = f;
+      refs.quickFilterBar.querySelectorAll(".quick-filter-chip").forEach((c) => {
+        c.classList.toggle("is-active", c.dataset.filter === quickFilter);
+      });
+      renderList(refs);
+    });
+  }
+
   // 一覧クリック委譲
   refs.list.addEventListener("click", (e) => onListClick(e, refs));
 
@@ -495,6 +512,15 @@ function render() {
           </label>
         </div>
 
+        <!-- Spotify 風 クイックフィルタ・ピル（チップバー） -->
+        <div class="quick-filter-bar" id="track-quick-filter-bar" role="toolbar" aria-label="クイックフィルタ">
+          <button type="button" class="quick-filter-chip is-active" data-filter="all">すべて</button>
+          <button type="button" class="quick-filter-chip" data-filter="loved">♥ お気に入り</button>
+          <button type="button" class="quick-filter-chip" data-filter="gdrive">☁ Google Drive</button>
+          <button type="button" class="quick-filter-chip" data-filter="video">🎬 動画抽出</button>
+          <button type="button" class="quick-filter-chip" data-filter="unplayed">⚡ 未再生</button>
+        </div>
+
         <div class="library-stats" id="lib-stats"></div>
 
         <ul class="track-list" id="track-list"></ul>
@@ -525,6 +551,7 @@ function collectRefs(root) {
     search: root.querySelector("#lib-search"),
     sort: root.querySelector("#lib-sort"),
     showDisabledChk: root.querySelector("#show-disabled"),
+    quickFilterBar: root.querySelector("#track-quick-filter-bar"),
     libStats: root.querySelector("#lib-stats"),
     list: root.querySelector("#track-list"),
     // アルバムタブ
@@ -592,13 +619,24 @@ function renderList(refs) {
     );
   }
   if (!showDisabled) list = list.filter((t) => t.enabled !== false);
+  if (quickFilter !== "all") {
+    if (quickFilter === "loved") {
+      list = list.filter((t) => !!t.loved);
+    } else if (quickFilter === "gdrive") {
+      list = list.filter((t) => t.source === "gdrive" || (t.id && t.id.startsWith("gd-")));
+    } else if (quickFilter === "video") {
+      list = list.filter((t) => t.source === "video" || (t.id && t.id.startsWith("video-")));
+    } else if (quickFilter === "unplayed") {
+      list = list.filter((t) => !t.playCount || t.playCount === 0);
+    }
+  }
   list.sort(getComparator(sortKey));
 
   // 表示順をキャッシュ（再生時はこの順でキューを作る）
   visibleTracks = list;
 
   // 手動並び替えモード（ドラッグ可能状態）のときは仮想スクロールをバイパスして全件レンダリング
-  const filterActive = !!filterText || !showDisabled;
+  const filterActive = !!filterText || !showDisabled || quickFilter !== "all";
   const isManualSort = sortKey === "manual-asc" && !filterActive;
 
   if (virtualList && virtualList.container === refs.list) {
@@ -777,10 +815,16 @@ function rowHtml(t, cur) {
   // 一時無効/有効はスピーカーアイコン
   const toggleIcon = enabled ? "🔊" : "🔇";
   const toggleTitle = enabled ? "一時的に再生無効にする" : "再生を再び有効にする";
+
+  const eqIndicator = playing
+    ? `<div class="track-eq-indicator" aria-label="再生中"><span class="track-eq-bar"></span><span class="track-eq-bar"></span><span class="track-eq-bar"></span></div>`
+    : ``;
+  const artContainer = `<div class="track-art-wrap">${artImg}${eqIndicator}</div>`;
+
   return `
     <li class="track-row ${playing ? "is-playing" : ""} ${enabled ? "" : "is-disabled"} ${isManual ? "is-manual" : ""}" data-id="${escapeAttr(t.id)}">
       ${handle}
-      ${artImg}
+      ${artContainer}
       <div class="track-info">
         <div class="track-title">${gdriveMark}${escapeHtml(t.title || "(無題)")}${t.memo ? ` <span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
         <div class="track-sub">${escapeHtml(sub)}</div>
