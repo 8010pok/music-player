@@ -7,7 +7,7 @@
  * バージョンを上げると古いキャッシュは破棄される。
  */
 
-const CACHE_VERSION = "v1.4.4";
+const CACHE_VERSION = "v1.4.5";
 const STATIC_CACHE = `static-${CACHE_VERSION}`;
 const API_CACHE = `api-${CACHE_VERSION}`;
 const IMG_CACHE = `img-${CACHE_VERSION}`;
@@ -33,6 +33,7 @@ const PRECACHE_URLS = [
   "./js/audio/lame.min.js",
   "./js/audio/mp3-encoder.js",
   "./js/audio/normalize-service.js",
+  "./js/audio/video-audio-extractor.js",
   "./js/youtube/youtube-service.js",
   "./js/player/audio-engine.js",
   "./js/player/visualizer.js",
@@ -81,6 +82,7 @@ const PRECACHE_URLS = [
   "./js/ui/view-settings.js",
   "./js/ui/mini-player.js",
   "./js/ui/youtube-modal.js",
+  "./js/ui/video-extract-modal.js",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "./icons/icon.svg",

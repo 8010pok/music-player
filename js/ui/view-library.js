@@ -20,6 +20,7 @@ import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
 import { editTrackMetadata } from "./metadata-editor.js";
 import { openDriveImportModal, isDriveConnected } from "../gdrive/drive-service.js";
 import { openYouTubeDownloadModal } from "./youtube-modal.js";
+import { openVideoExtractModal } from "./video-extract-modal.js";
 import { exportLibraryToDrive, importLibraryFromDrive, getDriveSyncFileInfo, syncLibraryWithDrive, recordLibraryModified } from "../store/sync-service.js";
 import { groupTracksIntoAlbums, sortAlbums } from "../metadata/album-util.js";
 import { groupTracksIntoArtists, sortArtists, getIndexChar, JAPANESE_INDEX_CHARS } from "../metadata/artist-util.js";
@@ -211,32 +212,53 @@ export async function mount(root) {
     onFiles(refs, e.target.files);
     e.target.value = "";
   });
+  if (refs.videoInput) {
+    refs.videoInput.addEventListener("change", (e) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (file) {
+        openVideoExtractModal(file, {
+          onSaved: async () => {
+            await reloadTracks(refs);
+            await refreshStorage(refs);
+            renderList(refs);
+          },
+        });
+      }
+    });
+  }
+
   if (refs.addCombinedBtn) {
     refs.addCombinedBtn.addEventListener("click", () => {
-      if (appState.get().isIOS) {
-        // iOS はフォルダ選択非対応のため、迷わせず直接ファイル選択（複数可）を開く
-        refs.fileInput.click();
-        return;
+      const isIOS = appState.get().isIOS;
+      const actions = [
+        {
+          label: "🎵 音楽ファイルを選択",
+          primary: true,
+          onClick: () => { refs.fileInput.click(); },
+        },
+        {
+          label: "🎥 動画から音声を抽出 (カメラロール / MP4)",
+          onClick: () => { refs.videoInput.click(); },
+        },
+      ];
+
+      if (!isIOS) {
+        actions.push({
+          label: "📂 フォルダを選択",
+          onClick: () => { refs.folderInput.click(); },
+        });
       }
-      // PC等: ファイルまたはフォルダを選択できるモーダル
+
+      actions.push({
+        label: "キャンセル",
+        onClick: () => {},
+      });
+
       openModal({
         title: "📁 端末から音楽を追加",
-        body: `<div style="font-size: 13px; line-height: 1.6; color: var(--fg);">追加する音源の選択方法を選んでください:</div>`,
-        actions: [
-          {
-            label: "📁 ファイルを選択",
-            primary: true,
-            onClick: () => { refs.fileInput.click(); },
-          },
-          {
-            label: "📂 フォルダを選択",
-            onClick: () => { refs.folderInput.click(); },
-          },
-          {
-            label: "キャンセル",
-            onClick: () => {},
-          },
-        ],
+        body: `<div style="font-size: 13px; line-height: 1.6; color: var(--fg); margin-bottom: 8px;">追加する音源の形式を選んでください:</div>`,
+        actions,
       });
     });
   }
@@ -404,6 +426,8 @@ function render() {
                style="display:none" />
         <input type="file" id="folder-input" multiple webkitdirectory directory
                style="display:none" />
+        <input type="file" id="video-input" accept="video/*,.mp4,.mov,.webm,.m4v,.avi,.mkv"
+               style="display:none" />
         <span id="rescan-progress" class="rescan-progress"></span>
       </div>
 
@@ -489,6 +513,7 @@ function collectRefs(root) {
     // 音源追加
     fileInput: root.querySelector("#file-input"),
     folderInput: root.querySelector("#folder-input"),
+    videoInput: root.querySelector("#video-input"),
     addCombinedBtn: root.querySelector("#btn-add-combined"),
     addBtn: root.querySelector("#btn-add"),
     addFolderBtn: root.querySelector("#btn-add-folder"),
