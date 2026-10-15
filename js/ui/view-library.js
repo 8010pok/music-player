@@ -20,9 +20,9 @@ import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
 import { editTrackMetadata } from "./metadata-editor.js";
 import { openDriveImportModal, isDriveConnected } from "../gdrive/drive-service.js";
 import { openYouTubeDownloadModal } from "./youtube-modal.js";
-import { exportLibraryToDrive, importLibraryFromDrive, getDriveSyncFileInfo } from "../store/sync-service.js";
+import { exportLibraryToDrive, importLibraryFromDrive, getDriveSyncFileInfo, syncLibraryWithDrive, recordLibraryModified } from "../store/sync-service.js";
 import { groupTracksIntoAlbums, sortAlbums } from "../metadata/album-util.js";
-import { groupTracksIntoArtists, sortArtists } from "../metadata/artist-util.js";
+import { groupTracksIntoArtists, sortArtists, getIndexChar, JAPANESE_INDEX_CHARS } from "../metadata/artist-util.js";
 import { findDuplicateInList, cleanDuplicateTracks, findDuplicateGroups } from "../store/dedup-service.js";
 
 // ファイル拡張子の許可リスト
@@ -314,6 +314,9 @@ export async function mount(root) {
   // 並び替え（手動ソート時のみ動作）
   const cleanupReorder = installReorder(refs);
 
+  // 五十音・アルファベット高速インデックスバー
+  const cleanupIndexBar = installArtistIndexBar(refs);
+
   // 再生中ハイライト
   unsubState = appState.subscribe(["currentTrack"], () => renderList(refs));
 
@@ -328,6 +331,7 @@ export async function mount(root) {
     unsubState = null;
     if (unsubPlaylist) unsubPlaylist();
     if (cleanupReorder) cleanupReorder();
+    if (cleanupIndexBar) cleanupIndexBar();
     // この画面はもう表示されていない。後追い処理/遅延失敗ハンドラが誤って描画・通知しないよう
     //   activeRefs を解除する(同 refs で再マウントされた場合は mount が再セットする)。
     activeRefs = null;
@@ -404,7 +408,11 @@ function render() {
           </select>
         </div>
         <div class="library-stats" id="artist-stats"></div>
-        <ul class="artist-list" id="artist-list" role="list"></ul>
+        <div class="artist-list-container" id="artist-list-container">
+          <ul class="artist-list" id="artist-list" role="list"></ul>
+          <div class="artist-index-bar" id="artist-index-bar" aria-label="五十音・アルファベット索引" hidden></div>
+        </div>
+        <div class="artist-index-bubble" id="artist-index-bubble" hidden></div>
       </div>
 
       <!-- タブ 2: アルバム -->
@@ -485,7 +493,10 @@ function collectRefs(root) {
     artistSearch: root.querySelector("#artist-search"),
     artistSort: root.querySelector("#artist-sort"),
     artistStats: root.querySelector("#artist-stats"),
+    artistListContainer: root.querySelector("#artist-list-container"),
     artistList: root.querySelector("#artist-list"),
+    artistIndexBar: root.querySelector("#artist-index-bar"),
+    artistIndexBubble: root.querySelector("#artist-index-bubble"),
   };
 }
 
@@ -617,18 +628,44 @@ function renderArtists(refs) {
       </li>
     `;
     if (refs.artistStats) refs.artistStats.textContent = `0 / ${allArtists.length} アーティスト`;
+    if (refs.artistIndexBar) {
+      refs.artistIndexBar.hidden = true;
+      refs.artistIndexBar.innerHTML = "";
+    }
     return;
   }
 
   if (refs.artistStats) refs.artistStats.textContent = `${list.length} / ${allArtists.length} アーティスト`;
-  refs.artistList.innerHTML = list.map((a) => {
+
+  // 五十音・アルファベットインデックスバーの表示判定
+  // アーティスト名昇順（name-asc）かつ 検索フィルタなし、かつある程度件数がある場合
+  const showIndex = artistSortKey === "name-asc" && list.length >= 6 && !artistFilterText;
+  const presentChars = new Set();
+
+  let lastIndexChar = null;
+  const htmlParts = [];
+
+  for (const a of list) {
+    const idxChar = getIndexChar(a.name);
+    presentChars.add(idxChar);
+
+    // インデックスセクションヘッダー挿入 (name-asc ソート時)
+    if (showIndex && idxChar !== lastIndexChar) {
+      lastIndexChar = idxChar;
+      htmlParts.push(`
+        <li class="artist-index-header" id="idx-sec-${encodeURIComponent(idxChar)}" data-index-char="${escapeAttr(idxChar)}">
+          ${escapeHtml(idxChar)}
+        </li>
+      `);
+    }
+
     const artUrl = a.artworkTrack ? getArtworkUrl(a.artworkTrack) : null;
     const avatar = artUrl
       ? `<img class="artist-row-avatar" src="${escapeAttr(artUrl)}" alt="${escapeAttr(a.name)}" loading="lazy" decoding="async" />`
       : `<div class="artist-row-avatar artist-avatar-placeholder">👤</div>`;
 
-    return `
-      <li class="artist-row" data-name="${escapeAttr(a.name)}" role="button" tabindex="0">
+    htmlParts.push(`
+      <li class="artist-row" data-name="${escapeAttr(a.name)}" data-index-char="${escapeAttr(idxChar)}" role="button" tabindex="0">
         <div class="artist-row-avatar-wrap">${avatar}</div>
         <div class="artist-row-info">
           <div class="artist-row-name">${escapeHtml(a.name)}</div>
@@ -636,8 +673,24 @@ function renderArtists(refs) {
         </div>
         <span class="artist-row-arrow" aria-hidden="true">›</span>
       </li>
-    `;
-  }).join("");
+    `);
+  }
+
+  refs.artistList.innerHTML = htmlParts.join("");
+
+  // インデックスバーの描画
+  if (refs.artistIndexBar) {
+    if (showIndex) {
+      refs.artistIndexBar.hidden = false;
+      refs.artistIndexBar.innerHTML = JAPANESE_INDEX_CHARS.map((ch) => {
+        const has = presentChars.has(ch);
+        return `<span class="index-char-item ${has ? "has-data" : "is-empty"}" data-char="${escapeAttr(ch)}">${escapeHtml(ch)}</span>`;
+      }).join("");
+    } else {
+      refs.artistIndexBar.hidden = true;
+      refs.artistIndexBar.innerHTML = "";
+    }
+  }
 }
 
 function rowHtml(t, cur) {
@@ -867,6 +920,7 @@ async function onListClick(e, refs) {
       //   ベストエフォート: 失敗してもトラック削除自体は成功扱いにする。
       await removeTrackFromAllPlaylists(id).catch((err) => console.warn("プレイリストからの除去失敗", err));
       releaseArtwork(id);
+      recordLibraryModified();
       tracksCache = tracksCache.filter((x) => x.id !== id);
       renderList(refs);
       // 削除は完了済み。ストレージ表示更新は副次的なので失敗しても握り潰し、
@@ -1062,7 +1116,10 @@ async function onDragEnd(refs) {
       const cached = tracksCache.find((t) => t.id === tid);
       if (cached && cached.order !== newOrder) entries.push([tid, newOrder]);
     }
-    if (entries.length) await setTracksOrder(entries);
+    if (entries.length) {
+      await setTracksOrder(entries);
+      recordLibraryModified();
+    }
     // DB 反映(原子的)成功後に tracksCache の order もまとめて更新する。
     for (const [tid, newOrder] of entries) {
       const cached = tracksCache.find((t) => t.id === tid);
@@ -1405,6 +1462,131 @@ function formatBytes(n) {
   return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
 }
 
+/* ============ 五十音・アルファベット高速インデックスバー ============ */
+
+/**
+ * アーティスト画面右端の縦型インデックスバーのタッチ・スワイプ・クリック制御
+ * @param {object} refs
+ * @returns {() => void} cleanup
+ */
+function installArtistIndexBar(refs) {
+  const bar = refs.artistIndexBar;
+  const bubble = refs.artistIndexBubble;
+  const list = refs.artistList;
+  if (!bar || !bubble || !list) return () => {};
+
+  let isInteracting = false;
+  let lastChar = null;
+  let hideBubbleTimer = null;
+
+  function scrollToChar(char) {
+    if (!char || char === lastChar) return;
+    lastChar = char;
+
+    // 中央バブル表示
+    bubble.textContent = char;
+    bubble.hidden = false;
+    clearTimeout(hideBubbleTimer);
+
+    // 触覚フィードバック
+    if (typeof navigator !== "undefined" && navigator.vibrate) {
+      try { navigator.vibrate(8); } catch {}
+    }
+
+    // 該当文字のセクションヘッダーまたは行を検索
+    let targetEl = list.querySelector(`.artist-index-header[data-index-char="${cssEscape(char)}"]`);
+    if (!targetEl) {
+      targetEl = list.querySelector(`.artist-row[data-index-char="${cssEscape(char)}"]`);
+    }
+
+    // 該当文字がリストに無い場合は、JAPANESE_INDEX_CHARS の順序で後続の直近セクションを探す
+    if (!targetEl) {
+      const idx = JAPANESE_INDEX_CHARS.indexOf(char);
+      if (idx !== -1) {
+        for (let i = idx + 1; i < JAPANESE_INDEX_CHARS.length; i++) {
+          const nextCh = JAPANESE_INDEX_CHARS[i];
+          const found = list.querySelector(`[data-index-char="${cssEscape(nextCh)}"]`);
+          if (found) {
+            targetEl = found;
+            break;
+          }
+        }
+      }
+    }
+
+    if (targetEl) {
+      targetEl.scrollIntoView({ block: "start", behavior: "auto" });
+    }
+  }
+
+  function finishInteraction() {
+    isInteracting = false;
+    lastChar = null;
+    clearTimeout(hideBubbleTimer);
+    hideBubbleTimer = setTimeout(() => {
+      bubble.hidden = true;
+    }, 280);
+  }
+
+  function handlePointerAt(clientX, clientY) {
+    const el = document.elementFromPoint(clientX, clientY);
+    if (!el) return;
+    const item = el.closest(".index-char-item");
+    if (item && item.dataset.char) {
+      scrollToChar(item.dataset.char);
+    }
+  }
+
+  const onTouchStart = (e) => {
+    if (e.touches.length > 0) {
+      isInteracting = true;
+      handlePointerAt(e.touches[0].clientX, e.touches[0].clientY);
+    }
+  };
+
+  const onTouchMove = (e) => {
+    if (!isInteracting || e.touches.length === 0) return;
+    e.preventDefault(); // インデックススライド中の不要な画面スクロールを抑止
+    handlePointerAt(e.touches[0].clientX, e.touches[0].clientY);
+  };
+
+  const onTouchEnd = () => finishInteraction();
+
+  const onMouseDown = (e) => {
+    isInteracting = true;
+    handlePointerAt(e.clientX, e.clientY);
+  };
+
+  const onMouseMove = (e) => {
+    if (!isInteracting) return;
+    e.preventDefault();
+    handlePointerAt(e.clientX, e.clientY);
+  };
+
+  const onMouseUp = () => finishInteraction();
+
+  bar.addEventListener("touchstart", onTouchStart, { passive: false });
+  bar.addEventListener("touchmove", onTouchMove, { passive: false });
+  bar.addEventListener("touchend", onTouchEnd);
+  bar.addEventListener("touchcancel", onTouchEnd);
+
+  bar.addEventListener("mousedown", onMouseDown);
+  window.addEventListener("mousemove", onMouseMove);
+  window.addEventListener("mouseup", onMouseUp);
+
+  return () => {
+    bar.removeEventListener("touchstart", onTouchStart);
+    bar.removeEventListener("touchmove", onTouchMove);
+    bar.removeEventListener("touchend", onTouchEnd);
+    bar.removeEventListener("touchcancel", onTouchEnd);
+
+    bar.removeEventListener("mousedown", onMouseDown);
+    window.removeEventListener("mousemove", onMouseMove);
+    window.removeEventListener("mouseup", onMouseUp);
+    clearTimeout(hideBubbleTimer);
+  };
+}
+
 /* ============ 端末間同期モーダル ============ */
 
 async function openSyncModal(refs) {
@@ -1422,18 +1604,30 @@ async function openSyncModal(refs) {
       <div id="quick-sync-status" style="font-size: 12px; color: var(--fg-muted); background: var(--bg-surface); padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border-color);">
         クラウド同期データを確認中…
       </div>
-      <div style="display: flex; flex-direction: column; gap: 8px;">
-        <button class="btn primary" id="btn-quick-import" style="padding: 10px; font-weight: bold; font-size: 13px; text-align: center;">
-          📥 Google Drive から同期 (変更を受信・反映)
+      <div style="display: flex; flex-direction: column; gap: 10px;">
+        <!-- メイン: ワンタップ自動同期 -->
+        <button class="btn primary" id="btn-quick-sync-auto" style="padding: 12px; font-weight: bold; font-size: 14px; text-align: center; background: var(--accent); color: #fff; border-radius: 8px; box-shadow: 0 4px 12px rgba(var(--accent-rgb, 79, 140, 255), 0.35);">
+          ⚡ ワンタップ自動同期 (iPad ↔ iPhone を完全一致)
         </button>
-        <button class="btn" id="btn-quick-export" style="padding: 9px; font-size: 13px; text-align: center;">
-          📤 Google Drive へ保存 (この端末の変更を送信)
-        </button>
+        <div style="font-size: 11px; color: var(--fg-muted); text-align: center; margin-top: -4px;">
+          クラウドの最新変更を受信・マージし、この端末の変更も自動保存します
+        </div>
+
+        <details style="font-size: 12px; color: var(--fg-muted); margin-top: 4px; border: 1px solid var(--border-color); border-radius: 6px; padding: 6px 10px; background: var(--bg-surface);">
+          <summary style="cursor: pointer; font-weight: 600; color: var(--fg);">詳細オプション（個別実行）</summary>
+          <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
+            <button class="btn" id="btn-quick-import" style="padding: 9px; font-size: 12px; text-align: center;">
+              📥 Google Drive から受信 (ダウンロード＆マージ)
+            </button>
+            <button class="btn" id="btn-quick-export" style="padding: 9px; font-size: 12px; text-align: center;">
+              📤 Google Drive へ送信 (この端末の状態を保存)
+            </button>
+          </div>
+        </details>
       </div>
       <div style="font-size: 11px; color: var(--fg-muted); line-height: 1.5; border-top: 1px solid var(--border-color); padding-top: 10px;">
-        💡 <strong>iPad ↔ iPhone 同期のやり方:</strong><br/>
-        1. 編集した側の端末（iPad）で <strong>「Google Drive へ保存」</strong> を押す<br/>
-        2. 反映したい側の端末（iPhone）で <strong>「Google Drive から同期」</strong> を押す<br/>
+        💡 <strong>iPad ↔ iPhone 同期のポイント:</strong><br/>
+        iPad で編集した後、iPhone で <strong>「⚡ ワンタップ自動同期」</strong> を押すだけで変更内容が瞬時に反映されます。<br/>
         ※ 端末内の音源ファイルやアートワーク画像は保護され、変更された曲名・メモ・お気に入り等のメタデータが確実に反映されます。
       </div>
     `;
@@ -1445,13 +1639,43 @@ async function openSyncModal(refs) {
         const dt = new Date(info.modifiedTime).toLocaleString("ja-JP");
         statusEl.innerHTML = `☁️ クラウド上の同期データ: <strong>${escapeHtml(dt)}</strong> (${info.tracksCount || 0} 曲)`;
       } else {
-        statusEl.textContent = "☁️ クラウド上に同期データがまだありません。送信元の端末から「Google Drive へ保存」を実行してください。";
+        statusEl.textContent = "☁️ クラウド上に同期データがまだありません。「ワンタップ自動同期」を実行して初期保存してください。";
       }
     }).catch(() => {});
 
+    const autoSyncBtn = wrap.querySelector("#btn-quick-sync-auto");
     const importBtn = wrap.querySelector("#btn-quick-import");
     const exportBtn = wrap.querySelector("#btn-quick-export");
     let isBusy = false;
+
+    // ワンタップ自動同期
+    autoSyncBtn.addEventListener("click", async () => {
+      if (isBusy) return;
+      isBusy = true;
+      autoSyncBtn.disabled = true;
+      autoSyncBtn.textContent = "同期中…";
+      toast("Google Drive と端末間自動同期を実行中…", "info");
+      try {
+        const res = await syncLibraryWithDrive({ force: true });
+        toast(res.message, "ok");
+        await reloadTracks(activeRefs || refs);
+        await refreshStorage(activeRefs || refs);
+        const info = await getDriveSyncFileInfo().catch(() => ({}));
+        if (statusEl && info.modifiedTime) {
+          const dt = new Date(info.modifiedTime).toLocaleString("ja-JP");
+          statusEl.innerHTML = `☁️ クラウド上の同期データ: <strong>${escapeHtml(dt)}</strong> (${info.tracksCount || 0} 曲)`;
+        }
+        setTimeout(() => {
+          const closeBtn = document.querySelector("#modal-root .modal-actions .btn");
+          if (closeBtn) closeBtn.click();
+        }, 1200);
+      } catch (err) {
+        toast(`同期エラー: ${err.message}`, "err");
+        autoSyncBtn.disabled = false;
+        autoSyncBtn.textContent = "⚡ ワンタップ自動同期 (iPad ↔ iPhone を完全一致)";
+        isBusy = false;
+      }
+    });
 
     importBtn.addEventListener("click", async () => {
       if (isBusy) return;
@@ -1470,7 +1694,7 @@ async function openSyncModal(refs) {
       } catch (err) {
         toast(`同期エラー: ${err.message}`, "err");
         importBtn.disabled = false;
-        importBtn.textContent = "📥 Google Drive から同期 (変更を受信・反映)";
+        importBtn.textContent = "📥 Google Drive から受信 (ダウンロード＆マージ)";
         isBusy = false;
       }
     });
@@ -1483,6 +1707,7 @@ async function openSyncModal(refs) {
       toast("Google Drive にライブラリ情報を保存中…", "info");
       try {
         const res = await exportLibraryToDrive();
+        recordLibraryModified();
         toast(`Google Drive に同期データを保存しました (${res.tracksCount} 曲)`, "ok");
         if (statusEl) {
           const dt = new Date(res.modifiedTime).toLocaleString("ja-JP");
@@ -1492,7 +1717,7 @@ async function openSyncModal(refs) {
         toast(`保存エラー: ${err.message}`, "err");
       } finally {
         exportBtn.disabled = false;
-        exportBtn.textContent = "📤 Google Drive へ保存 (この端末の変更を送信)";
+        exportBtn.textContent = "📤 Google Drive へ送信 (この端末の状態を保存)";
         isBusy = false;
       }
     });

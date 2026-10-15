@@ -169,6 +169,20 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
         merged.lyrics = incoming.lyrics;
       }
 
+      // 音量ノーマライズ情報の同期
+      if (incoming.normalized !== undefined) merged.normalized = incoming.normalized;
+      if (incoming.normalizedGainDb !== undefined) merged.normalizedGainDb = incoming.normalizedGainDb;
+      if (incoming.originalRmsDb !== undefined) merged.originalRmsDb = incoming.originalRmsDb;
+      if (incoming.targetRmsDb !== undefined) merged.targetRmsDb = incoming.targetRmsDb;
+      if (incoming.originalPeakDb !== undefined) merged.originalPeakDb = incoming.originalPeakDb;
+
+      // 評価・コメント・更新時刻
+      if (incoming.rating !== undefined) merged.rating = incoming.rating;
+      if (incoming.comments !== undefined) merged.comments = incoming.comments;
+      if (incoming.userEditedAt) {
+        merged.userEditedAt = Math.max(existing.userEditedAt || 0, incoming.userEditedAt || 0);
+      }
+
       // artworkBlob は既存のものがあれば維持
       if (existing.artworkBlob instanceof Blob) {
         merged.artworkBlob = existing.artworkBlob;
@@ -318,3 +332,145 @@ export async function importLibraryFromDrive({ deleteMissing = false } = {}) {
     modifiedTime: file.modifiedTime,
   };
 }
+
+const STORAGE_KEY_LAST_SYNC = "music_player_last_sync_time";
+const STORAGE_KEY_LAST_MODIFIED = "music_player_last_modified_time";
+
+/**
+ * ライブラリに変更があったことを記録（タイムスタンプ更新）
+ */
+export function recordLibraryModified() {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(STORAGE_KEY_LAST_MODIFIED, new Date().toISOString());
+    }
+  } catch {}
+}
+
+/**
+ * 最終同期時刻を取得
+ * @returns {string|null}
+ */
+export function getLastSyncTime() {
+  try {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem(STORAGE_KEY_LAST_SYNC) || null;
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * 最終同期時刻を更新
+ * @param {string} [timeStr]
+ */
+export function setLastSyncTime(timeStr) {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(STORAGE_KEY_LAST_SYNC, timeStr || new Date().toISOString());
+    }
+  } catch {}
+}
+
+/**
+ * 最終ローカル編集時刻を取得
+ * @returns {string|null}
+ */
+export function getLastLocalModifiedTime() {
+  try {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem(STORAGE_KEY_LAST_MODIFIED) || null;
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Google Drive とライブラリの双方向スマート自動同期
+ *
+ * iPad と iPhone などの複数端末間で、Google Drive 上の同期ファイルとローカルライブラリを比較・同期。
+ * - force: true の場合（「ワンタップ自動同期」ボタン）:
+ *   1. Drive 上に同期ファイルがあればダウンロードして差分マージ（他端末での編集内容を即座に受信）
+ *   2. マージ後のライブラリ全体を Drive に再保存（この端末の最新状態をクラウドにアップロード）
+ *   3. 最終同期時刻を更新
+ * - force: false の場合（起動時などのバックグラウンド自動判定）:
+ *   1. Drive 上のファイルの modifiedTime とローカルの lastSyncTime を比較
+ *   2. Drive の方が新しければダウンロード＆マージ。ローカルも変更されていればマージ後に再保存。
+ *   3. ローカルのみが新しければ Drive へアップロード。
+ *   4. どちらも変化がなければ何もしない（synced）。
+ *
+ * @param {object} [opts]
+ * @param {boolean} [opts.force=false]
+ * @param {boolean} [opts.silent=false]
+ * @returns {Promise<{ action: "full-sync" | "downloaded" | "uploaded" | "synced" | "none", updatedCount?: number, addedCount?: number, playlistsCount?: number, message: string }>}
+ */
+export async function syncLibraryWithDrive({ force = false, silent = false } = {}) {
+  const connected = await isDriveConnected();
+  if (!connected) {
+    if (silent) return { action: "none", message: "Google Drive 未接続" };
+    throw new Error("Google Drive に接続されていません。設定画面から接続してください。");
+  }
+
+  const driveFile = await getDriveSyncFileInfo();
+
+  // ケース 1: Drive 上にまだ同期ファイルがない場合 → ローカルデータを新規アップロード
+  if (!driveFile.exists) {
+    const res = await exportLibraryToDrive();
+    setLastSyncTime(res.modifiedTime || new Date().toISOString());
+    return {
+      action: "uploaded",
+      message: `Google Drive に初回同期データを保存しました (${res.tracksCount} 曲)`,
+      tracksCount: res.tracksCount,
+      playlistsCount: res.playlistsCount,
+    };
+  }
+
+  const driveModifiedMs = driveFile.modifiedTime ? new Date(driveFile.modifiedTime).getTime() : 0;
+  const lastSyncStr = getLastSyncTime();
+  const lastSyncMs = lastSyncStr ? new Date(lastSyncStr).getTime() : 0;
+  const lastLocalModStr = getLastLocalModifiedTime();
+  const lastLocalModMs = lastLocalModStr ? new Date(lastLocalModStr).getTime() : 0;
+
+  // force: true の場合、または Drive 側がローカル同期時刻より新しい場合
+  if (force || driveModifiedMs > lastSyncMs) {
+    // まず Drive から最新データを取得してマージ
+    const importRes = await importLibraryFromDrive({ deleteMissing: false });
+
+    // force の場合、またはローカル側でも同期以降に変更があった場合は Drive へ再書き出しして完全一致
+    const shouldReExport = force || (lastLocalModMs > lastSyncMs) || (importRes.addedCount > 0);
+    let exportRes = null;
+    if (shouldReExport) {
+      exportRes = await exportLibraryToDrive();
+      setLastSyncTime(exportRes.modifiedTime || new Date().toISOString());
+    } else {
+      setLastSyncTime(driveFile.modifiedTime || new Date().toISOString());
+    }
+
+    return {
+      action: shouldReExport ? "full-sync" : "downloaded",
+      updatedCount: importRes.updatedCount,
+      addedCount: importRes.addedCount,
+      playlistsCount: importRes.playlistsCount,
+      message: `${importRes.updatedCount} 曲の変更を反映、${importRes.addedCount} 曲を追加しました${shouldReExport ? " (Google Drive にも最新状態を保存)" : ""}`,
+    };
+  }
+
+  // Drive 側は更新されていないが、ローカルで変更がある場合 → アップロード
+  if (lastLocalModMs > lastSyncMs) {
+    const res = await exportLibraryToDrive();
+    setLastSyncTime(res.modifiedTime || new Date().toISOString());
+    return {
+      action: "uploaded",
+      message: `変更されたライブラリデータを Google Drive へ保存しました (${res.tracksCount} 曲)`,
+      tracksCount: res.tracksCount,
+      playlistsCount: res.playlistsCount,
+    };
+  }
+
+  // どちらも更新なし
+  return {
+    action: "synced",
+    message: "ライブラリは最新の状態です",
+  };
+}
+

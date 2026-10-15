@@ -224,6 +224,45 @@ await asyncTest("新規Google Drive曲の追加", async () => {
   strictEqual(newTrack.memo, "YouTubeからの保存音源");
 });
 
+await asyncTest("ノーマライズ情報のスマート差分マージ", async () => {
+  const localTrack = {
+    id: "t-norm1",
+    title: "Norm Song",
+    artist: "Artist",
+    normalized: false,
+    normalizedGainDb: 0,
+  };
+  tracksStore.set(localTrack.id, localTrack);
+
+  const syncPayload = {
+    app: "music-player",
+    version: 2,
+    tracks: [
+      {
+        id: "t-norm1",
+        title: "Norm Song",
+        artist: "Artist",
+        normalized: true,
+        normalizedGainDb: -2.5,
+        originalRmsDb: -11.5,
+        targetRmsDb: -14.0,
+        originalPeakDb: -0.1,
+      },
+    ],
+  };
+
+  const result = await importLibraryData(syncPayload);
+  strictEqual(result.updatedCount, 1, "1曲更新");
+
+  const updated = tracksStore.get("t-norm1");
+  strictEqual(updated.normalized, true, "normalizedフラグがマージされること");
+  strictEqual(updated.normalizedGainDb, -2.5, "normalizedGainDbがマージされること");
+  strictEqual(updated.originalRmsDb, -11.5, "originalRmsDbがマージされること");
+  strictEqual(updated.targetRmsDb, -14.0, "targetRmsDbがマージされること");
+  strictEqual(updated.originalPeakDb, -0.1, "originalPeakDbがマージされること");
+});
+
+
 console.log("============================================================");
 console.log(`合計: ${passed} / 成功: ${passed} / 失敗: 0`);
 console.log("同期サービス テスト成功 ✓");

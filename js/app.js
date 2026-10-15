@@ -218,6 +218,22 @@ async function main() {
         console.warn("[app] 起動時 flushQueue 失敗", e);
       });
     }, STARTUP_FLUSH_DELAY_MS);
+
+    // 起動時の Google Drive 自動同期 (端末間差分をバックグラウンド反映)
+    setTimeout(async () => {
+      try {
+        const { isDriveConnected } = await import("./gdrive/drive-service.js");
+        if (isDriveConnected()) {
+          const { syncLibraryWithDrive } = await import("./store/sync-service.js");
+          const syncRes = await syncLibraryWithDrive({ silent: true });
+          if (syncRes && (syncRes.action === "downloaded" || syncRes.action === "full-sync")) {
+            console.log(`[app] クラウド自動同期完了: ${syncRes.message}`);
+          }
+        }
+      } catch (e) {
+        console.warn("[app] 起動時自動同期スキップ/失敗:", e);
+      }
+    }, STARTUP_FLUSH_DELAY_MS + 500);
   }
 
   // 8. Service Worker 登録 (最新バージョン即時反映)

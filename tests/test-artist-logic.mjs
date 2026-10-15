@@ -1,4 +1,4 @@
-import { groupTracksIntoArtists, sortArtists, getArtistKey, normalizeArtistText } from "../js/metadata/artist-util.js";
+import { groupTracksIntoArtists, sortArtists, getArtistKey, normalizeArtistText, getIndexChar, JAPANESE_INDEX_CHARS } from "../js/metadata/artist-util.js";
 
 let passed = 0;
 let failed = 0;
@@ -104,6 +104,25 @@ console.log("=== アーティスト集計ロジックのテスト ===");
   groupTracksIntoArtists(original);
   assertEqual(JSON.stringify(original), JSON.stringify(copy), "元の tracks 配列を破壊しない");
 }
+
+// 7. 五十音・アルファベットのインデックス文字判定
+{
+  assertEqual(getIndexChar("あいみょん"), "あ", "ひらがな「あ」行");
+  assertEqual(getIndexChar("いきものがかり"), "あ", "ひらがな「い」→「あ」行");
+  assertEqual(getIndexChar("スピッツ"), "さ", "カタカナ「ス」→「さ」行");
+  assertEqual(getIndexChar("ずっと真夜中でいいのに。"), "さ", "ひらがな「ず」(濁音)→「さ」行");
+  assertEqual(getIndexChar("Official髭男dism"), "O", "英字「O」");
+  assertEqual(getIndexChar("mr.children"), "M", "英字「m」(小文字)→大文字「M」");
+  assertEqual(getIndexChar("10-FEET"), "#", "数字は「#」");
+  assertEqual(getIndexChar("米津玄師"), "#", "漢字は「#」");
+  assertEqual(getIndexChar("「RADWIMPS」"), "R", "引用符付きの英字「R」");
+  assertEqual(getIndexChar(""), "#", "空文字は「#」");
+  assertEqual(getIndexChar(null), "#", "nullは「#」");
+  assert(JAPANESE_INDEX_CHARS.includes("あ"), "JAPANESE_INDEX_CHARS に「あ」が含まれる");
+  assert(JAPANESE_INDEX_CHARS.includes("Z"), "JAPANESE_INDEX_CHARS に「Z」が含まれる");
+  assert(JAPANESE_INDEX_CHARS.includes("#"), "JAPANESE_INDEX_CHARS に「#」が含まれる");
+}
+
 
 console.log(`\n合計: ${passed + failed} / 成功: ${passed} / 失敗: ${failed}`);
 if (failed > 0) {

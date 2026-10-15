@@ -16,6 +16,7 @@ import { releaseArtwork, getArtworkUrl } from "./artwork-cache.js";
 import { searchTrackMetadata, searchAlbumMetadata, fetchArtworkBlob, fetchAlbumTracklist, cleanQuery } from "../metadata/musicbrainz.js";
 import { retryScrobbleForTrack } from "../lastfm/scrobble.js";
 import { openNormalizeModal } from "./normalize-modal.js";
+import { recordLibraryModified } from "../store/sync-service.js";
 
 /**
  * 1曲分のメタデータ編集モーダルを表示
@@ -359,6 +360,7 @@ export function editTrackMetadata(track, onUpdated) {
               await deleteTrack(track.id);
               await removeTrackFromAllPlaylists(track.id).catch(() => {});
               releaseArtwork(track.id);
+              recordLibraryModified();
               toast("曲を削除しました", "ok");
               if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
               if (typeof onUpdated === "function") onUpdated(null);
@@ -411,6 +413,7 @@ export function editTrackMetadata(track, onUpdated) {
 
             await updateTrack(track.id, patch);
             releaseArtwork(track.id);
+            recordLibraryModified();
             const updatedTrack = { ...track, ...patch };
             Object.assign(track, patch);
 
@@ -778,6 +781,7 @@ export function editAlbumMetadata(album, onUpdated) {
               await removeTrackFromAllPlaylists(t.id).catch(() => {});
               releaseArtwork(t.id);
             }
+            recordLibraryModified();
             toast(`アルバムと全 ${album.tracks.length} 曲を削除しました`, "ok");
             if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
             if (typeof onUpdated === "function") onUpdated(null);
@@ -842,6 +846,7 @@ export function editAlbumMetadata(album, onUpdated) {
               releaseArtwork(t.id);
               Object.assign(t, individualPatch);
             }
+            recordLibraryModified();
 
             album.title = albumName;
             album.albumArtist = albumArtist;

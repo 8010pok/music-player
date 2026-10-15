@@ -106,3 +106,60 @@ export function sortArtists(artists, sortKey = "name-asc") {
       return list.sort((a, b) => (a.name || "").localeCompare(b.name || "", "ja"));
   }
 }
+
+/**
+ * 日本の五十音・アルファベット標準インデックス文字リスト
+ */
+export const JAPANESE_INDEX_CHARS = [
+  "あ", "か", "さ", "た", "な", "は", "ま", "や", "ら", "わ",
+  "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+  "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+  "#"
+];
+
+/**
+ * アーティスト名（またはテキスト）から五十音またはアルファベットのインデックス文字を判定
+ * - カタカナはひらがなに正規化
+ * - 英字は A-Z の大文字
+ * - 数字・記号・漢字等は "#"
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function getIndexChar(text) {
+  if (!text || typeof text !== "string") return "#";
+  const trimmed = text.trim();
+  if (!trimmed) return "#";
+
+  // 先頭の記号・括弧・引用符をスキップ
+  const stripped = trimmed.replace(/^["'「『（(【\[\s]+/, "");
+  const first = stripped[0] || trimmed[0];
+  if (!first) return "#";
+
+  // 英字 (A-Z)
+  if (/[a-zA-Z]/.test(first)) {
+    return first.toUpperCase();
+  }
+
+  // カタカナをひらがなに変換
+  let hira = first;
+  const code = first.charCodeAt(0);
+  if (code >= 0x30a1 && code <= 0x30f6) {
+    hira = String.fromCharCode(code - 0x60);
+  }
+
+  // ひらがな五十音判定
+  if (/^[あいうえおぁぃぅぇぉゔヴ]$/.test(hira)) return "あ";
+  if (/^[かきくけこがぎぐげごヵヶ]$/.test(hira)) return "か";
+  if (/^[さしすせそざじずぜぞ]$/.test(hira)) return "さ";
+  if (/^[たちつてとだぢづでどっ]$/.test(hira)) return "た";
+  if (/^[なにぬねの]$/.test(hira)) return "な";
+  if (/^[はひふへほばびぶべぼぱぴぷぺぽ]$/.test(hira)) return "は";
+  if (/^[まみむめも]$/.test(hira)) return "ま";
+  if (/^[やゆよゃゅょ]$/.test(hira)) return "や";
+  if (/^[らりるれろ]$/.test(hira)) return "ら";
+  if (/^[わをんゎゐゑ]$/.test(hira)) return "わ";
+
+  return "#";
+}
+
