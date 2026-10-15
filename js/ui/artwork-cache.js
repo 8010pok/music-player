@@ -12,6 +12,7 @@
  */
 
 const idToUrl = new Map();
+const brokenIds = new Set();
 
 /**
  * トラックに対応するアートワーク URL を返す。
@@ -28,11 +29,17 @@ const idToUrl = new Map();
  */
 export function getArtworkUrl(track) {
   if (!track || !track.id) return null;
+  if (brokenIds.has(track.id)) return null;
   if (!track.artworkBlob) return null;
+
   const cached = idToUrl.get(track.id);
   if (cached) return cached;
+
+  const blob = normalizeBlob(track.artworkBlob);
+  if (!blob || blob.size < 8) return null;
+
   try {
-    const u = URL.createObjectURL(track.artworkBlob);
+    const u = URL.createObjectURL(blob);
     idToUrl.set(track.id, u);
     return u;
   } catch {
@@ -41,9 +48,24 @@ export function getArtworkUrl(track) {
 }
 
 /**
- * 指定 ID のキャッシュ URL を破棄する（トラック削除時など）。
+ * 画像ロード失敗時に呼び出し、壊れた URL のキャッシュを破棄して以降の「？」表示を防ぐ。
+ * @param {string} id
+ */
+export function markArtworkBroken(id) {
+  if (!id) return;
+  brokenIds.add(id);
+  const u = idToUrl.get(id);
+  if (u) {
+    try { URL.revokeObjectURL(u); } catch {}
+    idToUrl.delete(id);
+  }
+}
+
+/**
+ * 指定 ID のキャッシュ URL を破棄する（トラック削除時やアートワーク差し替え時など）。
  */
 export function releaseArtwork(id) {
+  brokenIds.delete(id);
   const u = idToUrl.get(id);
   if (u) {
     try { URL.revokeObjectURL(u); } catch {}
@@ -58,8 +80,26 @@ export function releaseArtwork(id) {
  * する。解放後に再描画されれば getArtworkUrl が遅延再生成するため表示には影響しない。
  */
 export function releaseAllArtwork() {
+  brokenIds.clear();
   for (const u of idToUrl.values()) {
     try { URL.revokeObjectURL(u); } catch {}
   }
   idToUrl.clear();
+}
+
+function normalizeBlob(b) {
+  if (!b) return null;
+  if (typeof Blob !== "undefined" && b instanceof Blob) return b;
+  try {
+    if (b.buffer instanceof ArrayBuffer) {
+      return new Blob([b]);
+    }
+    if (b instanceof ArrayBuffer) {
+      return new Blob([b]);
+    }
+    if (Array.isArray(b) || (b.data && Array.isArray(b.data))) {
+      return new Blob([new Uint8Array(b.data || b)]);
+    }
+  } catch {}
+  return null;
 }

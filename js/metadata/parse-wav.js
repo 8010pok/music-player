@@ -16,6 +16,7 @@
 
 import { Reader, decode, readSlice, trimNullTerminated } from "./util.js";
 import { extractId3Lyrics } from "./lyrics.js";
+import { parseMp3 } from "./parse-mp3.js";
 
 export async function parseWav(blob) {
   const meta = makeEmpty();
@@ -60,12 +61,29 @@ export async function parseWav(blob) {
         if (subType === "INFO") parseInfo(buf.subarray(4), meta);
       }
     } else if (id === "id3 " || id === "ID3 ") {
-      // WAV に埋め込まれた ID3v2 タグ。歌詞(USLT/SYLT)があれば抽出する
-      // (RIFF/INFO には歌詞の標準タグが無いため、これが唯一の歌詞経路)
+      // WAV に埋め込まれた ID3v2 タグ。
+      // 歌詞(USLT/SYLT)およびジャケット写真(APIC)、メタデータを抽出
       try {
         const tag = new Uint8Array(await readSlice(blob, dataStart, dataEnd));
         const ly = extractId3Lyrics(tag);
         if (ly) meta.lyrics = ly;
+        const id3Meta = await parseMp3(new Blob([tag]));
+        if (id3Meta) {
+          if (!meta.title && id3Meta.title) meta.title = id3Meta.title;
+          if (!meta.artist && id3Meta.artist) meta.artist = id3Meta.artist;
+          if (!meta.album && id3Meta.album) meta.album = id3Meta.album;
+          if (!meta.albumArtist && id3Meta.albumArtist) meta.albumArtist = id3Meta.albumArtist;
+          if (!meta.year && id3Meta.year) meta.year = id3Meta.year;
+          if (!meta.genre && id3Meta.genre) meta.genre = id3Meta.genre;
+          if (!meta.trackNo && id3Meta.trackNo) meta.trackNo = id3Meta.trackNo;
+          if (!meta.composer && id3Meta.composer) meta.composer = id3Meta.composer;
+          if (!meta.discNo && id3Meta.discNo) meta.discNo = id3Meta.discNo;
+          if (!meta.bpm && id3Meta.bpm) meta.bpm = id3Meta.bpm;
+          if (!meta.artworkBlob && id3Meta.artworkBlob) {
+            meta.artworkBlob = id3Meta.artworkBlob;
+            meta.artworkMime = id3Meta.artworkMime;
+          }
+        }
       } catch {}
     }
     // チャンクは偶数バイト境界。次チャンク先頭へ進める。
@@ -80,16 +98,23 @@ export async function parseWav(blob) {
 
   if (sampleRate > 0 && dataLen > 0 && byteRate > 0) {
     meta.duration = dataLen / byteRate;
+  } else if (sampleRate > 0 && byteRate > 0 && blob.size > p) {
+    meta.duration = (blob.size - 44) / byteRate;
   }
   if (sampleRate > 0) {
     const codec = audioFormat === 1 ? "PCM" : audioFormat === 3 ? "IEEE Float" : audioFormat === 0xfffe ? "Extensible" : "WAV";
+    const bitrate = byteRate > 0
+      ? Math.round(byteRate * 8 / 1000)
+      : (sampleRate * (channels || 2) * (bitsPerSample || 16)) > 0
+        ? Math.round(sampleRate * (channels || 2) * (bitsPerSample || 16) / 1000)
+        : null;
     meta.audioProps = {
       codec,
       sampleRate,
-      bitrate: byteRate > 0 ? Math.round(byteRate * 8 / 1000) : null,
+      bitrate,
       channels: channels || null,
       bitDepth: bitsPerSample || null,
-      vbr: null,
+      vbr: false,
     };
   }
   return meta;

@@ -63,12 +63,30 @@ export async function extractMetadata(fileOrBlob, name) {
 
   if (!parsed.title) parsed.title = rawBaseName || "(無題)";
 
-  // 音声プロパティの bitrate が未設定の場合、 fileSize / duration から平均値を算出
-  if (parsed.audioProps && !parsed.audioProps.bitrate && fileOrBlob && fileOrBlob.size && parsed.duration > 0) {
+  // 音声プロパティの補完: パーサが audioProps を返さなかった場合でもデフォルトを生成し、
+  // bitrate が未設定かつ duration > 0 の場合は fileSize / duration から平均値を算出
+  const fileSize = (fileOrBlob && fileOrBlob.size) || 0;
+  if (!parsed.audioProps) {
+    parsed.audioProps = {
+      codec: (format || "AUDIO").toUpperCase(),
+      sampleRate: null,
+      bitrate: (fileSize > 0 && parsed.duration > 0) ? Math.round((fileSize * 8) / parsed.duration / 1000) : null,
+      channels: null,
+      bitDepth: null,
+      vbr: null,
+    };
+  } else if (!parsed.audioProps.bitrate && fileSize > 0 && parsed.duration > 0) {
     parsed.audioProps = {
       ...parsed.audioProps,
-      bitrate: Math.round((fileOrBlob.size * 8) / parsed.duration / 1000),
+      bitrate: Math.round((fileSize * 8) / parsed.duration / 1000),
     };
+  }
+
+  // アートワークの健全性チェック: 空または極小(8バイト未満)の不正 Blob を除外
+  if (parsed.artworkBlob) {
+    if (!(parsed.artworkBlob instanceof Blob) || parsed.artworkBlob.size < 8) {
+      parsed.artworkBlob = null;
+    }
   }
 
   return { ...parsed, mime, format: format || "unknown" };

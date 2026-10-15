@@ -16,7 +16,7 @@ import { setQueueAndPlay, stopPlayback } from "../player/audio-engine.js";
 import { toast, confirm, openModal, escapeHtml, escapeAttr } from "./components.js";
 import { appState } from "../state.js";
 import { go } from "../router.js";
-import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
+import { getArtworkUrl, releaseArtwork, markArtworkBroken } from "./artwork-cache.js";
 import { editTrackMetadata } from "./metadata-editor.js";
 import { openDriveImportModal, isDriveConnected } from "../gdrive/drive-service.js";
 import { openYouTubeDownloadModal } from "./youtube-modal.js";
@@ -679,7 +679,7 @@ function renderAlbums(refs) {
   refs.albumGrid.innerHTML = list.map((a) => {
     const artUrl = a.artworkTrack ? getArtworkUrl(a.artworkTrack) : null;
     const artImg = artUrl
-      ? `<img class="album-card-art" src="${escapeAttr(artUrl)}" alt="${escapeAttr(a.title)}" loading="lazy" decoding="async" />`
+      ? `<img class="album-card-art" src="${escapeAttr(artUrl)}" alt="${escapeAttr(a.title)}" loading="lazy" decoding="async" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('div'),{className:'album-card-art album-card-placeholder',textContent:'💿'}))" />`
       : `<div class="album-card-art album-card-placeholder">💿</div>`;
 
     const metaParts = [];
@@ -752,7 +752,7 @@ function renderArtists(refs) {
 
     const artUrl = a.artworkTrack ? getArtworkUrl(a.artworkTrack) : null;
     const avatar = artUrl
-      ? `<img class="artist-row-avatar" src="${escapeAttr(artUrl)}" alt="${escapeAttr(a.name)}" loading="lazy" decoding="async" />`
+      ? `<img class="artist-row-avatar" src="${escapeAttr(artUrl)}" alt="${escapeAttr(a.name)}" loading="lazy" decoding="async" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('div'),{className:'artist-row-avatar artist-avatar-placeholder',textContent:'👤'}))" />`
       : `<div class="artist-row-avatar artist-avatar-placeholder">👤</div>`;
 
     htmlParts.push(`
@@ -792,7 +792,7 @@ function rowHtml(t, cur) {
   // アートワーク URL（無ければ <img> 自体を出さず空の枠を残す）
   const artUrl = getArtworkUrl(t);
   const artImg = artUrl
-    ? `<img class="track-art" src="${escapeAttr(artUrl)}" alt="" loading="lazy" decoding="async" />`
+    ? `<img class="track-art" src="${escapeAttr(artUrl)}" alt="" loading="lazy" decoding="async" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('div'),{className:'track-art'}))" />`
     : `<div class="track-art"></div>`;
   // 手動並び替えモード時のみドラッグハンドル表示（アートワークの左隣に配置）。
   // ★ ただし検索/「無効非表示」フィルタが効いていると一覧は部分集合になり、

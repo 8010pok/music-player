@@ -283,6 +283,11 @@ body[data-route="player"] .mini-player {
   object-fit: cover;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
+.mini-art:not([src]),
+.mini-art[src=""] {
+  visibility: hidden;
+  opacity: 0;
+}
 
 .mini-meta {
   min-width: 0;

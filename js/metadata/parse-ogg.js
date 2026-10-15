@@ -23,14 +23,14 @@
  *   "vorbis" シグネチャ + 0x03 か、"OpusTags" を探す方針とする。
  */
 
-import { Reader, decode, readSlice } from "./util.js";
+import { Reader, decode, bytesToImageBlob, readSlice } from "./util.js";
 import { applyVorbisLyricTag, hasLyrics } from "./lyrics.js";
 
 export async function parseOgg(blob) {
   const meta = makeEmpty();
 
-  // 先頭 64KB だけ読めば多くの場合 comment ヘッダに到達できる
-  const head = new Uint8Array(await readSlice(blob, 0, Math.min(blob.size, 65536)));
+  // アートワークが埋め込まれている VorbisComment は数十〜数百KBに達するため最大1MBまでプローブ
+  const head = new Uint8Array(await readSlice(blob, 0, Math.min(blob.size, 1048576)));
   const pages = readPages(head);
   if (pages.length === 0) return meta;
 
@@ -94,6 +94,23 @@ export async function parseOgg(blob) {
   // 再生時間: 末尾ページの granule_position / sample_rate
   // meta を渡してコーデック別に正しいサンプルレートで秒換算する(下記参照)
   meta.duration = await estimateOggDuration(blob, meta);
+
+  // 平均ビットレート算出 (fileSize / duration)
+  if (meta.duration > 0 && blob && blob.size > 0) {
+    const calcBr = Math.round((blob.size * 8) / meta.duration / 1000);
+    if (!meta.audioProps) {
+      meta.audioProps = {
+        codec: "OGG",
+        sampleRate: 44100,
+        bitrate: calcBr,
+        channels: 2,
+        bitDepth: null,
+        vbr: true,
+      };
+    } else if (!meta.audioProps.bitrate) {
+      meta.audioProps.bitrate = calcBr;
+    }
+  }
 
   // 歌詞が結局空なら null に正規化
   if (meta.lyrics && !hasLyrics(meta.lyrics)) meta.lyrics = null;
@@ -180,7 +197,49 @@ function parseVorbisComment(bytes, meta) {
       case "DISC":
         meta.discNo = meta.discNo || val; break;
       case "BPM": meta.bpm = meta.bpm || val; break;
+      case "METADATA_BLOCK_PICTURE": {
+        try {
+          // base64 デコードして FLAC PICTURE ブロックと同様にパース
+          const u8 = decodeBase64ToBytes(val);
+          if (u8 && u8.length > 32) {
+            const pr = new Reader(u8.buffer, u8.byteOffset, u8.byteLength);
+            pr.readU32BE(); // type
+            const mimeLen = pr.readU32BE();
+            const mime = decode(pr.readBytes(mimeLen), "iso-8859-1");
+            const descLen = pr.readU32BE();
+            pr.skip(descLen + 16);
+            const picLen = pr.readU32BE();
+            if (picLen > 0 && picLen <= pr.remaining()) {
+              meta.artworkBlob = bytesToImageBlob(pr.readBytes(picLen), mime);
+            }
+          }
+        } catch {}
+        break;
+      }
+      case "COVERART": {
+        try {
+          const u8 = decodeBase64ToBytes(val);
+          if (u8 && u8.length > 0) {
+            meta.artworkBlob = bytesToImageBlob(u8, "image/jpeg");
+          }
+        } catch {}
+        break;
+      }
     }
+  }
+}
+
+function decodeBase64ToBytes(b64) {
+  try {
+    if (typeof Buffer !== "undefined") {
+      return new Uint8Array(Buffer.from(b64, "base64"));
+    }
+    const raw = atob(b64);
+    const u8 = new Uint8Array(raw.length);
+    for (let k = 0; k < raw.length; k++) u8[k] = raw.charCodeAt(k);
+    return u8;
+  } catch {
+    return null;
   }
 }
 

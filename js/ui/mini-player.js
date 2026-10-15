@@ -9,7 +9,7 @@
 import { appState } from "../state.js";
 import { togglePlay, playNext, playPrev } from "../player/audio-engine.js";
 import { go } from "../router.js";
-import { getArtworkUrl } from "./artwork-cache.js";
+import { getArtworkUrl, markArtworkBroken } from "./artwork-cache.js";
 import { escapeHtml } from "./components.js";
 
 let initialized = false;
@@ -27,6 +27,18 @@ export function initMiniPlayer() {
   const artistEl = document.getElementById("mini-artist");
   const artEl = document.getElementById("mini-art");
   const progressFill = document.getElementById("mini-progress-fill");
+
+  if (artEl) {
+    artEl.addEventListener("error", () => {
+      const cur = appState.get().currentTrack;
+      if (cur && cur.id) markArtworkBroken(cur.id);
+      artEl.removeAttribute("src");
+      artEl.style.visibility = "hidden";
+    });
+    artEl.addEventListener("load", () => {
+      artEl.style.visibility = "visible";
+    });
+  }
 
   // クリックで再生画面へ（操作ボタン以外）
   root.addEventListener("click", (e) => {
@@ -69,9 +81,13 @@ export function initMiniPlayer() {
     // アートワーク（ID キャッシュ経由で URL の再生成を避ける）
     const artUrl = getArtworkUrl(track) || track.artworkUrl || null;
     if (artUrl) {
-      if (artEl.getAttribute("src") !== artUrl) artEl.src = artUrl;
+      if (artEl.getAttribute("src") !== artUrl) {
+        artEl.style.visibility = "visible";
+        artEl.src = artUrl;
+      }
     } else {
       artEl.removeAttribute("src");
+      artEl.style.visibility = "hidden";
     }
   };
 

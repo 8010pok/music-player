@@ -17,7 +17,7 @@ import { initVisualizer, startVisualizer, stopVisualizer, decodePcmForVisualizat
 import { setLoved, retryScrobbleForTrack } from "../lastfm/scrobble.js";
 import { formatTime, toast, escapeHtml, openModal } from "./components.js";
 import { getBlob, updateTrack } from "../store/library-db.js";
-import { getArtworkUrl } from "./artwork-cache.js";
+import { getArtworkUrl, markArtworkBroken } from "./artwork-cache.js";
 import { editTrackMetadata } from "./metadata-editor.js";
 import { openNormalizeModal } from "./normalize-modal.js";
 import { fetchOnlineLyrics } from "../metadata/lrclib.js";
@@ -374,6 +374,16 @@ export async function mount(root) {
   refs.lyricsToggle.addEventListener("click", () => showLyrics(!lyricsVisible));
   // ジャケットタップで歌詞を表示
   refs.art.addEventListener("click", () => { if (!lyricsVisible) showLyrics(true); });
+  // アートワーク読み込み失敗時は「？」アイコンを出さず安全に隠す
+  refs.art.addEventListener("error", () => {
+    const cur = appState.get().currentTrack;
+    if (cur && cur.id) markArtworkBroken(cur.id);
+    refs.art.removeAttribute("src");
+    refs.art.style.visibility = "hidden";
+  });
+  refs.art.addEventListener("load", () => {
+    refs.art.style.visibility = "visible";
+  });
 
   // バックグラウンド/ロック中は rAF を停止し、復帰時に表示中なら再開する。
   const onLyricsVisibility = () => {
@@ -944,17 +954,36 @@ async function updateAudioQualityDisplay(refs, t) {
   let ap = t.audioProps || audioPropsCache.get(t.id) || null;
   renderBadge(ap);
 
-  // 未取得の場合は Blob から取得して更新
-  if (!ap) {
+  // 未取得、またはビットレートが欠落している場合は Blob から再取得・算出して更新
+  if (!ap || !ap.bitrate) {
     try {
       const blob = await getBlob(t.id);
-      if (blob) {
+      if (blob && blob.size > 0) {
         const fileLike = new File([blob], t.originalName || (t.title || "audio") + "." + (t.format || ""), { type: t.mime || blob.type || "" });
         const meta = await extractMetadata(fileLike);
-        if (meta && meta.audioProps) {
-          audioPropsCache.set(t.id, meta.audioProps);
+        let updatedProps = meta && meta.audioProps;
+        if (!updatedProps && t.duration > 0) {
+          updatedProps = {
+            codec: (t.format || "AUDIO").toUpperCase(),
+            sampleRate: null,
+            bitrate: Math.round((blob.size * 8) / t.duration / 1000),
+            channels: null,
+            bitDepth: null,
+            vbr: null,
+          };
+        } else if (updatedProps && !updatedProps.bitrate && t.duration > 0) {
+          updatedProps = {
+            ...updatedProps,
+            bitrate: Math.round((blob.size * 8) / t.duration / 1000),
+          };
+        }
+
+        if (updatedProps) {
+          audioPropsCache.set(t.id, updatedProps);
+          // トラック本体にも保存して次回以降 IDB から即座に読めるようにする
+          updateTrack(t.id, { audioProps: updatedProps, fileSize: blob.size }).catch(() => {});
           if (appState.get().currentTrack?.id === t.id) {
-            renderBadge(meta.audioProps);
+            renderBadge(updatedProps);
           }
         }
       }
@@ -969,6 +998,7 @@ function updateUI(refs, s) {
     refs.artist.textContent = "ライブラリから曲を選んでください";
     refs.album.textContent = "";
     refs.art.removeAttribute("src");
+    refs.art.style.visibility = "hidden";
     refs.playBtn.classList.remove("is-playing");
     refs.playBtn.setAttribute("aria-label", "再生");
     refs.seekBar.value = 0;
@@ -1013,10 +1043,12 @@ function updateUI(refs, s) {
   const artUrl = getArtworkUrl(t) || t.artworkUrl || null;
   if (artUrl) {
     if (refs.art.getAttribute("src") !== artUrl) {
+      refs.art.style.visibility = "visible";
       refs.art.src = artUrl;
     }
   } else {
     refs.art.removeAttribute("src");
+    refs.art.style.visibility = "hidden";
   }
 
   // アートワーク色による動的アンビエントオーロラ背景の更新

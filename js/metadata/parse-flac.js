@@ -50,6 +50,23 @@ export async function parseFlac(blob) {
     if (p >= blob.size) break;
   }
 
+  // 平均ビットレート算出 (fileSize / duration)
+  if (meta.duration > 0 && blob && blob.size > 0) {
+    const calcBr = Math.round((blob.size * 8) / meta.duration / 1000);
+    if (meta.audioProps) {
+      if (!meta.audioProps.bitrate) meta.audioProps.bitrate = calcBr;
+    } else {
+      meta.audioProps = {
+        codec: "FLAC",
+        sampleRate: 44100,
+        bitrate: calcBr,
+        channels: 2,
+        bitDepth: 16,
+        vbr: null,
+      };
+    }
+  }
+
   // 歌詞が結局空なら null に正規化
   if (meta.lyrics && !hasLyrics(meta.lyrics)) meta.lyrics = null;
 

@@ -36,6 +36,24 @@ export async function parseM4a(blob) {
   } catch (e) {
     console.warn("m4a parse error", e);
   }
+
+  // 音声プロパティ補完（ビットレート未取得時は fileSize/duration から算出）
+  if (meta.duration > 0 && blob && blob.size > 0) {
+    const calcBr = Math.round((blob.size * 8) / meta.duration / 1000);
+    if (!meta.audioProps) {
+      meta.audioProps = {
+        codec: "AAC",
+        sampleRate: 44100,
+        bitrate: calcBr,
+        channels: 2,
+        bitDepth: 16,
+        vbr: null,
+      };
+    } else if (!meta.audioProps.bitrate) {
+      meta.audioProps.bitrate = calcBr;
+    }
+  }
+
   // 歌詞が結局空なら null に正規化
   if (meta.lyrics && !hasLyrics(meta.lyrics)) meta.lyrics = null;
   return meta;
@@ -144,15 +162,47 @@ function parseStsd(payload, meta) {
     p += 4; // reserved
     const sampleRate = dv.getUint32(p, false) >>> 16; // 16.16 fixed の上位 16bit
     const codecLabel = codec === "mp4a" ? "AAC" : codec === "alac" ? "ALAC" : codec;
+
+    // esds (Elementary Stream Descriptor) からビットレートを取得
+    const esdsBitrate = extractEsdsBitrate(payload, p);
+
     meta.audioProps = {
       codec: codecLabel,
       sampleRate,
-      bitrate: null,        // 平均ビットレート (ファイルサイズ / 時間で計算は呼び出し側で)
+      bitrate: esdsBitrate || null,
       channels,
       bitDepth: sampleSize || null,
       vbr: null,
     };
   } catch {}
+}
+
+function extractEsdsBitrate(bytes, startOffset) {
+  for (let i = startOffset; i + 24 < bytes.length; i++) {
+    if (bytes[i] === 0x65 && bytes[i+1] === 0x73 && bytes[i+2] === 0x64 && bytes[i+3] === 0x73) {
+      // esds 発見
+      for (let j = i + 4; j + 16 < bytes.length; j++) {
+        if (bytes[j] === 0x04) { // DecoderConfigDescriptor tag
+          let k = j + 1;
+          while (k < bytes.length && (bytes[k] & 0x80)) k++;
+          k++;
+          const configStart = k;
+          if (configStart + 13 <= bytes.length) {
+            const dv = new DataView(bytes.buffer, bytes.byteOffset + configStart);
+            const maxBitrate = dv.getUint32(5, false);
+            const avgBitrate = dv.getUint32(9, false);
+            const br = avgBitrate || maxBitrate;
+            if (br > 8000 && br < 50000000) {
+              return Math.round(br / 1000);
+            }
+          }
+          break;
+        }
+      }
+      break;
+    }
+  }
+  return null;
 }
 
 function walkBoxes(reader, totalLen, cb) {
