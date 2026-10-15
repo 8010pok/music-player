@@ -571,6 +571,7 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
         // Blob をダウンロードして完全メタデータを抽出
         let blob = await fetchDriveAudioBlob(file.id);
 
+        let normResult = null;
         if (normalizeAudio) {
           if (typeof onProgress === "function") {
             onProgress(i + 1, driveFiles.length, { ...file, name: `${file.name} (🔊 音量ノーマライズ中…)` });
@@ -581,7 +582,7 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
             const targetRmsDb = (ref && typeof ref.rmsDb === "number")
               ? ref.rmsDb
               : (typeof pub.normalizeTargetRms === "number" ? pub.normalizeTargetRms : -14.0);
-            const normResult = await processAudioNormalization(blob, {
+            normResult = await processAudioNormalization(blob, {
               track: { ...file, title: inferred.title, artist: inferred.artist, album: folder },
               targetRmsDb,
             });
@@ -614,8 +615,8 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           trackNo: meta.trackNo || inferred.trackNo || "",
           discNo: meta.discNo || "",
           duration: duration || 0,
-          mime: normalizeAudio ? "audio/mp3" : (meta.mime || file.mimeType || mimeFromName(file.name)),
-          format: normalizeAudio ? "mp3" : (meta.format || formatFromName(file.name) || "unknown"),
+          mime: normResult ? "audio/mp3" : (meta.mime || file.mimeType || mimeFromName(file.name)),
+          format: normResult ? "mp3" : (meta.format || formatFromName(file.name) || "unknown"),
           addedAt: existing ? (existing.addedAt || Date.now()) : Date.now(),
           playCount: existing ? (existing.playCount || 0) : 0,
           lastPlayedAt: existing ? (existing.lastPlayedAt || 0) : 0,
@@ -627,6 +628,15 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           source: "gdrive",
           driveFileId: file.id,
           cached: true,
+          ...(normResult ? {
+            normalized: true,
+            normalizedGainDb: normResult.gainDb,
+            normalizedAt: Date.now(),
+            originalRmsDb: normResult.sourceLoudness?.rmsDb,
+            originalPeakDb: normResult.sourceLoudness?.peakDb,
+            normalizedRmsDb: normResult.finalRmsDb,
+            normalizedPeakDb: normResult.finalPeakDb,
+          } : {}),
         };
         if (existing && typeof existing.order === "number") track.order = existing.order;
         if (existing && existing.userEdited) {

@@ -274,6 +274,7 @@ export async function normalizeTrackAudio(track, {
 
   // 4. メタデータの更新
   const patch = {
+    cached: true,
     normalized: true,
     normalizedGainDb: result.gainDb,
     normalizedAt: Date.now(),

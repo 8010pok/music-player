@@ -6,9 +6,31 @@
  * - プレイリスト内の参照を自動置換
  */
 
-import { getAllTracks, putTrack, updateTrack, deleteTrack, getAllPlaylists, savePlaylist } from "./library-db.js";
+import { getAllTracks, getBlob, putTrack, updateTrack, deleteTrack, getAllPlaylists, savePlaylist } from "./library-db.js";
 import { releaseArtwork } from "../ui/artwork-cache.js";
 import { appState } from "../state.js";
+
+/**
+ * 不明アーティスト文字列かどうかを判定
+ * @param {string} str
+ * @returns {boolean}
+ */
+function isUnknownArtist(str) {
+  if (!str) return true;
+  const s = String(str).trim().toLowerCase();
+  return (
+    !s ||
+    s === "不明" ||
+    s === "不明なアーティスト" ||
+    s === "不明アーティスト" ||
+    s === "(不明アーティスト)" ||
+    s === "unknown" ||
+    s === "unknown artist" ||
+    s === "various artists" ||
+    s === "va" ||
+    s === "youtube"
+  );
+}
 
 /**
  * 比較用に文字列を正規化
@@ -72,8 +94,8 @@ export function areTracksDuplicate(trackA, trackB) {
   const artistB = normalizeTrackString(trackB.artist);
 
   // アーティスト名のチェック（不明の場合はタイトル一致を重く見る）
-  const isUnknownA = !artistA || artistA === "不明" || artistA === "unknown" || artistA === "不明アーティスト";
-  const isUnknownB = !artistB || artistB === "不明" || artistB === "unknown" || artistB === "不明アーティスト";
+  const isUnknownA = isUnknownArtist(artistA) || isUnknownArtist(trackA.artist);
+  const isUnknownB = isUnknownArtist(artistB) || isUnknownArtist(trackB.artist);
 
   if (!isUnknownA && !isUnknownB && artistA !== artistB) {
     return false;
@@ -243,7 +265,39 @@ export async function mergeAndDeduplicate(primary, duplicate, playlists = null) 
     primary.lastPlayedAt = maxLastPlayed;
   }
 
-  if (Object.keys(patch).length > 0) {
+  // 音源 Blob / ノーマライズ情報の引き継ぎ
+  // primary が未キャッシュで duplicate がキャッシュ済の場合、または duplicate のみノーマライズ済の場合
+  let transferredBlob = null;
+  if ((!primary.cached && duplicate.cached) || (!primary.normalized && duplicate.normalized)) {
+    try {
+      const dupBlob = await getBlob(duplicate.id);
+      if (dupBlob && dupBlob.size > 0) {
+        transferredBlob = dupBlob;
+        patch.cached = true;
+        primary.cached = true;
+        patch.fileSize = dupBlob.size;
+        primary.fileSize = dupBlob.size;
+        if (duplicate.normalized) {
+          patch.normalized = true;
+          patch.normalizedGainDb = duplicate.normalizedGainDb;
+          patch.normalizedAt = duplicate.normalizedAt;
+          patch.originalRmsDb = duplicate.originalRmsDb;
+          patch.originalPeakDb = duplicate.originalPeakDb;
+          patch.normalizedRmsDb = duplicate.normalizedRmsDb;
+          patch.normalizedPeakDb = duplicate.normalizedPeakDb;
+          patch.format = duplicate.format || "mp3";
+          patch.mime = duplicate.mime || "audio/mpeg";
+          primary.normalized = true;
+          primary.normalizedGainDb = duplicate.normalizedGainDb;
+        }
+      }
+    } catch (_) {}
+  }
+
+  if (transferredBlob) {
+    const merged = { ...primary, ...patch };
+    await putTrack(merged, transferredBlob);
+  } else if (Object.keys(patch).length > 0) {
     await updateTrack(primary.id, patch);
   }
 

@@ -268,20 +268,33 @@ export async function openNormalizeModal(track, opts = {}) {
   }
 
   // 試聴プレビュー再生
-  function togglePreview() {
+  async function togglePreview() {
     if (!sourceAudioBuffer) return;
 
-    if (isPreviewPlaying && previewAudioEl) {
+    if (isPreviewPlaying) {
       cleanupPreview();
       return;
     }
 
     try {
       cleanupPreview();
+
+      // メインプレイヤーが再生中ならプレビュー試聴の邪魔にならないよう一時停止
+      const mainAudioEl = document.getElementById("audio-el");
+      if (mainAudioEl && !mainAudioEl.paused) {
+        try { mainAudioEl.pause(); } catch (_) {}
+      }
+
       const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) throw new Error("Web Audio API がサポートされていません");
       previewAudioCtx = new AC();
 
-      // AudioBuffer から WAV/Blob を作って Audio 要素で再生 (または BufferSource)
+      // モバイル等で suspended の場合は resume する
+      if (previewAudioCtx.state === "suspended") {
+        await previewAudioCtx.resume();
+      }
+
+      // AudioBuffer から BufferSource を作って再生
       const bufferSource = previewAudioCtx.createBufferSource();
       bufferSource.buffer = sourceAudioBuffer;
 
@@ -292,15 +305,18 @@ export async function openNormalizeModal(track, opts = {}) {
       previewGainNode.connect(previewAudioCtx.destination);
 
       bufferSource.onended = () => {
-        cleanupPreview();
+        if (isPreviewPlaying) {
+          cleanupPreview();
+        }
       };
 
       bufferSource.start(0);
       isPreviewPlaying = true;
-      previewToggleBtn.textContent = "⏹ 停止";
+      if (previewToggleBtn) previewToggleBtn.textContent = "⏹ 停止";
     } catch (e) {
       console.warn("[norm-modal] プレビューエラー:", e);
       toast("プレビュー再生に失敗しました", "err");
+      cleanupPreview();
     }
   }
 
@@ -415,8 +431,8 @@ export async function openNormalizeModal(track, opts = {}) {
         item.addEventListener("click", async () => {
           toast("基準曲の音量を解析中…", "info");
           try {
-            const blob = await getBlob(t.id);
-            if (!blob) throw new Error("音源データがありません");
+            const blob = await getTrackAudioBlob(t);
+            if (!blob) throw new Error("音源データが見つかりませんでした");
             const AC = window.AudioContext || window.webkitAudioContext;
             const ctx = new AC();
             const ab = await blob.arrayBuffer();

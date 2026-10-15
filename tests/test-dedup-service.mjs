@@ -89,6 +89,12 @@ test("タイトルが一致してもアーティストが異なる場合は重�
   strictEqual(areTracksDuplicate(a, b), false, "別アーティストは重複しない");
 });
 
+test("アーティストが不明表記（'不明なアーティスト' と '(不明アーティスト)' 等）でもタイトルが一致すれば重複とみなす", () => {
+  const a = { id: "t1", title: "Track Title", artist: "不明なアーティスト", duration: 200 };
+  const b = { id: "t2", title: "Track Title", artist: "(不明アーティスト)", duration: 200 };
+  ok(areTracksDuplicate(a, b), "不明アーティスト表記の違いを吸収して重複判定されること");
+});
+
 console.log("=== 3. 重複グループ検出テスト ===");
 
 test("全トラックから重複クラスタを検出し、最適な方を primary に選定する", () => {
@@ -107,81 +113,89 @@ test("全トラックから重複クラスタを検出し、最適な方を prim
 
 console.log("=== 4. 重複統合 & マージ削除テスト ===");
 
-await asyncTest("重複曲のマージ削除: メモやお気に入りが統合され、重複曲が削除、プレイリスト参照が置換される", async () => {
-  const tracksStore = new Map();
-  const playlistsStore = new Map();
+const tracksStore = new Map();
+const playlistsStore = new Map();
+const blobsStore = new Map();
 
-  globalThis.indexedDB = {
-    open: () => {
-      const req = {
-        result: {
-          objectStoreNames: { contains: () => true },
-          transaction: () => {
-            const tx = {
-              oncomplete: null,
-              onerror: null,
-              onabort: null,
-              addEventListener: () => {},
-              objectStore: (name) => ({
-                getAll: () => {
-                  const getReq = {
-                    result: name === "tracks" ? Array.from(tracksStore.values()) : Array.from(playlistsStore.values()),
-                    onsuccess: null,
-                    transaction: tx,
-                  };
-                  queueMicrotask(() => {
-                    if (getReq.onsuccess) getReq.onsuccess({ target: getReq });
-                    if (tx.oncomplete) tx.oncomplete();
-                  });
-                  return getReq;
-                },
-                get: (id) => {
-                  const getReq = {
-                    result: name === "tracks" ? tracksStore.get(id) : playlistsStore.get(id),
-                    onsuccess: null,
-                    transaction: tx,
-                  };
-                  queueMicrotask(() => {
-                    if (getReq.onsuccess) getReq.onsuccess({ target: getReq });
-                    if (tx.oncomplete) tx.oncomplete();
-                  });
-                  return getReq;
-                },
-                put: (item) => {
-                  if (name === "tracks") tracksStore.set(item.id, item);
-                  if (name === "playlists") playlistsStore.set(item.id, item);
-                  const putReq = { result: item.id, onsuccess: null, transaction: tx };
-                  queueMicrotask(() => {
-                    if (putReq.onsuccess) putReq.onsuccess({ target: putReq });
-                    if (tx.oncomplete) tx.oncomplete();
-                  });
-                  return putReq;
-                },
-                delete: (id) => {
-                  if (name === "tracks") tracksStore.delete(id);
-                  if (name === "playlists") playlistsStore.delete(id);
-                  const delReq = { result: id, onsuccess: null, transaction: tx };
-                  queueMicrotask(() => {
-                    if (delReq.onsuccess) delReq.onsuccess({ target: delReq });
-                    if (tx.oncomplete) tx.oncomplete();
-                  });
-                  return delReq;
-                },
-              }),
-            };
-            return tx;
-          },
-          close: () => {},
+globalThis.indexedDB = {
+  open: () => {
+    const req = {
+      result: {
+        objectStoreNames: { contains: () => true },
+        transaction: () => {
+          const tx = {
+            oncomplete: null,
+            onerror: null,
+            onabort: null,
+            addEventListener: () => {},
+            objectStore: (name) => ({
+              getAll: () => {
+                let res = [];
+                if (name === "tracks") res = Array.from(tracksStore.values());
+                else if (name === "playlists") res = Array.from(playlistsStore.values());
+                else if (name === "blobs") res = Array.from(blobsStore.values());
+                const getReq = { result: res, onsuccess: null, transaction: tx };
+                queueMicrotask(() => {
+                  if (getReq.onsuccess) getReq.onsuccess({ target: getReq });
+                  if (tx.oncomplete) tx.oncomplete();
+                });
+                return getReq;
+              },
+              get: (id) => {
+                let res = undefined;
+                if (name === "tracks") res = tracksStore.get(id);
+                else if (name === "playlists") res = playlistsStore.get(id);
+                else if (name === "blobs") res = blobsStore.get(id);
+                const getReq = { result: res, onsuccess: null, transaction: tx };
+                queueMicrotask(() => {
+                  if (getReq.onsuccess) getReq.onsuccess({ target: getReq });
+                  if (tx.oncomplete) tx.oncomplete();
+                });
+                return getReq;
+              },
+              put: (item, key) => {
+                const k = key !== undefined ? key : (item && item.id);
+                if (name === "tracks") tracksStore.set(k, item);
+                else if (name === "playlists") playlistsStore.set(k, item);
+                else if (name === "blobs") blobsStore.set(k, item);
+                const putReq = { result: k, onsuccess: null, transaction: tx };
+                queueMicrotask(() => {
+                  if (putReq.onsuccess) putReq.onsuccess({ target: putReq });
+                  if (tx.oncomplete) tx.oncomplete();
+                });
+                return putReq;
+              },
+              delete: (id) => {
+                if (name === "tracks") tracksStore.delete(id);
+                else if (name === "playlists") playlistsStore.delete(id);
+                else if (name === "blobs") blobsStore.delete(id);
+                const delReq = { result: id, onsuccess: null, transaction: tx };
+                queueMicrotask(() => {
+                  if (delReq.onsuccess) delReq.onsuccess({ target: delReq });
+                  if (tx.oncomplete) tx.oncomplete();
+                });
+                return delReq;
+              },
+            }),
+          };
+          return tx;
         },
-        onsuccess: null,
-        onerror: null,
-      };
-      queueMicrotask(() => {
-        if (req.onsuccess) req.onsuccess({ target: req });
-      });
-      return req;
-    },
-  };
+        close: () => {},
+      },
+      onsuccess: null,
+      onerror: null,
+    };
+    queueMicrotask(() => {
+      if (req.onsuccess) req.onsuccess({ target: req });
+    });
+    return req;
+  },
+};
+
+await asyncTest("重複曲のマージ削除: メモやお気に入りが統合され、重複曲が削除、プレイリスト参照が置換される", async () => {
+  tracksStore.clear();
+  playlistsStore.clear();
+  blobsStore.clear();
 
   const primary = {
     id: "t-primary",
@@ -229,6 +243,39 @@ await asyncTest("重複曲のマージ削除: メモやお気に入りが統合�
   // 検証3: プレイリストの trackIds が t-primary に置換されたこと
   const updatedPl = playlistsStore.get("pl-1");
   deepStrictEqual(updatedPl.trackIds, ["t-other", "t-primary"], "プレイリスト内の参照が置換されたこと");
+});
+
+asyncTest("重複曲マージ: duplicate 側のノーマライズ情報・音源キャッシュが primary に引き継がれる", async () => {
+  const p = {
+    id: "t-uncached-drive",
+    title: "Song",
+    artist: "Artist",
+    source: "gdrive",
+    cached: false,
+    normalized: false,
+  };
+  const d = {
+    id: "t-cached-norm",
+    title: "Song",
+    artist: "Artist",
+    source: "gdrive",
+    cached: true,
+    normalized: true,
+    normalizedGainDb: 3.5,
+  };
+
+  tracksStore.set(p.id, p);
+  tracksStore.set(d.id, d);
+  blobsStore.set(d.id, { id: d.id, blob: new Blob(["normalized-audio-data"], { type: "audio/mpeg" }) });
+
+  await mergeAndDeduplicate(p, d, []);
+
+  strictEqual(tracksStore.has(d.id), false, "duplicate は削除される");
+  const mergedP = tracksStore.get(p.id);
+  strictEqual(mergedP.cached, true, "cached: true に昇格されること");
+  strictEqual(mergedP.normalized, true, "normalized: true が引き継がれること");
+  strictEqual(mergedP.normalizedGainDb, 3.5, "normalizedGainDb が引き継がれること");
+  ok(blobsStore.has(p.id), "音源 Blob が primary に引き継がれたこと");
 });
 
 console.log("============================================================");

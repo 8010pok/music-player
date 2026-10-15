@@ -7,7 +7,7 @@
  * バージョンを上げると古いキャッシュは破棄される。
  */
 
-const CACHE_VERSION = "v1.4.1";
+const CACHE_VERSION = "v1.4.2";
 const STATIC_CACHE = `static-${CACHE_VERSION}`;
 const API_CACHE = `api-${CACHE_VERSION}`;
 const IMG_CACHE = `img-${CACHE_VERSION}`;
@@ -28,9 +28,11 @@ const PRECACHE_URLS = [
   "./js/store/queue-db.js",
   "./js/store/settings.js",
   "./js/store/sync-service.js",
+  "./js/store/dedup-service.js",
   "./js/gdrive/drive-service.js",
   "./js/audio/lame.min.js",
   "./js/audio/mp3-encoder.js",
+  "./js/audio/normalize-service.js",
   "./js/youtube/youtube-service.js",
   "./js/player/audio-engine.js",
   "./js/player/visualizer.js",
@@ -54,6 +56,7 @@ const PRECACHE_URLS = [
   "./js/lastfm/api.js",
   "./js/lastfm/auth.js",
   "./js/lastfm/scrobble.js",
+  "./js/lastfm/scrobble-cleaner.js",
   "./js/lastfm/stats.js",
   "./js/lastfm/stats-cache.js",
   "./js/lastfm/stats-compare.js",
@@ -63,6 +66,7 @@ const PRECACHE_URLS = [
   "./js/ui/components.js",
   "./js/ui/artwork-cache.js",
   "./js/ui/metadata-editor.js",
+  "./js/ui/normalize-modal.js",
   "./js/ui/view-welcome.js",
   "./js/ui/view-player.js",
   "./js/ui/view-library.js",
