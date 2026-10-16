@@ -6,13 +6,13 @@
  * - 曲一覧: ディスク/トラック番号順、複数ディスク時のDisc見出し、曲タップ再生
  */
 
-import { getAllTracks, deleteTrack, removeTrackFromAllPlaylists } from "../store/library-db.js";
+import { getAllTracks, deleteTrack, removeTrackFromAllPlaylists, updateTrack, getAllPlaylists, savePlaylist, addTracksToPlaylist } from "../store/library-db.js";
 import { groupTracksIntoAlbums, parseTrackIndex } from "../metadata/album-util.js";
 import { setQueueAndPlay, setShuffleMode, stopPlayback, prewarmTrack, prewarmTracks, playNextTrack, addToQueueEnd } from "../player/audio-engine.js";
 import { appState } from "../state.js";
 import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
 import { go } from "../router.js";
-import { escapeHtml, escapeAttr, toast, confirm } from "./components.js";
+import { escapeHtml, escapeAttr, toast, confirm, openModal, dismissActiveModal, promptForm } from "./components.js";
 import { editTrackMetadata, editAlbumMetadata } from "./metadata-editor.js";
 
 let album = null;
@@ -272,15 +272,10 @@ function renderTrackRows(alb) {
         </div>
         <div class="album-track-right">
           ${lovedMark}
-          <button class="icon-btn track-action-btn" data-act="play-next" title="次に再生">⏭</button>
-          <button class="icon-btn track-action-btn" data-act="add-queue" title="キューの末尾に追加">＋</button>
-          <button class="icon-btn edit-track-btn" data-act="edit" title="曲の情報を編集">
-            <svg class="ic" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
-          </button>
-          <button class="icon-btn delete-track-btn" data-act="delete" title="曲を削除" style="color: #ff453a;">
-            <svg class="ic" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
-          </button>
           <span class="album-track-dur">${durStr}</span>
+          <button class="icon-btn album-track-more-btn" data-act="more" title="メニュー" aria-label="曲メニュー">
+            <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.75"/><circle cx="12" cy="12" r="1.75"/><circle cx="12" cy="19" r="1.75"/></svg>
+          </button>
         </div>
       </li>
     `;
@@ -305,6 +300,16 @@ function collectRefs(root) {
 
 async function onListClick(e, root) {
   const btn = e.target.closest("button[data-act]");
+  if (btn && btn.dataset.act === "more") {
+    e.stopPropagation();
+    const row = btn.closest(".track-row");
+    const id = row?.dataset.id;
+    const t = album.tracks.find((x) => x.id === id);
+    if (t) {
+      openTrackActionsModal(t, root);
+    }
+    return;
+  }
   if (btn && btn.dataset.act === "play-next") {
     const row = btn.closest(".track-row");
     const t = album.tracks.find((x) => x.id === row?.dataset.id);
@@ -323,37 +328,6 @@ async function onListClick(e, root) {
     const t = album.tracks.find((x) => x.id === id);
     if (t) {
       await editTrackMetadata(t, () => mount(root));
-    }
-    return;
-  }
-  if (btn && btn.dataset.act === "delete") {
-    const row = btn.closest(".track-row");
-    const id = row?.dataset.id;
-    const t = album.tracks.find((x) => x.id === id);
-    if (t) {
-      const yes = await confirm(`「${t.title || "(無題)"}」を削除しますか？`, { danger: true, okLabel: "削除" });
-      if (yes) {
-        if (appState.get().currentTrack?.id === t.id) {
-          stopPlayback();
-        }
-        try {
-          await deleteTrack(t.id);
-        } catch (err) {
-          console.warn("曲削除に失敗", err);
-          toast("削除に失敗しました", "err");
-          return;
-        }
-        await removeTrackFromAllPlaylists(t.id).catch(() => {});
-        releaseArtwork(t.id);
-        album.tracks = album.tracks.filter((x) => x.id !== t.id);
-        if (album.tracks.length === 0) {
-          toast("アルバムの全曲が削除されました", "ok");
-          go("albums");
-        } else {
-          toast("削除しました", "ok");
-          mount(root);
-        }
-      }
     }
     return;
   }
@@ -440,3 +414,171 @@ function formatTime(sec) {
   const s = Math.floor(sec % 60);
   return `${m}:${s < 10 ? "0" : ""}${s}`;
 }
+
+/**
+ * トラックのアクションメニュー（3点リーダー押下時）
+ */
+function openTrackActionsModal(track, root) {
+  if (!track) return;
+  const isLoved = !!track.loved;
+  const actions = [
+    {
+      label: "⏭ 次に再生",
+      primary: true,
+      onClick: () => {
+        playNextTrack(track);
+      },
+    },
+    {
+      label: "＋ 再生待ちキューの最後に追加",
+      onClick: () => {
+        addToQueueEnd(track);
+      },
+    },
+    {
+      label: "📑 プレイリストに追加",
+      onClick: () => {
+        openAddToPlaylistModal(track);
+      },
+    },
+    {
+      label: "✏️ メタデータ（曲情報）を編集",
+      onClick: () => {
+        editTrackMetadata(track, () => mount(root));
+      },
+    },
+    {
+      label: isLoved ? "💔 お気に入り（Loved）を解除" : "❤️ お気に入り（Loved）に追加",
+      onClick: async () => {
+        const nextLoved = !isLoved;
+        await updateTrack(track.id, { loved: nextLoved });
+        track.loved = nextLoved;
+        toast(nextLoved ? "お気に入りに追加しました" : "お気に入りを解除しました", "ok");
+        mount(root);
+      },
+    },
+    {
+      label: "🗑️ ライブラリから削除",
+      danger: true,
+      onClick: async () => {
+        const yes = await confirm(`「${track.title || "(無題)"}」を削除しますか？\n（曲データは完全に削除されます）`, { danger: true, okLabel: "削除" });
+        if (yes) {
+          if (appState.get().currentTrack?.id === track.id) {
+            stopPlayback();
+          }
+          try {
+            await deleteTrack(track.id);
+          } catch (err) {
+            console.warn("曲削除に失敗", err);
+            toast("削除に失敗しました", "err");
+            return;
+          }
+          await removeTrackFromAllPlaylists(track.id).catch(() => {});
+          releaseArtwork(track.id);
+          album.tracks = album.tracks.filter((x) => x.id !== track.id);
+          if (album.tracks.length === 0) {
+            toast("アルバムの全曲が削除されました", "ok");
+            go("albums");
+          } else {
+            toast("削除しました", "ok");
+            mount(root);
+          }
+        }
+      },
+    },
+  ];
+
+  const bodyEl = document.createElement("div");
+  bodyEl.style.fontSize = "13px";
+  bodyEl.style.color = "var(--fg-muted)";
+  bodyEl.style.padding = "4px 0 8px";
+  const artistText = track.artist || (album ? album.albumArtist : "");
+  bodyEl.textContent = artistText ? `アーティスト: ${artistText}` : "";
+
+  openModal({
+    title: track.title || "(無題)",
+    body: bodyEl,
+    actions,
+  });
+}
+
+/**
+ * プレイリスト選択・追加モーダル
+ */
+async function openAddToPlaylistModal(track) {
+  const playlists = await getAllPlaylists();
+  const wrap = document.createElement("div");
+  wrap.className = "playlist-picker-modal";
+
+  let listHtml = `
+    <div class="playlist-picker-list">
+      <button type="button" class="playlist-picker-item create-new" id="btn-create-playlist-for-track">
+        <span class="pl-picker-icon">➕</span>
+        <div class="pl-picker-text">
+          <div class="pl-picker-title">新規プレイリストを作成して追加</div>
+        </div>
+      </button>
+  `;
+
+  if (playlists.length === 0) {
+    listHtml += `<div class="empty-hint" style="padding: 16px 10px; font-size: 13px; color: var(--fg-muted); text-align: center;">作成済みのプレイリストはありません</div>`;
+  } else {
+    for (const pl of playlists) {
+      const count = Array.isArray(pl.trackIds) ? pl.trackIds.length : 0;
+      const alreadyIn = Array.isArray(pl.trackIds) && pl.trackIds.includes(track.id);
+      listHtml += `
+        <button type="button" class="playlist-picker-item ${alreadyIn ? "is-added" : ""}" data-pl-id="${escapeAttr(pl.id)}">
+          <span class="pl-picker-icon">📑</span>
+          <div class="pl-picker-text">
+            <div class="pl-picker-title">${escapeHtml(pl.name || "(無題)")}</div>
+            <div class="pl-picker-sub">${count}曲 ${alreadyIn ? "（追加済み）" : ""}</div>
+          </div>
+          ${alreadyIn ? '<span class="pl-picker-check">✓</span>' : ""}
+        </button>
+      `;
+    }
+  }
+  listHtml += `</div>`;
+  wrap.innerHTML = listHtml;
+
+  openModal({
+    title: `「${track.title || "曲"}」をプレイリストに追加`,
+    body: wrap,
+    actions: [
+      { label: "キャンセル" },
+    ],
+  });
+
+  const createBtn = wrap.querySelector("#btn-create-playlist-for-track");
+  if (createBtn) {
+    createBtn.addEventListener("click", async () => {
+      dismissActiveModal();
+      const res = await promptForm("新規プレイリスト", [
+        { name: "name", label: "プレイリスト名", value: "", placeholder: "例: マイベスト" },
+      ], { okLabel: "作成して追加" });
+      if (res && res.name && res.name.trim()) {
+        const newId = "pl-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6);
+        const newPl = {
+          id: newId,
+          name: res.name.trim(),
+          trackIds: [track.id],
+          createdAt: Date.now(),
+        };
+        await savePlaylist(newPl);
+        toast(`プレイリスト「${newPl.name}」を作成し、曲を追加しました`, "ok");
+      }
+    });
+  }
+
+  wrap.querySelectorAll(".playlist-picker-item[data-pl-id]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const plId = btn.dataset.plId;
+      const targetPl = playlists.find((p) => p.id === plId);
+      if (!targetPl) return;
+      dismissActiveModal();
+      await addTracksToPlaylist(plId, [track.id]);
+      toast(`「${targetPl.name}」に追加しました`, "ok");
+    });
+  });
+}
+

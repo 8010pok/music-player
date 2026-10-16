@@ -303,3 +303,37 @@ test("14. iOS ワンタップ即時再生保証 ＆ ミニプレイヤーへの�
   // 4) view-library が currentTrack 変化時に innerHTML 全再構築ではなく updatePlayingHighlight を使うこと
   assert.match(viewLibraryCode, /function updatePlayingHighlight\(refs\)/, "view-library に軽量な updatePlayingHighlight が実装されている");
 });
+
+test("15. アルバムページの曲タイトル視認性向上 ＆ 3点リーダーメニュー（次に再生、プレイリストに追加、メタデータ編集）の検証", () => {
+  const rootDir = path.join(__dirname, "..");
+  const viewAlbumCode = fs.readFileSync(path.join(rootDir, "js/ui/view-album.js"), "utf-8");
+  const viewsCssCode = fs.readFileSync(path.join(rootDir, "css/views.css"), "utf-8");
+
+  // 1) アルバムトラック行に 3点リーダーボタン (data-act="more") が配置され、不要な横並びボタンが撤廃されていること
+  assert.match(viewAlbumCode, /<button class="icon-btn album-track-more-btn" data-act="more"/, "album-track-more-btn が存在する");
+  assert.ok(!viewAlbumCode.includes('class="icon-btn track-action-btn" data-act="play-next"'), "直接配置されていた次に再生ボタンが撤廃されている");
+
+  // 2) 3点リーダーから次に再生、キュー末尾追加、プレイリスト追加、メタデータ編集、削除を選べること
+  assert.match(viewAlbumCode, /function openTrackActionsModal/, "openTrackActionsModal が実装されている");
+  assert.match(viewAlbumCode, /label:\s*["']⏭ 次に再生["']/, "メニューに「次に再生」が含まれる");
+  assert.match(viewAlbumCode, /label:\s*["']📑 プレイリストに追加["']/, "メニューに「プレイリストに追加」が含まれる");
+  assert.match(viewAlbumCode, /label:\s*["']✏️ メタデータ（曲情報）を編集["']/, "メニューに「メタデータ（曲情報）を編集」が含まれる");
+
+  // 3) プレイリスト追加モーダル (openAddToPlaylistModal) で新規作成＆既存選択ができること
+  assert.match(viewAlbumCode, /async function openAddToPlaylistModal/, "openAddToPlaylistModal が実装されている");
+  assert.match(viewAlbumCode, /addTracksToPlaylist/, "addTracksToPlaylist が呼ばれる");
+
+  // 4) CSS でアルバム曲タイトルのフォントサイズが 15px かつ太字で視認性向上されていること
+  assert.match(viewsCssCode, /\.album-track-row \.track-title\s*\{[\s\S]*?font-size:\s*15px;[\s\S]*?font-weight:\s*600;/, "アルバム曲タイトルの視認性が向上している");
+});
+
+test("16. 再生待ちキュー（Up Next）の小型化・コンパクトスタイルの検証", () => {
+  const rootDir = path.join(__dirname, "..");
+  const viewsCssCode = fs.readFileSync(path.join(rootDir, "css/views.css"), "utf-8");
+
+  // 1) player-queue-drawer の高さが 48% / max-height 330px 程度に小型化されていること (以前は 70% / 480px)
+  assert.match(viewsCssCode, /\.player-queue-drawer\s*\{[\s\S]*?height:\s*48%;[\s\S]*?max-height:\s*330px;/, "再生待ちキューが小型化されている");
+  // 2) アイテムとヘッダーのパディング・フォントがスリム化されていること
+  assert.match(viewsCssCode, /\.player-queue-item\s*\{[\s\S]*?padding:\s*5px 8px;/, "player-queue-item がスリム化されている");
+});
+
