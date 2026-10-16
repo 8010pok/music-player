@@ -223,7 +223,6 @@ export async function sendScrobble(rawTrack, _durationSec, startedAtMs, sessionI
     artist: sanitizeLastFmValue(resolved.artist),
     track: sanitizeLastFmValue(resolved.title),
     album: sanitizeLastFmValue(resolved.album),
-    albumArtist: sanitizeLastFmValue(resolved.albumArtist),
     timestamp,
     duration: track.duration ? Math.floor(track.duration) : undefined,
     trackNumber: normalizeTrackNumber(track.trackNo),
@@ -236,10 +235,37 @@ export async function sendScrobble(rawTrack, _durationSec, startedAtMs, sessionI
   }
 
   try {
-    const res = await callPost("track.scrobble", flatten(payload), apiKey, apiSecret, sessionKey);
-    // Last.fm はリクエストを受け付けても個別の scrobble を ignored にする
-    // ことがあるため、レスポンスを必ず検査する (公式仕様の要請)
-    const ignoredInfo = inspectScrobbleResponse(res);
+    let res = await callPost("track.scrobble", flatten(payload), apiKey, apiSecret, sessionKey);
+    let ignoredInfo = inspectScrobbleResponse(res);
+
+    // ★ Last.fm Code 1 (Filtered artist / アーティスト名が無視されました) の自動救済リトライ
+    // Last.fm のスパムフィルターがアルバム名や特殊文字で誤判定した場合、
+    // パラメータを最小構成（album除外、アーティスト名厳格トリム）にして即座に自動再試行
+    if (ignoredInfo && ignoredInfo.reasons?.some((r) => r.includes("アーティスト名が無視"))) {
+      console.warn("[scrobble] Last.fm にアーティスト名が無視されたため、フォールバック再試行を実行します", payload);
+      
+      const retryPayload = { ...payload };
+      delete retryPayload.album; // アルバム名との不一致によるフィルターを回避
+      
+      // 特殊記号や全角文字、括弧を除去したシンプルなアーティスト名
+      let simplifiedArtist = payload.artist.replace(/[\(（].*?[\)）]/g, "").replace(/[-–—/／・].*$/, "").trim();
+      if (simplifiedArtist && simplifiedArtist.length >= 2) {
+        retryPayload.artist = simplifiedArtist;
+      }
+
+      try {
+        const retryRes = await callPost("track.scrobble", flatten(retryPayload), apiKey, apiSecret, sessionKey);
+        const retryIgnored = inspectScrobbleResponse(retryRes);
+        if (!retryIgnored || retryIgnored.accepted > 0) {
+          console.info("[scrobble] フォールバック再試行に成功しました！", retryPayload);
+          appState.set({ scrobbleReason: null, scrobbleRejectedTrack: null });
+          return "sent";
+        }
+      } catch (retryErr) {
+        console.warn("[scrobble] フォールバック再試行通信エラー", retryErr);
+      }
+    }
+
     if (ignoredInfo) {
       console.warn("[scrobble] Last.fm に拒否されました", ignoredInfo);
       const reasons = [...new Set(ignoredInfo.reasons || [])].filter(Boolean);
@@ -336,8 +362,6 @@ export async function flushQueue() {
         params[`timestamp[${i}]`] = String(p.timestamp || 0);
         const alb = sanitizeLastFmValue(resolved.album || p.album || "");
         if (alb) params[`album[${i}]`] = alb;
-        const albArt = sanitizeLastFmValue(resolved.albumArtist || p.albumArtist || "");
-        if (albArt) params[`albumArtist[${i}]`] = albArt;
         if (p.duration) params[`duration[${i}]`] = String(p.duration);
         // 既にキューにある旧データが "5/12" 形式の trackNumber を持つ可能性があるため
         // 送信時にも整数へ正規化する（新規 enqueue 分は payload 構築時に正規化済み）。
@@ -481,7 +505,6 @@ function buildTrackParams(track) {
     artist: sanitizeLastFmValue(resolved.artist),
     track: sanitizeLastFmValue(resolved.title),
     album: sanitizeLastFmValue(resolved.album),
-    albumArtist: sanitizeLastFmValue(resolved.albumArtist),
     duration: track.duration ? Math.floor(track.duration) : undefined,
     trackNumber: normalizeTrackNumber(track.trackNo),
   });

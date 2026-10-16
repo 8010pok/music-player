@@ -35,6 +35,21 @@ export function isPlaceholderArtist(artist) {
     "googledrive",
     "gdrive",
     "drive",
+    "download",
+    "downloads",
+    "music",
+    "mymusic",
+    "audio",
+    "sound",
+    "voice",
+    "recording",
+    "album",
+    "single",
+    "singles",
+    "root",
+    "folder",
+    "local",
+    "video",
     "unknownartist",
     "unknown",
     "unknownsong",
@@ -89,16 +104,23 @@ export function cleanArtistName(artist) {
   // 3. 末尾のファイル拡張子 (.mp3, .flac 等) の除去
   s = s.replace(/\.(mp3|flac|m4a|wav|aac|ogg|opus|webm|wma)$/i, "");
 
-  // 4. YouTube 自動生成トピックチャンネル サフィックスの除去 (例: "YOASOBI - Topic" → "YOASOBI")
+  // 4. 先頭のトラック番号・記号（例: "01. ", "01 - ", "01 "）の除去
+  s = s.replace(/^\s*\d{1,3}[\s._-]+\s*/, "");
+
+  // 5. キャラクターソング特有の (CV: ...) / （CV. ...）の除去 (Last.fm Filter 回避)
+  s = s.replace(/\s*[\(（]CV[.:\s][^\)）]+[\)）]/gi, "");
+
+  // 6. YouTube 自動生成トピックチャンネル サフィックスの除去 (例: "YOASOBI - Topic" → "YOASOBI")
   s = s.replace(/\s*[-–—〜~・/]\s*(?:Topic|トピック)$/i, "");
   s = s.replace(/\s+(?:Topic|トピック)$/i, "");
 
-  // 5. 末尾の公式タグ・装飾の除去 (例: "YOASOBI Official Channel" → "YOASOBI", "アーティスト - Official" → "アーティスト")
+  // 7. 末尾の公式タグ・装飾の除去 (例: "YOASOBI Official Channel" → "YOASOBI", "アーティスト - Official" → "アーティスト")
   //    ※ 先頭の "Official髭男dism" などを破壊しないよう、末尾に限定
   s = s.replace(/\s*[-–—〜~・/]\s*(?:Official\s*Channel|Official\s*YouTube\s*Channel|Official|公式チャンネル|公式|VEVO)$/i, "");
   s = s.replace(/\s+(?:Official\s*Channel|Official\s*YouTube\s*Channel|VEVO)$/i, "");
+  s = s.replace(/\s*[\(（](?:Official|公式)[\)）]$/i, "");
 
-  // 6. 前後の空白トリム & 連続空白（全角含む）の統合
+  // 8. 前後の空白トリム & 連続空白（全角含む）の統合
   s = s.replace(/[\s\u3000]+/g, " ").trim();
 
   return s;
@@ -238,17 +260,34 @@ export function resolveScrobbleTrack(track) {
     }
   }
 
+  // 1.1 フィーチャリング・コラボレーション表記の分離 (Last.fm Filter 回避)
+  // 例: artist: "Eve feat. suis", title: "平行線" → artist: "Eve", title: "平行線 (feat. suis)"
+  const featMatch = artist.match(/^(.+?)\s*(?:[\(（]?(?:feat\.?|ft\.?|featuring|with)[\s:.]+(.+?)[\)）]?)$/i);
+  if (featMatch) {
+    const mainArt = cleanArtistName(featMatch[1]);
+    const guestArt = cleanArtistName(featMatch[2]);
+    if (mainArt && !isPlaceholderArtist(mainArt)) {
+      artist = mainArt;
+      if (guestArt && !title.toLowerCase().includes(guestArt.toLowerCase())) {
+        title = `${title} (feat. ${guestArt})`;
+      }
+      resolved = true;
+    }
+  }
+
   // 2. アルバム名が "YouTube" などのプレースホルダーなら除外（Last.fm のアルバム汚染を防ぐ）
   if (isPlaceholderArtist(album)) {
     album = "";
   }
 
   // 3. albumArtist:
-  //    Last.fm 公式仕様: "The album artist - if different to the artist of the track."
-  //    artist と同一、またはプレースホルダーならパラメータから除外して余計な競合・フィルタを防ぐ
-  if (isPlaceholderArtist(albumArtist) || albumArtist.toLowerCase() === artist.toLowerCase()) {
-    albumArtist = "";
-  }
+  //    ★ Last.fm API の重大仕様対策:
+  //    track.scrobble / track.updateNowPlaying に albumArtist を送信すると、
+  //    Last.fm がアルバムアーティストでの検証を優先し、トラックの artist が実在しても
+  //    "ignoredMessage code=1 (Artist ignored / Filtered artist)" で拒否する致命的不具合が存在する。
+  //    Web Scrobbler / Navidrome など主要スクロブラーの標準仕様に準拠し、
+  //    Last.fm 送信用メタデータでは albumArtist を送信パラメータから完全に除外 ("") する。
+  albumArtist = "";
 
   // 最終検証: artist が未だにプレースホルダー、または title が空の場合は Last.fm で拒否される
   const isInvalid = isPlaceholderArtist(artist) || !title;

@@ -584,10 +584,23 @@ describe("resolveScrobbleTrack (スクロブルメタデータ総合解決 & 救
   const res4 = resolveScrobbleTrack(t4);
   assertEqual(res4.isInvalid, true, '分離不能なプレースホルダーは isInvalid = true');
 
-  // ケース5: albumArtist が artist と同一の場合はパラメータ除外（Last.fm 仕様: 競合防止）
+  // ケース5: albumArtist は Last.fm Filter 回避のため常に除外 ("")
   const t5 = { artist: "Beatles", title: "Help!", albumArtist: "Beatles" };
   const res5 = resolveScrobbleTrack(t5);
-  assertEqual(res5.albumArtist, "", '同一 albumArtist は除外');
+  assertEqual(res5.albumArtist, "", 'albumArtist は常に除外');
+
+  // ケース6: フィーチャリング表記の自動分離 (Last.fm Filtered artist 回避)
+  const t6 = { artist: "Eve feat. suis", title: "平行線" };
+  const res6 = resolveScrobbleTrack(t6);
+  assertEqual(res6.artist, "Eve", 'メインアーティスト Eve を抽出');
+  assertEqual(res6.title, "平行線 (feat. suis)", 'タイトルに客演情報を統合');
+  assertEqual(res6.albumArtist, "", 'albumArtist は空文字');
+
+  // ケース7: 先頭トラック番号や CV 表記のサニタイズ
+  assertEqual(cleanArtistName("01. YOASOBI"), "YOASOBI", '先頭トラック番号 01. 除去');
+  assertEqual(cleanArtistName("キャラクター名 (CV: 声優名)"), "キャラクター名", 'CV表記除去');
+  assert(isPlaceholderArtist("downloads"), 'downloads はプレースホルダー');
+  assert(isPlaceholderArtist("music"), 'music はプレースホルダー');
 });
 
 /* ============ 結果 ============ */
