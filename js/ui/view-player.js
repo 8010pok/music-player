@@ -706,7 +706,7 @@ export async function mount(root) {
         <li class="player-queue-item ${isCur ? "is-current" : ""}" data-idx="${idx}">
           <div class="player-queue-idx-slot">${eq}</div>
           <div class="player-queue-item-info">
-            <div class="player-queue-item-title">${escapeHtml(t.title || "(無題)")}</div>
+            <div class="player-queue-item-title"><span class="track-title-text">${escapeHtml(t.title || "(無題)")}</span>${t.memo ? `<span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
             <div class="player-queue-item-artist">${escapeHtml(t.artist || "(不明)")}</div>
           </div>
           <span class="player-queue-item-dur">${durStr}</span>
@@ -1299,9 +1299,9 @@ function updateUI(refs, s) {
   }
 
   if (t.memo) {
-    refs.title.innerHTML = `${escapeHtml(t.title || "(無題)")} <span class="track-memo-badge" title="${escapeHtml(t.memo)}">${escapeHtml(t.memo)}</span>`;
+    refs.title.innerHTML = `<span class="track-title-text">${escapeHtml(t.title || "(無題)")}</span><span class="track-memo-badge" title="${escapeHtml(t.memo)}">${escapeHtml(t.memo)}</span>`;
   } else {
-    refs.title.textContent = t.title || "(無題)";
+    refs.title.innerHTML = `<span class="track-title-text">${escapeHtml(t.title || "(無題)")}</span>`;
   }
   const isPlaceholderArtist = !t.artist
     || t.artist === "(不明)"

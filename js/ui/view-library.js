@@ -920,7 +920,7 @@ function rowHtml(t, cur) {
       ${handle}
       ${artContainer}
       <div class="track-info">
-        <div class="track-title">${gdriveMark}${escapeHtml(t.title || "(無題)")}${t.memo ? ` <span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
+        <div class="track-title">${gdriveMark}<span class="track-title-text">${escapeHtml(t.title || "(無題)")}</span>${t.memo ? `<span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
         <div class="track-sub">${escapeHtml(sub)}</div>
       </div>
       <div class="track-actions">

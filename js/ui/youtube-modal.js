@@ -548,7 +548,7 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
 
         item.innerHTML = `
           <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; margin-right: 8px;">
-            <div style="font-weight: 600; font-size: 12px; color: var(--fg); overflow: hidden; text-overflow: ellipsis;">${escapeHtml(track.title || "無題")}</div>
+            <div style="font-weight: 600; font-size: 12px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 6px;"><span class="track-title-text">${escapeHtml(track.title || "無題")}</span>${track.memo ? `<span class="track-memo-badge" title="${escapeAttr(track.memo)}">${escapeHtml(track.memo)}</span>` : ""}</div>
             <div style="font-size: 11px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis;">${escapeHtml(track.artist || "不明")} — ${escapeHtml(track.album || "")}</div>
           </div>
           <button type="button" class="btn" style="font-size: 10px; padding: 3px 8px; white-space: nowrap;">選択</button>

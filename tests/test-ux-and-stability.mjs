@@ -415,6 +415,33 @@ test("19. YouTube音源保存のカット位置再生・プレビュー高精度
   assert.match(viewLibraryCode, /modalRoot\.hidden\s*=\s*true/, "view-library でモーダルが直接安全に閉じられる");
 });
 
+test("20. 曲名の邪魔にならないスマートなメモ表示（track-title-text ＋ track-memo-badge flexレイアウト ＆ キュー/ミニプレイヤー対応）の検証", () => {
+  const rootDir = path.join(__dirname, "..");
+  const viewsCss = fs.readFileSync(path.join(rootDir, "css/views.css"), "utf-8");
+  const layoutCss = fs.readFileSync(path.join(rootDir, "css/layout.css"), "utf-8");
+  const viewLibraryCode = fs.readFileSync(path.join(rootDir, "js/ui/view-library.js"), "utf-8");
+  const viewAlbumCode = fs.readFileSync(path.join(rootDir, "js/ui/view-album.js"), "utf-8");
+  const viewPlayerCode = fs.readFileSync(path.join(rootDir, "js/ui/view-player.js"), "utf-8");
+  const miniPlayerCode = fs.readFileSync(path.join(rootDir, "js/ui/mini-player.js"), "utf-8");
+
+  // 1) CSS で track-title が flexbox であり、track-title-text と track-memo-badge (flex-shrink: 0) が定義されていること
+  assert.match(viewsCss, /\.track-title\s*\{[^}]*display:\s*flex;[^}]*gap:\s*6px;/s, "track-title が flex で gap 6px を持つ");
+  assert.match(viewsCss, /\.track-title-text\s*\{[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;/s, "track-title-text が省略テキストを持つ");
+  assert.match(viewsCss, /\.track-memo-badge\s*\{[^}]*flex-shrink:\s*0;/s, "track-memo-badge が flex-shrink: 0 で曲名に潰されない");
+
+  // 2) 各画面で span.track-title-text によるタイトル保護とメモバッジが実装されていること
+  assert.match(viewLibraryCode, /class="track-title-text"/, "view-library に track-title-text が存在する");
+  assert.match(viewAlbumCode, /class="track-title-text"/, "view-album に track-title-text が存在する");
+  assert.match(miniPlayerCode, /class="track-title-text"/, "mini-player に track-title-text が存在する");
+
+  // 3) 再生待ちキュー (Up Next) でもメモバッジが表示されること
+  assert.match(viewPlayerCode, /class="player-queue-item-title"><span class="track-title-text">/, "view-player のキューリストに track-title-text が存在する");
+  assert.match(viewPlayerCode, /t\.memo \? `<span class="track-memo-badge"/, "view-player のキューリストに track-memo-badge が表示される");
+
+  // 4) layout.css で mini-title が flexbox でメモバッジに対応していること
+  assert.match(layoutCss, /\.mini-title\s*\{[^}]*display:\s*flex;[^}]*gap:\s*6px;/s, "mini-title が flex で gap 6px を持つ");
+});
+
 
 
 

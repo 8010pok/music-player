@@ -69,9 +69,9 @@ export function initMiniPlayer() {
     }
     root.hidden = false;
     if (track.memo) {
-      titleEl.innerHTML = `${escapeHtml(track.title || "(無題)")} <span class="track-memo-badge" title="${escapeHtml(track.memo)}">${escapeHtml(track.memo)}</span>`;
+      titleEl.innerHTML = `<span class="track-title-text">${escapeHtml(track.title || "(無題)")}</span><span class="track-memo-badge" title="${escapeHtml(track.memo)}">${escapeHtml(track.memo)}</span>`;
     } else {
-      titleEl.textContent = track.title || "(無題)";
+      titleEl.innerHTML = `<span class="track-title-text">${escapeHtml(track.title || "(無題)")}</span>`;
     }
 
     const isPlaceholderArtist = !track.artist

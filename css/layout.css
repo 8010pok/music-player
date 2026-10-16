@@ -293,20 +293,39 @@ body[data-route="player"] .mini-player {
   min-width: 0;
 }
 
-.mini-title, .mini-artist {
+.mini-artist {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.mini-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  font-size: 13px;
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.mini-title {
-  font-size: 13px;
-  font-weight: 600;
+.mini-title .track-title-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.mini-artist {
-  font-size: 11px;
-  color: var(--fg-muted);
+.mini-title .track-memo-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  max-width: 100px;
 }
 
 .mini-controls {

@@ -267,7 +267,7 @@ function renderTrackRows(alb) {
       <li class="track-row album-track-row ${enabled ? "" : "is-disabled"}" data-id="${escapeAttr(t.id)}" data-track-num="${escapeAttr(trackNumDisplay)}">
         <span class="album-track-num-slot"><span class="album-track-num">${escapeHtml(trackNumDisplay)}</span></span>
         <div class="track-info">
-          <div class="track-title">${gdriveMark}${escapeHtml(t.title || "(無題)")}${t.memo ? ` <span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
+          <div class="track-title">${gdriveMark}<span class="track-title-text">${escapeHtml(t.title || "(無題)")}</span>${t.memo ? `<span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
           ${artistDisplay ? `<div class="track-sub">${escapeHtml(artistDisplay)}</div>` : ""}
         </div>
         <div class="album-track-right">

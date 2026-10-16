@@ -1302,7 +1302,20 @@
 }
 
 .track-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
   font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.track-title-text {
+  flex: 0 1 auto;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3360,6 +3373,11 @@
 }
 
 .album-track-row .track-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
   font-size: 15px;
   font-weight: 600;
   color: var(--fg, #ffffff);
@@ -3573,10 +3591,11 @@
   font-size: 12px;
 }
 
-/* 曲メモ・バージョン情報バッジ (Scrobble非対象・Apple Music 風ピルバッジ) */
+/* 曲メモ・バージョン情報バッジ (Scrobble非対象・Apple Music 風洗練ピルバッジ) */
 .track-memo-badge {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
   font-size: 10px;
   line-height: 1.2;
   font-weight: 500;
@@ -3584,14 +3603,14 @@
   border-radius: 4px;
   background: rgba(255, 255, 255, 0.08);
   color: var(--accent);
-  border: 1px solid rgba(0, 113, 227, 0.3);
-  margin-left: 6px;
-  vertical-align: 1px;
+  border: 1px solid rgba(0, 113, 227, 0.35);
   letter-spacing: 0.02em;
-  max-width: 180px;
+  max-width: 130px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
 }
 
 :root[data-theme="light"] .track-memo-badge {
@@ -3600,11 +3619,47 @@
   color: var(--accent);
 }
 
+.player-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.player-title .track-title-text {
+  flex: 0 1 auto;
+  max-width: 100%;
+}
+
 .player-title .track-memo-badge {
   font-size: 12px;
   padding: 2px 8px;
   border-radius: 6px;
-  vertical-align: 2px;
+  max-width: 160px;
+}
+
+/* キュー (Up Next) のタイトルとメモバッジ */
+.player-queue-item-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.player-queue-item-title .track-title-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.player-queue-item-title .track-memo-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  max-width: 100px;
 }
 
 /* ===== ライブラリ タブバー (Apple Music スタイル) ===== */

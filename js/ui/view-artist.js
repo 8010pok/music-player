@@ -211,7 +211,7 @@ function renderTrackRows(tracks) {
         <li class="artist-track-item ${t.enabled === false ? "is-disabled" : ""}" data-id="${escapeAttr(t.id)}" data-track-num="${escapeAttr(numStr)}">
           <span class="artist-track-num-slot"><span class="track-index">${escapeHtml(numStr)}</span></span>
           <div class="track-main">
-            <div class="track-title">${gdriveMark}${escapeHtml(t.title || "(無題)")}${t.memo ? ` <span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
+            <div class="track-title">${gdriveMark}<span class="track-title-text">${escapeHtml(t.title || "(無題)")}</span>${t.memo ? `<span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
             <div class="track-meta">${escapeHtml(albTitle)}</div>
           </div>
           <div class="artist-track-actions">
