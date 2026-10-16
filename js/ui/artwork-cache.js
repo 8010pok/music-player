@@ -30,6 +30,10 @@ const brokenIds = new Set();
 export function getArtworkUrl(track) {
   if (!track || !track.id) return null;
   if (brokenIds.has(track.id)) return null;
+  // ★ Base64 Data URL があれば最優先（revoke されず iOS MediaSession でも完全安定）
+  if (track.artworkDataUrl && typeof track.artworkDataUrl === "string" && track.artworkDataUrl.startsWith("data:")) {
+    return track.artworkDataUrl;
+  }
   if (!track.artworkBlob) return null;
 
   const cached = idToUrl.get(track.id);

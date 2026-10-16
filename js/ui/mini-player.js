@@ -92,8 +92,14 @@ export function initMiniPlayer() {
   };
 
   appState.subscribe(["currentTrack", "isPlaying", "currentTime", "duration"], updateVisibility);
-  // ルート変更にも追従
+  // ルート変更および画面復帰時にも追従
   window.addEventListener("hashchange", updateVisibility);
+  window.addEventListener("pageshow", updateVisibility);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      updateVisibility();
+    }
+  });
   // 初回起動時 (currentTrack が未セットでも player ルート判定が必要)
   updateVisibility();
 }

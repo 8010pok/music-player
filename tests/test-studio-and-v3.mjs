@@ -1,33 +1,23 @@
 /**
- * テスト: 耳コピ・練習スタジオ機能 & 二重Scrobble防止 & Drive再生ラグ解消
+ * テスト: 耳コピ機能の完全撤去・iOS連続再生復元・Drive高速キャッシュ＆認証永続化・メタデータ検索精度向上
  */
-import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-// 1. studio-service.js のユニットテスト
 import {
-  getStudioState,
-  setLoopPointA,
-  setLoopPointB,
-  clearLoop,
-  adjustLoopStart,
-  adjustLoopEnd,
-  updateSpeedTrainer,
-  addBookmarkMarker,
-  removeBookmarkMarker,
-  setChannelMode,
-  setMidSideBalance,
-  setFrequencySolo,
-  setPitchShift,
-  checkStudioLoop,
-} from "../js/player/studio-service.js";
+  inferMetadataFromFileName,
+  fetchDriveAudioHeader,
+} from "../js/gdrive/drive-service.js";
 
-import { FREQ_SOLO_PRESETS } from "../js/player/eq.js";
+import {
+  cleanQuery,
+  extractSearchTokens,
+  scoreAndSortResults,
+} from "../js/metadata/musicbrainz.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let passed = 0;
 let total = 0;
@@ -44,98 +34,43 @@ function runTest(name, fn) {
   }
 }
 
-console.log("\n=== 1. 耳コピ・練習スタジオ (studio-service.js) ===");
+console.log("\n=== 1. 耳コピ・練習スタジオ機能の完全撤去と <audio> 直結復元の検証 ===");
 
-runTest("A-B 区間リピートの始点・終点・微調整・解除が正しく動作する", () => {
-  setLoopPointA(10.5);
-  let s = getStudioState();
-  assert.equal(s.abLoop.enabled, true);
-  assert.equal(s.abLoop.start, 10.5);
-  assert.ok(s.abLoop.end > 10.5);
-
-  setLoopPointB(15.2);
-  s = getStudioState();
-  assert.equal(s.abLoop.end, 15.2);
-
-  // ±0.1s 微調整
-  adjustLoopStart(0.2);
-  assert.equal(Math.round(getStudioState().abLoop.start * 10) / 10, 10.7);
-
-  adjustLoopEnd(-0.2);
-  assert.equal(Math.round(getStudioState().abLoop.end * 10) / 10, 15.0);
-
-  // ループ周回チェック
-  const mockAudio = { currentTime: 15.1, playbackRate: 1.0 };
-  checkStudioLoop(15.1, mockAudio);
-  assert.equal(Math.round(mockAudio.currentTime * 10) / 10, 10.7);
-
-  clearLoop();
-  assert.equal(getStudioState().abLoop.enabled, false);
+runTest("js/player/studio-service.js が完全に削除されている", () => {
+  const filePath = path.join(__dirname, "../js/player/studio-service.js");
+  assert.equal(fs.existsSync(filePath), false, "studio-service.js は存在してはならない");
 });
 
-runTest("Speed Trainer の設定と自動加速ロジック", () => {
-  updateSpeedTrainer({
-    enabled: true,
-    loopInterval: 2,
-    stepPercent: 5,
-    maxRate: 1.2,
-  });
-  const s = getStudioState();
-  assert.equal(s.speedTrainer.enabled, true);
-  assert.equal(s.speedTrainer.loopInterval, 2);
-  assert.equal(s.speedTrainer.stepPercent, 5);
-  assert.equal(s.speedTrainer.maxRate, 1.2);
+runTest("audio-engine.js: studio 関連の import / ロジック / スワップ用 standbyAudioEl が撤去されている", () => {
+  const code = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  assert.ok(!code.includes("studio-service.js"), "studio-service.js を import してはならない");
+  assert.ok(!code.includes("checkStudioLoop"), "checkStudioLoop を呼び出してはならない");
+  assert.ok(!code.includes("standbyAudioEl"), "デュアル audio のピンポン standbyAudioEl は廃止されている");
+  assert.match(code, /function playPreloadedSync/, "単一 audioEl の同期再生関数 playPreloadedSync が存在する");
 });
 
-runTest("ブックマーク（マーカー）の追加・一覧・削除", () => {
-  const m1 = addBookmarkMarker(12.5, "サビ頭");
-  assert.equal(m1.time, 12.5);
-  assert.equal(m1.label, "サビ頭");
-  assert.ok(getStudioState().markers.some(m => m.id === m1.id));
+runTest("view-player.js & views.css: 耳コピ用UI / スタイルが完全に削除されている", () => {
+  const pCode = fs.readFileSync(path.join(__dirname, "../js/ui/view-player.js"), "utf8");
+  assert.ok(!pCode.includes("studio-section"), "studio-section は削除されている");
+  assert.ok(!pCode.includes("btn-studio-toggle"), "btn-studio-toggle は削除されている");
+  assert.ok(!pCode.includes("btn-rewind-chip"), "btn-rewind-chip は削除されている");
 
-  removeBookmarkMarker(m1.id);
-  assert.ok(!getStudioState().markers.some(m => m.id === m1.id));
+  const css = fs.readFileSync(path.join(__dirname, "../css/views.css"), "utf8");
+  assert.ok(!css.includes(".studio-section"), ".studio-section CSS は削除されている");
+  assert.ok(!css.includes(".player-quick-rewind"), ".player-quick-rewind CSS は削除されている");
 });
 
-runTest("チャンネル分離 & Mid/Side バランス & ピッチシフト", () => {
-  setChannelMode("left-only");
-  assert.equal(getStudioState().channelMode, "left-only");
-
-  setChannelMode("lr-swap");
-  assert.equal(getStudioState().channelMode, "lr-swap");
-
-  setChannelMode("stereo");
-  assert.equal(getStudioState().channelMode, "stereo");
-
-  setMidSideBalance(0.5);
-  assert.equal(getStudioState().midSideBalance, 0.5);
-  setMidSideBalance(0);
-
-  setPitchShift(3);
-  assert.equal(getStudioState().pitch.semitones, 3);
-  setPitchShift(0);
+runTest("index.html: audio-el-b が削除され、単一 <audio id=\"audio-el\"> に整理されている", () => {
+  const html = fs.readFileSync(path.join(__dirname, "../index.html"), "utf8");
+  assert.ok(!html.includes('id="audio-el-b"'), "audio-el-b は存在してはならない");
+  assert.ok(html.includes('id="audio-el"'), "単一 audio-el が存在する");
 });
 
-runTest("周波数アイソレーター (FREQ_SOLO_PRESETS) の各帯域プリセット定義", () => {
-  assert.ok(FREQ_SOLO_PRESETS.drum);
-  assert.ok(FREQ_SOLO_PRESETS.bass);
-  assert.ok(FREQ_SOLO_PRESETS.guitar);
-  assert.ok(FREQ_SOLO_PRESETS.hihat);
-  assert.equal(FREQ_SOLO_PRESETS.drum.low, 45);
-  assert.equal(FREQ_SOLO_PRESETS.drum.high, 5500);
-
-  setFrequencySolo({ enabled: true, preset: "drum" });
-  assert.equal(getStudioState().freqSolo.preset, "drum");
-  setFrequencySolo({ enabled: false, preset: "off" });
-});
-
-console.log("\n=== 2. Last.fm 二重 Scrobble 完全防止 ===");
+console.log("\n=== 2. Last.fm 二重 Scrobble 完全防止の保持 ===");
 
 runTest("audio-engine.js: timeupdate 発火の最初の同期1行目で hasScrobbledSession がセットされる", () => {
   const code = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
-  // progress >= 1 到達判定の直後で state.hasScrobbledSession = true
   assert.match(code, /if\s*\(!state\.hasScrobbledSession[^}]+state\.hasScrobbledSession\s*=\s*true;/);
-  // playSessionId が定義されている
   assert.match(code, /state\.playSessionId\s*=/);
 });
 
@@ -146,54 +81,67 @@ runTest("scrobble.js: sendScrobble 入口で playSessionId のべき等性ガー
   assert.match(code, /isFlushingQueue/);
 });
 
-console.log("\n=== 3. Google Drive 再生開始ラグ解消 ===");
+console.log("\n=== 3. ミニプレイヤー復帰時同期＆ArtworkDataUrl 優先参照 ===");
 
-runTest("sw.js: /gdrive-stream/ の Range 中継ストリーミングハンドラが実装されている", () => {
-  const code = fs.readFileSync(path.join(__dirname, "../sw.js"), "utf8");
-  assert.match(code, /gdrive-stream/);
-  assert.match(code, /handleDriveStream/);
-  assert.match(code, /Range/i);
+runTest("mini-player.js: pageshow / visibilitychange イベントで画面復帰時の情報同期が行われる", () => {
+  const code = fs.readFileSync(path.join(__dirname, "../js/ui/mini-player.js"), "utf8");
+  assert.match(code, /pageshow/);
+  assert.match(code, /visibilitychange/);
 });
 
-runTest("audio-engine.js & view-library.js: prewarmTrack と pointerdown 先行デコード", () => {
-  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
-  assert.match(aeCode, /export function prewarmTrack/);
-  assert.match(aeCode, /prewarmCache\.get/);
-
-  const libCode = fs.readFileSync(path.join(__dirname, "../js/ui/view-library.js"), "utf8");
-  assert.match(libCode, /pointerdown/);
-  assert.match(libCode, /prewarmTrack/);
+runTest("artwork-cache.js: track.artworkDataUrl が最優先で参照される", () => {
+  const code = fs.readFileSync(path.join(__dirname, "../js/ui/artwork-cache.js"), "utf8");
+  assert.match(code, /track\.artworkDataUrl/);
+  assert.match(code, /return track\.artworkDataUrl/);
 });
 
-console.log("\n=== 4. プレイヤー UI & クイック巻き戻し & スタジオドロワー ===");
+console.log("\n=== 4. Google Drive 先頭ヘッダ拡大 (1.5MB) & ファイル名メタデータ推測修正 ===");
 
-runTest("view-player.js & views.css: クイック巻き戻しボタン (-1s, -3s, -5s) が実装されている", () => {
-  const pCode = fs.readFileSync(path.join(__dirname, "../js/ui/view-player.js"), "utf8");
-  assert.match(pCode, /btn-rewind-chip/);
-  assert.match(pCode, /data-rewind="-1"/);
-  assert.match(pCode, /data-rewind="-3"/);
-  assert.match(pCode, /data-rewind="-5"/);
-
-  const css = fs.readFileSync(path.join(__dirname, "../css/views.css"), "utf8");
-  assert.match(css, /\.player-quick-rewind/);
-  assert.match(css, /\.btn-rewind-chip/);
+runTest("drive-service.js: fetchDriveAudioHeader のデフォルト maxBytes が 1.5MB (1572864) に拡大されている", () => {
+  const code = fs.readFileSync(path.join(__dirname, "../js/gdrive/drive-service.js"), "utf8");
+  assert.match(code, /maxBytes\s*=\s*1572864/);
 });
 
-runTest("view-player.js & views.css: 🎧 耳コピ・練習スタジオ のUIとイベント結線が存在する", () => {
-  const pCode = fs.readFileSync(path.join(__dirname, "../js/ui/view-player.js"), "utf8");
-  assert.match(pCode, /studio-section/);
-  assert.match(pCode, /btn-studio-toggle/);
-  assert.match(pCode, /btn-loop-a/);
-  assert.match(pCode, /btn-loop-b/);
-  assert.match(pCode, /chk-speed-trainer/);
-  assert.match(pCode, /btn-studio-lock/);
-  assert.match(pCode, /subscribeStudio/);
+runTest("inferMetadataFromFileName: 「10 - 曲名.mp3」でアーティストが10にならず、曲名とトラック番号に分離される", () => {
+  const meta = inferMetadataFromFileName("10 - 夜に駆ける.mp3");
+  assert.equal(meta.trackNo, "10");
+  assert.equal(meta.title, "夜に駆ける");
+  assert.equal(meta.artist, ""); // フォルダ名未指定なら空、10 には絶対にならない
+});
 
-  const css = fs.readFileSync(path.join(__dirname, "../css/views.css"), "utf8");
-  assert.match(css, /\.studio-section/);
-  assert.match(css, /\.btn-studio-toggle/);
-  assert.match(css, /\.studio-body/);
-  assert.match(css, /\.studio-card/);
+runTest("inferMetadataFromFileName: 「01. YOASOBI - 夜に駆ける.flac」が正しくパースされる", () => {
+  const meta = inferMetadataFromFileName("01. YOASOBI - 夜に駆ける.flac");
+  assert.equal(meta.trackNo, "1");
+  assert.equal(meta.artist, "YOASOBI");
+  assert.equal(meta.title, "夜に駆ける");
+});
+
+runTest("inferMetadataFromFileName: 「YOASOBI - 夜に駆ける.mp3」が正しくパースされる", () => {
+  const meta = inferMetadataFromFileName("YOASOBI - 夜に駆ける.mp3");
+  assert.equal(meta.trackNo, "");
+  assert.equal(meta.artist, "YOASOBI");
+  assert.equal(meta.title, "夜に駆ける");
+});
+
+console.log("\n=== 5. メタデータ複合 AND 検索 & スコアリングソートの検証 ===");
+
+runTest("extractSearchTokens: 複合クエリを適切に小文字トークンへ分割する", () => {
+  const tokens = extractSearchTokens("ガゼット　reila (Google Drive) 01-");
+  assert.deepEqual(tokens, ["ガゼット", "reila"]);
+});
+
+runTest("scoreAndSortResults: 複数トークンすべてに合致するアイテムが最上位にソートされる", () => {
+  const tokens = ["ガゼット", "reila"];
+  const items = [
+    { id: 1, title: "reila", artist: "別のバンド", source: "iTunes" },
+    { id: 2, title: "reila", artist: "the GazettE", source: "iTunes" },
+    { id: 3, title: "Cassis", artist: "the GazettE", source: "iTunes" },
+    { id: 4, title: "reila -Lesson G-", artist: "ガゼット", source: "iTunes" },
+  ];
+
+  const sorted = scoreAndSortResults(items, tokens);
+  // ガゼット と reila の両方に一致する id: 4 または id: 2 が上位
+  assert.equal(sorted[0].id, 4);
 });
 
 console.log("\n============================================================");

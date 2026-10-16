@@ -5,7 +5,7 @@
  * 失敗時は「ファイル名から推測した最低限のメタ」を返す。
  */
 
-import { formatFromName, mimeFromName } from "./util.js";
+import { formatFromName, mimeFromName, blobToDataUrl } from "./util.js";
 import { parseMp3 } from "./parse-mp3.js";
 import { parseM4a } from "./parse-m4a.js";
 import { parseFlac } from "./parse-flac.js";
@@ -86,6 +86,10 @@ export async function extractMetadata(fileOrBlob, name) {
   if (parsed.artworkBlob) {
     if (!(parsed.artworkBlob instanceof Blob) || parsed.artworkBlob.size < 8) {
       parsed.artworkBlob = null;
+    } else {
+      try {
+        parsed.artworkDataUrl = await blobToDataUrl(parsed.artworkBlob, 500);
+      } catch {}
     }
   }
 

@@ -7,7 +7,7 @@
  * バージョンを上げると古いキャッシュは破棄される。
  */
 
-const CACHE_VERSION = "v1.5.4";
+const CACHE_VERSION = "v1.5.5";
 const STATIC_CACHE = `static-${CACHE_VERSION}`;
 const API_CACHE = `api-${CACHE_VERSION}`;
 const IMG_CACHE = `img-${CACHE_VERSION}`;
@@ -38,7 +38,6 @@ const PRECACHE_URLS = [
   "./js/player/audio-engine.js",
   "./js/player/visualizer.js",
   "./js/player/eq.js",
-  "./js/player/studio-service.js",
   "./js/metadata/index.js",
   "./js/metadata/util.js",
   "./js/metadata/album-util.js",

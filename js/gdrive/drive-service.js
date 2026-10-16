@@ -49,42 +49,100 @@ export function trackIdFromDriveFileId(fileId) {
  * 保存されたアクセストークンを取得
  * @returns {Promise<string|null>}
  */
+let _refreshingPromise = null;
+
+function getLocalStorageToken() {
+  if (typeof localStorage === "undefined") return null;
+  try {
+    const token = localStorage.getItem("gdrive_access_token");
+    const expiry = parseInt(localStorage.getItem("gdrive_token_expiry") || "0", 10);
+    return { token, expiry };
+  } catch {
+    return null;
+  }
+}
+
+function setLocalStorageToken(token, expiry) {
+  if (typeof localStorage === "undefined") return;
+  try {
+    if (token) {
+      localStorage.setItem("gdrive_access_token", token);
+      localStorage.setItem("gdrive_token_expiry", String(expiry));
+    } else {
+      localStorage.removeItem("gdrive_access_token");
+      localStorage.removeItem("gdrive_token_expiry");
+    }
+  } catch {}
+}
+
+/**
+ * 保存されたアクセストークンを取得（有効期限切れ時は自動サイレントリフレッシュ）
+ * @returns {Promise<string|null>}
+ */
 export async function getDriveToken() {
+  const pub = getPublic();
+  const now = Date.now();
+
+  // 1. メモリキャッシュが有効
   if (_cachedToken) {
-    const pub = getPublic();
-    if (!pub.gdriveTokenExpiry || Date.now() < pub.gdriveTokenExpiry - 60000) {
+    if (!pub.gdriveTokenExpiry || now < pub.gdriveTokenExpiry - 60000) {
       return _cachedToken;
     }
   }
 
+  // 2. localStorage からの即時参照
+  const ls = getLocalStorageToken();
+  if (ls && ls.token && (!ls.expiry || now < ls.expiry - 60000)) {
+    _cachedToken = ls.token;
+    return ls.token;
+  }
+
+  // 3. settings (IndexedDB) から参照
   const secret = await getSecret();
   const token = secret && secret.gdriveAccessToken ? secret.gdriveAccessToken : null;
-  if (!token) {
-    _cachedToken = null;
-    return null;
+  if (token && (!pub.gdriveTokenExpiry || now < pub.gdriveTokenExpiry - 60000)) {
+    _cachedToken = token;
+    setLocalStorageToken(token, pub.gdriveTokenExpiry || 0);
+    return token;
   }
 
-  const pub = getPublic();
-  // 有効期限が設定されており、かつ切れている場合は null
-  if (pub.gdriveTokenExpiry && Date.now() >= pub.gdriveTokenExpiry - 60000) {
-    _cachedToken = null;
-    return null;
+  // 4. 有効期限切れの場合、自動サイレントリフレッシュを試行
+  if (_refreshingPromise) return _refreshingPromise;
+
+  const clientId = pub.gdriveClientId;
+  if (clientId && typeof window !== "undefined") {
+    _refreshingPromise = (async () => {
+      try {
+        const refreshedToken = await silentRefreshGisToken(clientId);
+        if (refreshedToken) {
+          _cachedToken = refreshedToken;
+          return refreshedToken;
+        }
+      } catch (e) {
+        console.warn("[drive-service] サイレントリフレッシュ失敗:", e);
+      } finally {
+        _refreshingPromise = null;
+      }
+      return token || ls?.token || null;
+    })();
+    return _refreshingPromise;
   }
 
-  _cachedToken = token;
-  return token;
+  return token || ls?.token || null;
 }
 
 /**
- * アクセストークンを保存
+ * アクセストークンを保存（IndexedDB + localStorage 永続化）
  * @param {string} token
  * @param {{ expiresIn?: number, email?: string }} [opts]
  */
 export async function setDriveToken(token, { expiresIn = 3600, email = "" } = {}) {
   _cachedToken = token || null;
+  const expiry = token && expiresIn ? Date.now() + expiresIn * 1000 : 0;
+  setLocalStorageToken(token, expiry);
   await setSecret({ gdriveAccessToken: token || "" });
   const patch = {
-    gdriveTokenExpiry: token && expiresIn ? Date.now() + expiresIn * 1000 : 0,
+    gdriveTokenExpiry: expiry,
   };
   if (email !== undefined) patch.gdriveUserEmail = email;
   setPublic(patch);
@@ -95,6 +153,7 @@ export async function setDriveToken(token, { expiresIn = 3600, email = "" } = {}
  */
 export async function disconnectDrive() {
   _cachedToken = null;
+  setLocalStorageToken(null, 0);
   await setSecret({ gdriveAccessToken: "" });
   setPublic({
     gdriveTokenExpiry: 0,
@@ -187,6 +246,76 @@ export async function testConnection(token) {
 }
 
 /**
+ * GIS スクリプトを確実にロードする
+ * @returns {Promise<void>}
+ */
+export function ensureGisScript() {
+  if (typeof window === "undefined") return Promise.reject(new Error("ブラウザ環境ではありません"));
+  if (window.google && window.google.accounts && window.google.accounts.oauth2) {
+    return Promise.resolve();
+  }
+  return new Promise((res, rej) => {
+    const existing = document.querySelector('script[src="https://accounts.google.com/gsi/client"]');
+    if (existing) {
+      existing.addEventListener("load", () => res());
+      existing.addEventListener("error", () => rej(new Error("GIS スクリプトの読み込みに失敗しました")));
+      return;
+    }
+    const s = document.createElement("script");
+    s.src = "https://accounts.google.com/gsi/client";
+    s.async = true;
+    s.defer = true;
+    s.onload = () => res();
+    s.onerror = () => rej(new Error("GIS スクリプトの読み込みに失敗しました"));
+    document.head.appendChild(s);
+  });
+}
+
+/**
+ * GIS サイレントトークンリフレッシュ（ユーザー操作ダイアログなしで更新）
+ * @param {string} clientId
+ * @returns {Promise<string>}
+ */
+export function silentRefreshGisToken(clientId) {
+  return new Promise((resolve, reject) => {
+    if (!clientId) {
+      reject(new Error("Google OAuth Client ID が指定されていません"));
+      return;
+    }
+
+    ensureGisScript()
+      .then(() => {
+        try {
+          const client = window.google.accounts.oauth2.initTokenClient({
+            client_id: clientId,
+            scope: "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file",
+            callback: async (resp) => {
+              if (resp.error) {
+                reject(new Error(`サイレント更新エラー: ${resp.error_description || resp.error}`));
+                return;
+              }
+              if (resp.access_token) {
+                const expiresIn = resp.expires_in ? parseInt(resp.expires_in, 10) : 3600;
+                await setDriveToken(resp.access_token, { expiresIn });
+                resolve(resp.access_token);
+              } else {
+                reject(new Error("アクセストークンが取得できませんでした"));
+              }
+            },
+            error_callback: (err) => {
+              reject(new Error(err && err.message ? err.message : "サイレント更新失敗"));
+            },
+          });
+          client.requestAccessToken({ prompt: "" });
+        } catch (e) {
+          reject(e);
+        }
+      })
+      .catch(reject);
+  });
+}
+
+/**
  * Google Identity Services (GIS) スクリプトを読み込み、トークンを取得
  * @param {string} clientId
  * @returns {Promise<string>}
@@ -198,28 +327,7 @@ export function requestGisToken(clientId) {
       return;
     }
 
-    const loadScript = () => {
-      if (window.google && window.google.accounts && window.google.accounts.oauth2) {
-        return Promise.resolve();
-      }
-      return new Promise((res, rej) => {
-        const existing = document.querySelector('script[src="https://accounts.google.com/gsi/client"]');
-        if (existing) {
-          existing.addEventListener("load", () => res());
-          existing.addEventListener("error", () => rej(new Error("GIS スクリプトの読み込みに失敗しました")));
-          return;
-        }
-        const s = document.createElement("script");
-        s.src = "https://accounts.google.com/gsi/client";
-        s.async = true;
-        s.defer = true;
-        s.onload = () => res();
-        s.onerror = () => rej(new Error("GIS スクリプトの読み込みに失敗しました"));
-        document.head.appendChild(s);
-      });
-    };
-
-    loadScript()
+    ensureGisScript()
       .then(() => {
         try {
           const client = window.google.accounts.oauth2.initTokenClient({
@@ -381,6 +489,19 @@ export async function fetchDriveAudioBlob(fileId, { onProgress, maxRetries = 3 }
       if (!res.ok) {
         if (res.status === 401) {
           _cachedToken = null;
+          setLocalStorageToken(null, 0);
+          const pub = getPublic();
+          if (pub.gdriveClientId && attempt < maxRetries) {
+            try {
+              const newToken = await silentRefreshGisToken(pub.gdriveClientId);
+              if (newToken) {
+                _cachedToken = newToken;
+                continue;
+              }
+            } catch (refErr) {
+              console.warn("[drive-service] fetch 401後のサイレントリフレッシュ失敗:", refErr);
+            }
+          }
           throw new Error("Google Drive の認証期限が切れました (401)。再接続してください。");
         }
         if (res.status === 403) {
@@ -438,10 +559,10 @@ export async function fetchDriveAudioBlob(fileId, { onProgress, maxRetries = 3 }
  * Google Drive から音源ファイルの先頭ヘッダ部分（maxBytes）のみを取得
  * FLAC や MP3 のメタデータ解析をフルダウンロードせず高速に行う（通信量・ストレージ節約）
  * @param {string} fileId
- * @param {number} [maxBytes=262144] 256KB
+ * @param {number} [maxBytes=1572864] 1.5MB（高解像度カバーアートの欠損防止）
  * @returns {Promise<Blob|null>}
  */
-export async function fetchDriveAudioHeader(fileId, maxBytes = 262144) {
+export async function fetchDriveAudioHeader(fileId, maxBytes = 1572864) {
   const token = await getDriveToken();
   if (!token) return null;
 
@@ -483,6 +604,7 @@ export async function fetchDriveAudioHeader(fileId, maxBytes = 262144) {
  * 例:
  *  "01. YOASOBI - 夜に駆ける.flac" -> trackNo: "1", artist: "YOASOBI", title: "夜に駆ける"
  *  "YOASOBI - 夜に駆ける.mp3"     -> artist: "YOASOBI", title: "夜に駆ける"
+ *  "10 - 曲名.mp3"                -> trackNo: "10", artist: "", title: "曲名"（※数字がartistになるバグを完全防止）
  *  "01 夜に駆ける.flac"           -> trackNo: "1", title: "夜に駆ける"
  * @param {string} filename
  * @param {string} [folderName=""]
@@ -495,26 +617,44 @@ export function inferMetadataFromFileName(filename, folderName = "") {
   let title = base;
   const album = folderName && folderName !== "root" ? folderName : "";
 
-  // パターン 1: "01. Artist - Title" または "01 - Artist - Title" または "01.Artist - Title"
-  let match = base.match(/^(\d+)[\s._-]+([^-–—]+)\s*[-–—]\s*(.+)$/);
-  if (match) {
-    trackNo = String(parseInt(match[1], 10));
-    artist = match[2].trim();
-    title = match[3].trim();
-  } else {
-    // パターン 2: "Artist - Title"
-    match = base.match(/^([^-–—]+)\s*[-–—]\s*(.+)$/);
-    if (match) {
-      artist = match[1].trim();
-      title = match[2].trim();
-    } else {
-      // パターン 3: "01 Title" または "01. Title" または "01_Title"
-      match = base.match(/^(\d+)[\s._-]+(.+)$/);
-      if (match) {
-        trackNo = String(parseInt(match[1], 10));
-        title = match[2].trim();
+  // 1. 先頭のトラック番号（例: "01. ", "01 - ", "10-", "01 ", "01_"）を抽出・分離
+  let work = base;
+  const trackMatch = work.match(/^\s*(\d{1,3})([\s._-]+|\s+)(.*)$/);
+  if (trackMatch) {
+    trackNo = String(parseInt(trackMatch[1], 10));
+    work = (trackMatch[3] || "").trim();
+  }
+
+  // 2. 残りの work から "Artist - Title" を抽出
+  if (work) {
+    const dashMatch = work.match(/^([^-–—]+)\s*[-–—]\s*(.+)$/);
+    if (dashMatch) {
+      const part1 = dashMatch[1].trim();
+      const part2 = dashMatch[2].trim();
+      // part1 が数字のみ（例: "01" や "10" など）の場合はアーティスト名にしない
+      if (/^\d+$/.test(part1)) {
+        if (!trackNo) trackNo = String(parseInt(part1, 10));
+        // part2 がさらに "Artist - Title" に分かれるか？
+        const subDash = part2.match(/^([^-–—]+)\s*[-–—]\s*(.+)$/);
+        if (subDash && !/^\d+$/.test(subDash[1].trim())) {
+          artist = subDash[1].trim();
+          title = subDash[2].trim();
+        } else {
+          title = part2;
+        }
+      } else {
+        artist = part1;
+        title = part2;
       }
+    } else {
+      title = work;
     }
+  }
+
+  // 3. 最終安全ガード: artist が数字のみの場合は絶対にアーティストにしない
+  if (/^\d+$/.test(artist)) {
+    if (!trackNo) trackNo = String(parseInt(artist, 10));
+    artist = "";
   }
 
   return {
@@ -600,8 +740,11 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           duration = await readDurationViaAudio(blob);
         }
 
+        const isNumeric = (s) => typeof s === "string" && /^\d+$/.test(s.trim());
         const title = meta.title || inferred.title || stripExt(file.name) || "(無題)";
-        const artist = (meta.artist && meta.artist !== "(不明アーティスト)") ? meta.artist : (inferred.artist || "(不明アーティスト)");
+        const candidateMetaArtist = meta.artist && meta.artist !== "(不明アーティスト)" && !isNumeric(meta.artist) ? meta.artist : null;
+        const candidateInferredArtist = inferred.artist && !isNumeric(inferred.artist) ? inferred.artist : null;
+        const artist = (existing && existing.artist && !isNumeric(existing.artist)) || candidateMetaArtist || candidateInferredArtist || "(不明アーティスト)";
         const album = (meta.album && meta.album !== "Google Drive") ? meta.album : (inferred.album || "Google Drive");
 
         const track = {
@@ -625,6 +768,7 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           fileSize: blob.size || parseInt(file.size, 10) || 0,
           originalName: file.name,
           artworkBlob: meta.artworkBlob || (existing && existing.artworkBlob) || null,
+          artworkDataUrl: meta.artworkDataUrl || (existing && existing.artworkDataUrl) || "",
           source: "gdrive",
           driveFileId: file.id,
           cached: true,
@@ -651,13 +795,13 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
         added++;
       } else {
         // メタデータレコードを作成（音源 Blob は再生時にオンデマンドで取得・ストリーミング）
-        // Range リクエストで先頭 256KB のみ取得し、本体ダウンロード（ストレージ消費）なしでメタデータを高速解析
+        // Range リクエストで先頭 1.5MB のみ取得し、本体ダウンロード（ストレージ消費）なしでメタデータを高速解析
         const format = formatFromName(file.name) || "unknown";
         const mime = file.mimeType || mimeFromName(file.name);
 
         let extractedMeta = null;
         try {
-          const headerBlob = await fetchDriveAudioHeader(file.id, 262144);
+          const headerBlob = await fetchDriveAudioHeader(file.id, 1572864);
           if (headerBlob && headerBlob.size > 0) {
             extractedMeta = await extractMetadata(headerBlob, file.name);
           }
@@ -673,11 +817,12 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           stripExt(file.name) ||
           "(無題)";
 
+        const isNumeric = (s) => typeof s === "string" && /^\d+$/.test(s.trim());
         const artist =
-          (existing && existing.artist && existing.artist !== "(Google Drive)") ||
-          (extractedMeta && extractedMeta.artist && extractedMeta.artist !== "(不明アーティスト)" && !extractedMeta.artist.includes("Google Drive") ? extractedMeta.artist : null) ||
-          (inferred.artist && !inferred.artist.includes("Google Drive") ? inferred.artist : null) ||
-          (existing && existing.artist) ||
+          (existing && existing.artist && existing.artist !== "(Google Drive)" && !isNumeric(existing.artist) ? existing.artist : null) ||
+          (extractedMeta && extractedMeta.artist && extractedMeta.artist !== "(不明アーティスト)" && !extractedMeta.artist.includes("Google Drive") && !isNumeric(extractedMeta.artist) ? extractedMeta.artist : null) ||
+          (inferred.artist && !inferred.artist.includes("Google Drive") && !isNumeric(inferred.artist) ? inferred.artist : null) ||
+          (existing && existing.artist && !isNumeric(existing.artist) ? existing.artist : null) ||
           "(不明アーティスト)";
 
         const album =
@@ -696,6 +841,7 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
         const discNo = (existing && existing.discNo) || (extractedMeta && extractedMeta.discNo) || "";
         const duration = (existing && existing.duration) || (extractedMeta && extractedMeta.duration) || 0;
         const artworkBlob = (existing && existing.artworkBlob) || (extractedMeta && extractedMeta.artworkBlob) || null;
+        const artworkDataUrl = (extractedMeta && extractedMeta.artworkDataUrl) || (existing && existing.artworkDataUrl) || "";
 
         const track = {
           id: trackId,
@@ -718,6 +864,7 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           fileSize: parseInt(file.size, 10) || 0,
           originalName: file.name,
           artworkBlob,
+          artworkDataUrl,
           source: "gdrive",
           driveFileId: file.id,
           cached: false,

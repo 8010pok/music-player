@@ -43,10 +43,8 @@ import { getArtworkUrl } from "../ui/artwork-cache.js";
 // 再生エラー時のスキップ通知。components.js は UI レイヤだが、
 // ユーザに「読み込めない曲をスキップした」ことを知らせるために最小依存で使う。
 import { toast } from "../ui/components.js";
-import { checkStudioLoop, loadStudioSettingsForTrack } from "./studio-service.js";
 
 let audioEl = typeof document !== "undefined" ? document.getElementById("audio-el") : null;
-let standbyAudioEl = typeof document !== "undefined" ? document.getElementById("audio-el-b") : null;
 if (!audioEl && typeof document !== "undefined") {
   // index.html の <audio id="audio-el"> は iOS バックグラウンド再生の生命線で
   // あり、これが無い場合は他の全機能が動かない。警告ではなく throw して
@@ -227,9 +225,6 @@ export function initAudioEngine({ onNowPlaying, onScrobble } = {}) {
   }
 
   attachElementListeners(audioEl);
-  if (standbyAudioEl) {
-    attachElementListeners(standbyAudioEl);
-  }
 
   state.userVolume = clampVolume(audioEl.volume ?? 1.0);
   applyTrackVolume(audioEl);
@@ -450,12 +445,6 @@ function clearPreload() {
   state.preloadTrackId = null;
   state.preloadingId = null;
   state.preloadToken++; // in-flight の getBlob を stale 化して破棄させる
-  if (standbyAudioEl) {
-    try {
-      standbyAudioEl.removeAttribute("src");
-      standbyAudioEl.load();
-    } catch {}
-  }
 }
 
 /**
@@ -499,15 +488,6 @@ function schedulePreload() {
       }
       state.preloadTrackId = targetId;
       state.preloadUrl = url;
-
-      // ★ デュアル <audio> ピンポン: スタンバイ要素があれば裏側で先行バッファロード
-      if (standbyAudioEl) {
-        try {
-          standbyAudioEl.src = url;
-          standbyAudioEl.preload = "auto";
-          standbyAudioEl.load();
-        } catch (_) {}
-      }
     })
     .catch((e) => console.warn("[audio-engine] 次曲プリロード失敗", e))
     .finally(() => {
@@ -572,49 +552,20 @@ function playPreloadedSync(index, track, url) {
   });
 
   state.userPausedExplicitly = false;
-  // --- ここから play() まで同期 ---
+  // --- ここから play() まで完全同期 (バックグラウンド再生権限を持つ単一の audioEl を操作) ---
+  audioEl.src = url;
+  try { audioEl.load(); } catch {}
+  audioEl.loop = false;
+  audioEl.playbackRate = getEffectivePlaybackRate();
+  applyTrackVolume(audioEl, track);
 
-  // ★ デュアル <audio> による真のピンポンギャップレス再生判定
-  // スタンバイ要素が存在し、裏側で既にこの url が先行ロードされている場合
-  const canPingPong = standbyAudioEl &&
-                      standbyAudioEl.src &&
-                      standbyAudioEl.src.includes(url.split("#")[0]);
-
-  let playPromise = null;
-  if (canPingPong) {
-    // --- ピンポン・スワップ (無音時間 0ms で裏側へ切り替え) ---
-    const oldAudio = audioEl;
-    try { oldAudio.pause(); } catch {}
-
-    audioEl = standbyAudioEl;
-    standbyAudioEl = oldAudio;
-
-    audioEl.loop = false;
-    audioEl.playbackRate = getEffectivePlaybackRate();
-    applyTrackVolume(audioEl, track);
-
-    const pub = getPublic();
-    if (pub.enableAudioEffects) {
-      try { applyEffectsSetting(audioEl, true); } catch (_) {}
-    }
-
-    updateMediaSessionMetadata(track);
-    playPromise = audioEl.play();
-
-    // 旧アクティブ要素（現スタンバイ）のリソース解放
-    try {
-      standbyAudioEl.removeAttribute("src");
-      standbyAudioEl.load();
-    } catch {}
-  } else {
-    // --- フォールバック (単一要素またはスタンバイ未ロード時) ---
-    audioEl.src = url;
-    try { audioEl.load(); } catch {}
-    audioEl.playbackRate = getEffectivePlaybackRate();
-    applyTrackVolume(audioEl, track);
-    updateMediaSessionMetadata(track);
-    playPromise = audioEl.play();
+  const pub = getPublic();
+  if (pub.enableAudioEffects) {
+    try { applyEffectsSetting(audioEl, true); } catch (_) {}
   }
+
+  updateMediaSessionMetadata(track);
+  const playPromise = audioEl.play();
   // --- play() 発火完了。以降は同期でなくてもよい ---
 
   // play() の「後」は position state のみ再確定する (新 MediaMetadata は作らない)。
@@ -649,7 +600,6 @@ function playPreloadedSync(index, track, url) {
           playCount: (track.playCount || 0) + 1,
           lastPlayedAt: Date.now(),
         }).catch(() => {});
-        loadStudioSettingsForTrack(track.id, audioEl).catch(() => {});
       })
       .catch((e) => {
         clearTransitioning();
@@ -922,10 +872,6 @@ export function stopPlayback() {
 
   try { audioEl.pause(); } catch {}
   try { audioEl.removeAttribute("src"); audioEl.load(); } catch {}
-  if (standbyAudioEl) {
-    try { standbyAudioEl.pause(); } catch {}
-    try { standbyAudioEl.removeAttribute("src"); standbyAudioEl.load(); } catch {}
-  }
   if (state.currentObjectUrl) {
     try { URL.revokeObjectURL(state.currentObjectUrl); } catch {}
     state.currentObjectUrl = null;
@@ -963,7 +909,6 @@ export function stopPlayback() {
 }
 
 export function getAudioElement() { return audioEl; }
-export function getStandbyAudioElement() { return standbyAudioEl; }
 export function getQueue() { return state.queue.slice(); }
 
 /* ============ 内部実装 ============ */
@@ -1003,7 +948,6 @@ async function loadAndPlay(track) {
 
   // ★ Phase 0: 音源 URL / Blob の取得（transitioning 開始前）
   let targetUrl = null;
-  let isStreamUrl = false;
   let blobErr = null;
 
   // 1. Prewarm キャッシュにあるか確認
@@ -1017,25 +961,7 @@ async function loadAndPlay(track) {
     }
   }
 
-  // 2. 未キャッシュ Google Drive 音源の場合、Service Worker のストリーミングルートで即時再生
-  const isDrive = typeof track.id === "string" && (track.id.startsWith("gd-") || track.driveFileId);
-  if (!targetUrl && isDrive && !track.cached) {
-    try {
-      const { getDriveToken } = await import("../gdrive/drive-service.js");
-      const token = await getDriveToken();
-      const driveFileId = track.driveFileId || (track.id.startsWith("gd-") ? track.id.slice(3) : track.id);
-      if (token && typeof navigator !== "undefined" && navigator.serviceWorker?.controller) {
-        targetUrl = `./gdrive-stream/${encodeURIComponent(driveFileId)}?token=${encodeURIComponent(token)}`;
-        isStreamUrl = true;
-        // バックグラウンド非ブロッキングで次回以降用キャッシュをダウンロード保存
-        getBlob(track.id).catch((e) => console.warn("[audio-engine] 背景キャッシュ保存失敗", e));
-      }
-    } catch (e) {
-      console.warn("[audio-engine] 即時ストリーム URL 生成スキップ", e);
-    }
-  }
-
-  // 3. 通常の getBlob 取得
+  // 2. 音源 Blob 取得 (Google Drive 音源含む: 未キャッシュなら自動フェッチ＆IndexedDB保存)
   if (!targetUrl) {
     const blob = await getBlob(track.id).catch((e) => {
       console.warn("[audio-engine] getBlob 失敗", track.id, e);
@@ -1070,9 +996,7 @@ async function loadAndPlay(track) {
       state.currentObjectUrl = null;
     }
     {
-      if (!isStreamUrl) {
-        state.currentObjectUrl = targetUrl;
-      }
+      state.currentObjectUrl = targetUrl;
       audioEl.src = targetUrl;
       try { audioEl.load(); } catch {}
       applyTrackVolume(audioEl, track);
@@ -1092,7 +1016,7 @@ async function loadAndPlay(track) {
       await waitForLoadedMetadata();
 
       // ★ await 中に別の遷移が始まっていたら自分は stale。play せず中断する。
-      if (isSupersededTransition(myToken, url)) return;
+      if (isSupersededTransition(myToken, targetUrl)) return;
 
       // 念のため新 src でも currentTime=0 を再度明示
       try { audioEl.currentTime = 0; } catch {}
@@ -1108,7 +1032,7 @@ async function loadAndPlay(track) {
       await resumeEqContext();
 
       // resumeEqContext の await 後も再度 stale チェック (上記と同じ理由)
-      if (isSupersededTransition(myToken, url)) return;
+      if (isSupersededTransition(myToken, targetUrl)) return;
 
       state.userPausedExplicitly = false;
       try {
@@ -1151,8 +1075,6 @@ async function loadAndPlay(track) {
           lastPlayedAt: Date.now(),
         });
       } catch {}
-
-      loadStudioSettingsForTrack(track.id, audioEl).catch(() => {});
 
       // ★ 現在の曲が再生開始した → 次曲を先読みしておく。
       //   これにより次の ended で同期的に (await なしで) 次曲へ移れる。
@@ -1332,9 +1254,6 @@ function onTimeUpdate() {
   const dur = audioEl.duration || track.duration || 0;
   const cur = audioEl.currentTime || 0;
   appState.set({ currentTime: cur });
-
-  // A-B 区間リピート & Speed Trainer 進行チェック
-  checkStudioLoop(cur, audioEl);
 
   // 周期的に position state を更新（iOS のロック画面プログレスバーと
   // セッション維持のため）。timeupdate は ~250ms 間隔で発火するが、

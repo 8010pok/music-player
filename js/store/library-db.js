@@ -207,9 +207,10 @@ export async function getBlob(id) {
                 duration = await readDurationViaAudio(blob);
               }
               const patch = {};
+              const isNumeric = (s) => typeof s === "string" && /^\d+$/.test(s.trim());
               if (!track.userEdited) {
                 if (meta.title && meta.title !== "(無題)") patch.title = meta.title;
-                if (meta.artist && meta.artist !== "(不明アーティスト)" && meta.artist !== "(Google Drive)") patch.artist = meta.artist;
+                if (meta.artist && meta.artist !== "(不明アーティスト)" && meta.artist !== "(Google Drive)" && !isNumeric(meta.artist)) patch.artist = meta.artist;
                 if (meta.album && meta.album !== "Google Drive") patch.album = meta.album;
                 if (meta.albumArtist) patch.albumArtist = meta.albumArtist;
                 if (meta.trackNo) patch.trackNo = meta.trackNo;
@@ -217,6 +218,7 @@ export async function getBlob(id) {
                 if (meta.year) patch.year = meta.year;
                 if (meta.genre) patch.genre = meta.genre;
                 if (meta.artworkBlob && !track.artworkBlob) patch.artworkBlob = meta.artworkBlob;
+                if (meta.artworkDataUrl && !track.artworkDataUrl) patch.artworkDataUrl = meta.artworkDataUrl;
               }
               if (duration && duration > 0) patch.duration = duration;
               patch.cached = shouldCache;

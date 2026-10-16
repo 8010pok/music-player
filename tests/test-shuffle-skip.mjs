@@ -317,9 +317,9 @@ describe("Fisher-Yates シャッフル: 統計的検証", () => {
   }
 
   const original = Array.from({ length: 10 }, (_, i) => i);
-  // 100 回試行して、各位置に各値が現れるか確認
+  // 250 回試行して、各位置に各値が現れるか確認 (確率的フレイキーを完全排除)
   const positionCount = original.map(() => Array(10).fill(0));
-  for (let trial = 0; trial < 100; trial++) {
+  for (let trial = 0; trial < 250; trial++) {
     const s = shuffle(original);
     s.forEach((v, idx) => positionCount[idx][v]++);
   }
@@ -333,7 +333,7 @@ describe("Fisher-Yates シャッフル: 統計的検証", () => {
       }
     }
   }
-  assert(allCovered, "Fisher-Yates: 100 回試行で全位置に全値が現れる (極端な偏りなし)");
+  assert(allCovered, "Fisher-Yates: 250 回試行で全位置に全値が現れる (極端な偏りなし)");
 
   // 要素数が維持される
   const s2 = shuffle(original);

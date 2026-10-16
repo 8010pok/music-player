@@ -49,12 +49,6 @@ let msOutMidToL = null, msOutMidToR = null;     // mid → L, R に分配
 let msOutSideToL = null, msOutSideToR_neg = null; // side → L+, R-
 let msMerger = null;                             // 2ch にマージ
 
-// チャンネル・定位セパレーター (Stereo / L Only / R Only / L-R Swap / Mono)
-let chSplitter = null;
-let chGainLtoL = null, chGainLtoR = null;
-let chGainRtoL = null, chGainRtoR = null;
-let chMerger = null;
-
 // 10 バンド EQ の中心周波数 (ISO オクターブ標準)
 export const EQ_BANDS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 
@@ -138,27 +132,8 @@ export function applyEffectsSetting(audioEl, enabled) {
       .connect(bassBoost)
       .connect(msInput); // ここから MS stage 入口 (msInput → msSplitter で 2ch 化)
 
-    // --- チャンネル・定位セパレーター (Stereo / L Only / R Only / L-R Swap / Mono) ---
-    chSplitter = ctx.createChannelSplitter(2);
-    chGainLtoL = ctx.createGain();
-    chGainLtoR = ctx.createGain();
-    chGainRtoL = ctx.createGain();
-    chGainRtoR = ctx.createGain();
-    chMerger = ctx.createChannelMerger(2);
-
-    chGainLtoL.gain.value = 1;
-    chGainLtoR.gain.value = 0;
-    chGainRtoL.gain.value = 0;
-    chGainRtoR.gain.value = 1;
-
-    msMerger.connect(chSplitter);
-    chSplitter.connect(chGainLtoL, 0).connect(chMerger, 0, 0);
-    chSplitter.connect(chGainLtoR, 0).connect(chMerger, 0, 1);
-    chSplitter.connect(chGainRtoL, 1).connect(chMerger, 0, 0);
-    chSplitter.connect(chGainRtoR, 1).connect(chMerger, 0, 1);
-
-    // 出口: panner → compressor → lowPass → destination
-    chMerger.connect(panner).connect(compressor).connect(lowPass).connect(ctx.destination);
+    // 出口: msMerger → panner → compressor → lowPass → destination
+    msMerger.connect(panner).connect(compressor).connect(lowPass).connect(ctx.destination);
   } catch (e) {
     console.warn("音声エフェクト初期化失敗", e);
     // source 生成済み(createMediaElementSource 後)に chain 構築が中断すると、
@@ -516,123 +491,6 @@ export function getEffectsState() {
     },
     msMidScale: msMidScaleNode?.gain?.value ?? 1,
     msSideScale: msSideScaleNode?.gain?.value ?? 1,
-    chGainLtoL: chGainLtoL?.gain?.value ?? 1,
-    chGainLtoR: chGainLtoR?.gain?.value ?? 0,
-    chGainRtoL: chGainRtoL?.gain?.value ?? 0,
-    chGainRtoR: chGainRtoR?.gain?.value ?? 1,
   };
-}
-
-/* ============ 耳コピ・スタジオ機能 API ============ */
-
-/**
- * チャンネル選択モード (Stereo / L Only / R Only / L-R Swap / Mono)
- * @param {"stereo"|"left-only"|"right-only"|"lr-swap"|"mono"} mode
- */
-export function applyChannelMode(mode = "stereo") {
-  if (!ctx || !chGainLtoL) return;
-  const now = ctx.currentTime;
-  const t = 0.02;
-
-  switch (mode) {
-    case "left-only":
-      // 左チャンネルのみを両耳から再生 (左パンのギター・フレーズ耳コピ用)
-      chGainLtoL.gain.setTargetAtTime(1, now, t);
-      chGainLtoR.gain.setTargetAtTime(1, now, t);
-      chGainRtoL.gain.setTargetAtTime(0, now, t);
-      chGainRtoR.gain.setTargetAtTime(0, now, t);
-      break;
-    case "right-only":
-      // 右チャンネルのみを両耳から再生
-      chGainLtoL.gain.setTargetAtTime(0, now, t);
-      chGainLtoR.gain.setTargetAtTime(0, now, t);
-      chGainRtoL.gain.setTargetAtTime(1, now, t);
-      chGainRtoR.gain.setTargetAtTime(1, now, t);
-      break;
-    case "lr-swap":
-      // 左右反転
-      chGainLtoL.gain.setTargetAtTime(0, now, t);
-      chGainLtoR.gain.setTargetAtTime(1, now, t);
-      chGainRtoL.gain.setTargetAtTime(1, now, t);
-      chGainRtoR.gain.setTargetAtTime(0, now, t);
-      break;
-    case "mono":
-      // モノラル
-      chGainLtoL.gain.setTargetAtTime(0.5, now, t);
-      chGainLtoR.gain.setTargetAtTime(0.5, now, t);
-      chGainRtoL.gain.setTargetAtTime(0.5, now, t);
-      chGainRtoR.gain.setTargetAtTime(0.5, now, t);
-      break;
-    case "stereo":
-    default:
-      // 通常ステレオ
-      chGainLtoL.gain.setTargetAtTime(1, now, t);
-      chGainLtoR.gain.setTargetAtTime(0, now, t);
-      chGainRtoL.gain.setTargetAtTime(0, now, t);
-      chGainRtoR.gain.setTargetAtTime(1, now, t);
-      break;
-  }
-}
-
-/**
- * Mid / Side（センター / サイド）バランススライダー
- * -100% (Sideのみ = ボーカル・センターカット) 〜 0% (通常) 〜 +100% (Midのみ = センター抽出)
- * @param {number} balance -1.0 〜 +1.0
- */
-export function applyMidSideBalance(balance = 0) {
-  if (!ctx || !msMidScaleNode || !msSideScaleNode) return;
-  const b = clamp(Number(balance) || 0, -1, 1);
-  let mid = 1.0;
-  let side = 1.0;
-
-  if (b < 0) {
-    // 負: Side強調・Mid減衰（ボーカル・センター楽器をカット）
-    mid = Math.max(0, 1 + b);
-    side = 1.0;
-  } else if (b > 0) {
-    // 正: Mid強調・Side減衰（センター定位のボーカル・キック・スネア・ベースのみ抽出）
-    mid = 1.0;
-    side = Math.max(0, 1 - b);
-  }
-
-  const now = ctx.currentTime;
-  msMidScaleNode.gain.setTargetAtTime(mid, now, 0.02);
-  msSideScaleNode.gain.setTargetAtTime(side, now, 0.02);
-}
-
-/**
- * 耳コピ特化の周波数ソロプリセット定義
- */
-export const FREQ_SOLO_PRESETS = {
-  drums:  { label: "🎯 ドラム (Kick & Snare)", low: 45, high: 5500 },
-  drum:   { label: "🎯 ドラム (Kick & Snare)", low: 45, high: 5500 },
-  hihat:  { label: "🥁 ハイハット・シンバル", low: 3200, high: 22050 },
-  bass:   { label: "🎸 ベースライン抽出",   low: 40, high: 260 },
-  guitar: { label: "🎸 ギター / 中域抽出",   low: 260, high: 4200 },
-  off:    { label: "通常 (全帯域)",         low: 0, high: 22050 },
-};
-
-/**
- * 周波数ソロ（Frequency Magnifier / 帯域虫眼鏡モード）
- * @param {{ enabled?: boolean, lowFreq?: number, highFreq?: number, preset?: string }} opts
- */
-export function applyFrequencySolo({ enabled = false, lowFreq = 20, highFreq = 22050, preset = "off" } = {}) {
-  if (!ctx || !highPass || !lowPass) return;
-  let low = lowFreq;
-  let high = highFreq;
-
-  if (preset && FREQ_SOLO_PRESETS[preset]) {
-    low = FREQ_SOLO_PRESETS[preset].low;
-    high = FREQ_SOLO_PRESETS[preset].high;
-  }
-
-  if (!enabled || preset === "off") {
-    low = 0;
-    high = 22050;
-  }
-
-  const now = ctx.currentTime;
-  highPass.frequency.setTargetAtTime(Math.max(0, Math.min(22050, low)), now, 0.02);
-  lowPass.frequency.setTargetAtTime(Math.max(20, Math.min(22050, high)), now, 0.02);
 }
 
