@@ -155,6 +155,19 @@ export function prewarmTrack(trackId) {
   }, 60000);
 }
 
+/**
+ * 複数トラックの音源を先行プリウォーム（アルバム・プレイリスト画面表示時の即時再生用）
+ * @param {Array<string>} trackIds
+ * @param {number} [limit=10]
+ */
+export function prewarmTracks(trackIds, limit = 10) {
+  if (!Array.isArray(trackIds)) return;
+  const targets = trackIds.slice(0, limit);
+  for (const id of targets) {
+    if (id) prewarmTrack(id);
+  }
+}
+
 // 連続スキップで停止する閾値。これ以上連続でスキップしたら、無限ループの
 // 可能性があると判断して停止し、ユーザに通知する。
 const MAX_CONSECUTIVE_SKIPS = 5;
@@ -345,17 +358,9 @@ export async function playTrackImmediate(track) {
 
 export async function setQueueAndPlay(tracks, startIndex = 0) {
   // ユーザー操作(曲タップ等)起点でセッションアクティベータを生成しておく。
-  // フォアグラウンドのジェスチャ中に AudioContext を作っておくことで、後の
-  // ロック画面再開時は resume() だけで済む(バックグラウンドでの new を避ける)。
-  // await しない: 生成が目的で、再生開始を遅らせない(失敗は内部で warn 処理)。
   resumeSessionActivator();
-  // 新しいキューを開始するので、旧キュー由来のプリロードは確実に stale。
-  // 即座に破棄して object URL リークと誤 fast-path を防ぐ
-  // (loadAndPlay 末尾の schedulePreload でも取り直されるが、ここで明示する)。
+  // 新しいキューを開始するので、旧キュー由来のプリロードは破棄
   clearPreload();
-  // ユーザ起点の新規再生コンテキスト開始 → 連続スキップ計数を初期化する。
-  //   さもないと前回キューで途中まで進んだスキップ数(blob 欠損等)が持ち越され、
-  //   新キューで数曲失敗しただけで「複数曲の読み込みに失敗」停止に達してしまう。
   state.consecutiveSkips = 0;
   state.queue = tracks.slice();
   state.queueIndex = Math.max(0, Math.min(startIndex, tracks.length - 1));
@@ -365,7 +370,19 @@ export async function setQueueAndPlay(tracks, startIndex = 0) {
     shuffleCurrentQueue();
   }
   const cur = state.queue[state.queueIndex];
-  if (cur) await loadAndPlay(cur);
+  if (!cur) return;
+
+  // ★ ユーザー操作（タップ）の同期コールスタックで即座に再生を開始（再生ボタンを押さずに即再生）
+  // 1. もし prewarmCache に既に Object URL があれば完全同期で即座に再生 (User Gesture 100% 保持・ラグ 0ms)
+  const prewarmed = prewarmCache.get(cur.id);
+  if (prewarmed && prewarmed.objectUrl) {
+    prewarmCache.delete(cur.id);
+    playPreloadedSync(state.queueIndex, cur, prewarmed.objectUrl);
+    return;
+  }
+
+  // 2. まだメモリにない場合でも、ユーザー操作コンテキストを逃さず最速で loadAndPlay を実行
+  await loadAndPlay(cur);
 }
 
 /**
@@ -554,7 +571,6 @@ function playPreloadedSync(index, track, url) {
   state.userPausedExplicitly = false;
   // --- ここから play() まで完全同期 (バックグラウンド再生権限を持つ単一の audioEl を操作) ---
   audioEl.src = url;
-  try { audioEl.load(); } catch {}
   audioEl.loop = false;
   audioEl.playbackRate = getEffectivePlaybackRate();
   applyTrackVolume(audioEl, track);
@@ -998,7 +1014,8 @@ async function loadAndPlay(track) {
     {
       state.currentObjectUrl = targetUrl;
       audioEl.src = targetUrl;
-      try { audioEl.load(); } catch {}
+      audioEl.loop = false;
+      audioEl.playbackRate = getEffectivePlaybackRate();
       applyTrackVolume(audioEl, track);
 
       appState.set({
@@ -1012,74 +1029,51 @@ async function loadAndPlay(track) {
         scrobbleReason: null,
       });
 
-      // loadedmetadata を待つことで audio.duration を確定させる
-      await waitForLoadedMetadata();
-
-      // ★ await 中に別の遷移が始まっていたら自分は stale。play せず中断する。
-      if (isSupersededTransition(myToken, targetUrl)) return;
-
-      // 念のため新 src でも currentTime=0 を再度明示
-      try { audioEl.currentTime = 0; } catch {}
-
-      // === Phase 3: play() の「前」に MediaSession を更新 ===
-      //   waitForLoadedMetadata 済みなので duration は新トラックの値が入る。
-      //   先に position=0 / 新 duration / rate=1 を iOS に伝えておくことで、
-      //   play 直後に iOS のロック画面が「新セッションの 0 から開始」と
-      //   認識する。play 後の更新だけだと iOS が前曲の position state を
-      //   引きずって 40〜50% 地点から始まったように見えるケースがある。
+      // === play() の前に MediaSession を即座に同期設定 ===
       updateMediaSessionMetadata(track);
+      updateMediaPositionState({ position: 0, duration: track.duration });
 
-      await resumeEqContext();
-
-      // resumeEqContext の await 後も再度 stale チェック (上記と同じ理由)
-      if (isSupersededTransition(myToken, targetUrl)) return;
+      // EQ context はバックグラウンドで resume (play() の開始を待たせない)
+      resumeEqContext().catch(() => {});
 
       state.userPausedExplicitly = false;
       try {
-        await audioEl.play();
-        // 再生開始に成功 → 連続スキップカウンタをリセット
-        state.consecutiveSkips = 0;
-      } catch (err) {
-        // ★ ここで自動スキップしない（mp3player の挙動に合わせる）。
-        //   iOS や一部ブラウザでロード直後に前の再生中断が AbortError となって
-        //   play() が一時的に拒否される場合があるため、一度だけ微小遅延で再試行。
-        if (err?.name === "AbortError" && !state.userPausedExplicitly && state.currentTrackId === track.id) {
-          try {
-            await new Promise((r) => setTimeout(r, 60));
-            if (!state.userPausedExplicitly && state.currentTrackId === track.id) {
-              await audioEl.play();
-              state.consecutiveSkips = 0;
-              return;
+        const p = audioEl.play();
+        if (p && typeof p.then === "function") {
+          p.then(() => {
+            state.consecutiveSkips = 0;
+            if (myToken === state.transitionToken) state.transitioning = false;
+          }).catch(async (err) => {
+            if (myToken === state.transitionToken) state.transitioning = false;
+            console.warn("[audio-engine] play 失敗", err);
+            if (err?.name === "AbortError" && !state.userPausedExplicitly && state.currentTrackId === track.id) {
+              try {
+                await new Promise((r) => setTimeout(r, 60));
+                if (!state.userPausedExplicitly && state.currentTrackId === track.id) {
+                  await audioEl.play();
+                  state.consecutiveSkips = 0;
+                }
+              } catch (_) {}
             }
-          } catch (_) {}
+          });
+        } else {
+          state.consecutiveSkips = 0;
+          if (myToken === state.transitionToken) state.transitioning = false;
         }
+      } catch (err) {
         console.warn("[audio-engine] play 失敗", err);
         appState.set({ isPlaying: false });
+        if (myToken === state.transitionToken) state.transitioning = false;
       }
 
-      // === Phase 4: play() の「後」は position state のみ再確定 ===
-      //   過去に updateMediaSessionMetadata(track) を再度呼んでいたが、
-      //   iOS バックグラウンド再生中の自然遷移 (ended → 次曲) では、
-      //   play 直後の new MediaMetadata({...}) を生成すると iOS の
-      //   audio session が「新セッション開始」とみなされ、ロック画面で
-      //   進捗バーは進むが音だけ出ない状態になる不具合が確認された。
-      //   mp3player (GitHub utausnskareshi/mp3player) も play 後の metadata
-      //   再設定は行っていない。
-      //   metadata は Phase 3 (play 前) で確定済みなので、Phase 4 では
-      //   position state だけを最終確定する。
-      updateMediaPositionState({ position: 0, duration: track.duration });
-
-      try {
-        await updateTrack(track.id, {
-          playCount: (track.playCount || 0) + 1,
-          lastPlayedAt: Date.now(),
-        });
-      } catch {}
-
-      // ★ 現在の曲が再生開始した → 次曲を先読みしておく。
-      //   これにより次の ended で同期的に (await なしで) 次曲へ移れる。
-      //   iOS バックグラウンドでの自動遷移を確実にする生命線。
+      // ★ 再生が開始されたら、直ちに次曲のプリロードを開始 (次の ended で即時同期再生)
       schedulePreload();
+
+      // バックグラウンドで非同期記録 (再生の進行を一切待たせない)
+      updateTrack(track.id, {
+        playCount: (track.playCount || 0) + 1,
+        lastPlayedAt: Date.now(),
+      }).catch(() => {});
     }
   } finally {
     // 遷移完了。ただし自分が最新遷移のときだけ transitioning を解除する。
@@ -1269,6 +1263,13 @@ function onTimeUpdate() {
   if (!state.lastSessionSaveAt || now - state.lastSessionSaveAt > 5000) {
     saveSessionState();
     state.lastSessionSaveAt = now;
+  }
+
+  // ★ 次曲プリロード監視 (Preload Watchdog)
+  // アルバム等で 1曲目が終わる前に 100% 確実に次曲の Object URL を待機させ、
+  // ended 発火時に同期高速パス（playPreloadedSync）でギャップレスに2曲目へ進ませる
+  if (!state.preloadUrl && !state.preloadingId && computeNextIndex() >= 0) {
+    schedulePreload();
   }
 
   if (!appState.get().nowPlayingSent && cur >= 1) {

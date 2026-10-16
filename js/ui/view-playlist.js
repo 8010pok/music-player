@@ -21,7 +21,7 @@ import {
   getAllTracks,
   removeTracksFromPlaylist,
 } from "../store/library-db.js";
-import { setQueueAndPlay, setShuffleMode, setRepeatMode, prewarmTrack } from "../player/audio-engine.js";
+import { setQueueAndPlay, setShuffleMode, setRepeatMode, prewarmTrack, prewarmTracks } from "../player/audio-engine.js";
 import { go } from "../router.js";
 import { toast, confirm, promptForm, escapeHtml, escapeAttr } from "./components.js";
 
@@ -78,6 +78,11 @@ export async function mount(root) {
   root.innerHTML = render();
   const refs = collectRefs(root);
   renderList(refs);
+
+  // ★ プレイリスト画面表示時に楽曲を先行プリウォーム（タップ即時再生用）
+  if (Array.isArray(tracksInOrder) && tracksInOrder.length > 0) {
+    prewarmTracks(tracksInOrder.map((t) => t.id), 10);
+  }
 
   refs.backBtn.addEventListener("click", () => go("playlists"));
   refs.renameBtn.addEventListener("click", () => renamePlaylist(refs));

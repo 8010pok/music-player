@@ -12,7 +12,7 @@
 import { extractMetadata, readDurationViaAudio } from "../metadata/index.js";
 import { mimeFromName, formatFromName } from "../metadata/util.js";
 import { putTrack, getTrack, getAllTracks, updateTrack, setTracksOrder, deleteTrack, getStorageEstimate, getBlob, removeTrackFromAllPlaylists } from "../store/library-db.js";
-import { setQueueAndPlay, stopPlayback, prewarmTrack } from "../player/audio-engine.js";
+import { setQueueAndPlay, stopPlayback, prewarmTrack, prewarmTracks } from "../player/audio-engine.js";
 import { toast, confirm, openModal, escapeHtml, escapeAttr } from "./components.js";
 import { appState } from "../state.js";
 import { go, getLastView, saveLastView } from "../router.js";
@@ -656,6 +656,11 @@ function renderList(refs) {
   }
 
   refs.libStats.textContent = `${list.length} / ${tracksCache.length} 曲${storageInfo}`;
+
+  // 先頭数曲を先行プリウォーム（タップ即時再生のため）
+  if (Array.isArray(list) && list.length > 0) {
+    prewarmTracks(list.slice(0, 5).map((t) => t.id));
+  }
 }
 
 function renderAlbums(refs) {

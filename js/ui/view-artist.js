@@ -10,7 +10,7 @@
 import { getAllTracks } from "../store/library-db.js";
 import { groupTracksIntoArtists } from "../metadata/artist-util.js";
 import { sortAlbums } from "../metadata/album-util.js";
-import { setQueueAndPlay, setShuffleMode } from "../player/audio-engine.js";
+import { setQueueAndPlay, setShuffleMode, prewarmTracks } from "../player/audio-engine.js";
 import { appState } from "../state.js";
 import { getArtworkUrl } from "./artwork-cache.js";
 import { go } from "../router.js";
@@ -43,6 +43,11 @@ export async function mount(root) {
   if (((location.hash.match(/^#\/([^?]+)/) || [])[1]) !== "artist") return;
 
   root.innerHTML = render(artist);
+
+  // ★ アーティスト画面表示時に楽曲を先行プリウォーム
+  if (artist && Array.isArray(artist.tracks)) {
+    prewarmTracks(artist.tracks.map((t) => t.id), 10);
+  }
   const refs = collectRefs(root);
 
   refs.backBtn.addEventListener("click", () => {

@@ -8,7 +8,7 @@
 
 import { getAllTracks, deleteTrack, removeTrackFromAllPlaylists } from "../store/library-db.js";
 import { groupTracksIntoAlbums, parseTrackIndex } from "../metadata/album-util.js";
-import { setQueueAndPlay, setShuffleMode, stopPlayback, prewarmTrack } from "../player/audio-engine.js";
+import { setQueueAndPlay, setShuffleMode, stopPlayback, prewarmTrack, prewarmTracks } from "../player/audio-engine.js";
 import { appState } from "../state.js";
 import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
 import { go } from "../router.js";
@@ -42,6 +42,11 @@ export async function mount(root) {
 
   root.innerHTML = render(album);
   const refs = collectRefs(root);
+
+  // ★ アルバム画面を開いた時点で楽曲を先行プリウォーム（タップ即時再生＆次曲即時スタンバイ）
+  if (album && Array.isArray(album.tracks)) {
+    prewarmTracks(album.tracks.map((t) => t.id), 10);
+  }
 
   refs.backBtn.addEventListener("click", () => {
     if (window.history.length > 1) {
@@ -310,6 +315,9 @@ async function onListClick(e, root) {
 
   // プレイリストコンテキストをクリア
   appState.set({ currentPlaylistId: null, currentPlaylistName: null });
+
+  // アルバム曲タップ時はアルバム曲順で連続再生されるようシャッフルを解除
+  setShuffleMode(false);
 
   await setQueueAndPlay(playable, idx);
 }
