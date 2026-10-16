@@ -352,9 +352,10 @@ test("17. 3点リーダー横グリッド化 ＆ 曲一覧への適用 ＆ キ�
   assert.match(viewAlbum, /class="track-menu-grid"/, "view-album のメニューが track-menu-grid を使用している");
   assert.match(viewLibrary, /class="track-menu-grid"/, "view-library のメニューが track-menu-grid を使用している");
 
-  // 2) ライブラリ曲一覧でも 3点リーダーボタン (.track-more-btn) に集約され、直接配置ボタンが撤廃されていること
+  // 2) ライブラリ曲一覧で元の直接操作ボタン（次に再生、キュー追加、編集、トグル、削除）が復活し、3点リーダーボタンも併設されていること
+  assert.match(viewLibrary, /class="icon-btn track-action-btn" data-act="play-next"/, "view-library に直接操作の次に再生ボタンが復活配置されている");
+  assert.match(viewLibrary, /class="icon-btn track-action-btn" data-act="add-queue"/, "view-library に直接操作のキュー追加ボタンが復活配置されている");
   assert.match(viewLibrary, /class="icon-btn track-more-btn" data-act="more"/, "view-library に track-more-btn が配置されている");
-  assert.ok(!viewLibrary.includes('class="icon-btn track-action-btn" data-act="play-next"'), "view-library から直接配置の次に再生ボタンが撤廃されている");
 
   // 3) 再生待ちキュー (Up Next) に折りたたみドラッグピルと折りたたみボタンが配置されていること
   assert.match(viewPlayer, /class="queue-drawer-drag-pill"/, "view-player に queue-drawer-drag-pill が配置されている");
@@ -396,6 +397,24 @@ test("18. モーダルの「閉じる」ボタン動作保証 ＆ 背景タッ�
   assert.match(viewAlbumCode, /label:\s*["']閉じる["']/, "view-album に「閉じる」ボタンが定義されている");
   assert.match(viewLibraryCode, /label:\s*["']閉じる["']/, "view-library に「閉じる」ボタンが定義されている");
 });
+
+test("19. YouTube音源保存のカット位置再生・プレビュー高精度Web Audio化 ＆ 3点リーダーメニュー動作の検証", () => {
+  const rootDir = path.join(__dirname, "..");
+  const ytModalCode = fs.readFileSync(path.join(rootDir, "js/ui/youtube-modal.js"), "utf-8");
+  const viewAlbumCode = fs.readFileSync(path.join(rootDir, "js/ui/view-album.js"), "utf-8");
+  const viewLibraryCode = fs.readFileSync(path.join(rootDir, "js/ui/view-library.js"), "utf-8");
+
+  // 1) youtube-modal.js で AudioBufferSourceNode によるプレビュー再生・カット位置再生が実装されていること
+  assert.match(ytModalCode, /previewSourceNode\s*=\s*previewAudioCtx\.createBufferSource\(\)/, "AudioBufferSourceNode が生成されている");
+  assert.match(ytModalCode, /previewSourceNode\.start\(0,\s*st,\s*len\)/, "カット位置からの範囲再生が start(0, st, len) で実装されている");
+  assert.match(ytModalCode, /function getPreviewCurrentTime\(\)/, "再生ヘッド時間の取得関数が定義されている");
+  assert.match(ytModalCode, /function startPreviewAt\(offset/, "指定位置からのプレビュー再生関数が定義されている");
+
+  // 2) 3点リーダーメニュー内でモーダルが安全に直接閉じられ、機能が実行されること
+  assert.match(viewAlbumCode, /modalRoot\.hidden\s*=\s*true/, "view-album でモーダルが直接安全に閉じられる");
+  assert.match(viewLibraryCode, /modalRoot\.hidden\s*=\s*true/, "view-library でモーダルが直接安全に閉じられる");
+});
+
 
 
 

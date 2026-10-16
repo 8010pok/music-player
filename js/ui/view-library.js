@@ -925,6 +925,11 @@ function rowHtml(t, cur) {
       </div>
       <div class="track-actions">
         ${lovedMark}
+        <button class="icon-btn track-action-btn" data-act="play-next" title="次に再生">⏭</button>
+        <button class="icon-btn track-action-btn" data-act="add-queue" title="キューの末尾に追加">＋</button>
+        <button class="icon-btn" data-act="edit" title="曲の情報を編集">✏</button>
+        <button class="icon-btn" data-act="toggle" title="${toggleTitle}">${toggleIcon}</button>
+        <button class="icon-btn" data-act="delete" title="削除">🗑</button>
         <button class="icon-btn track-more-btn" data-act="more" title="曲メニュー" aria-label="曲メニュー">
           <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.75"/><circle cx="12" cy="12" r="1.75"/><circle cx="12" cy="19" r="1.75"/></svg>
         </button>
@@ -1191,7 +1196,13 @@ function openLibraryTrackActionsModal(track, refs) {
     const btn = e.target.closest("button[data-act]");
     if (!btn) return;
     const act = btn.dataset.act;
-    dismissActiveModal();
+
+    // モーダルを確実に閉じる
+    const modalRoot = document.getElementById("modal-root");
+    if (modalRoot) {
+      modalRoot.hidden = true;
+      modalRoot.innerHTML = "";
+    }
 
     if (act === "play-next") {
       playNextTrack(track);

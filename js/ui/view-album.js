@@ -474,12 +474,20 @@ function openTrackActionsModal(track, root) {
     const btn = e.target.closest("button[data-act]");
     if (!btn) return;
     const act = btn.dataset.act;
-    dismissActiveModal();
+
+    // モーダルを確実に閉じる
+    const modalRoot = document.getElementById("modal-root");
+    if (modalRoot) {
+      modalRoot.hidden = true;
+      modalRoot.innerHTML = "";
+    }
 
     if (act === "play-next") {
       playNextTrack(track);
+      toast("次に再生に追加しました", "info");
     } else if (act === "add-queue") {
       addToQueueEnd(track);
+      toast("再生キューに追加しました", "info");
     } else if (act === "playlist") {
       openAddToPlaylistModal(track);
     } else if (act === "edit") {

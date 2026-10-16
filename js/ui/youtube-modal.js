@@ -235,7 +235,6 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
   `;
 
   let currentAudioBuffer = null;
-  let currentPreviewAudio = null;
   let currentArtworkBlob = null;
   let audioDuration = 0;
   let cutStartTime = 0;
@@ -331,49 +330,94 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
   let currentSourceLoudness = null; // { peak, peakDb, rms, rmsDb }
   let currentCalculatedGain = 1.0;
   let previewAudioCtx = null;
+  let previewSourceNode = null;
   let previewGainNode = null;
-  let previewMediaSource = null;
+  let isPreviewPlaying = false;
+  let previewStartedAt = 0; // AudioContext.currentTime における再生開始時点
+  let previewOffset = 0;    // 音源内の再生オフセット秒
+  let previewDuration = 0;  // 再生予定の長さ（秒）
 
   // 音声プレビュークリーンアップ
   function cleanupPreview() {
-    if (animFrameId) {
-      cancelAnimationFrame(animFrameId);
-      animFrameId = null;
-    }
-    if (currentPreviewAudio) {
-      currentPreviewAudio.pause();
-      if (currentPreviewAudio.src && currentPreviewAudio.src.startsWith("blob:")) {
-        try { URL.revokeObjectURL(currentPreviewAudio.src); } catch (_) {}
-      }
-      currentPreviewAudio = null;
+    if (previewSourceNode) {
+      try {
+        previewSourceNode.onended = null;
+        previewSourceNode.stop();
+      } catch (_) {}
+      previewSourceNode = null;
     }
     if (previewAudioCtx) {
       try { previewAudioCtx.close(); } catch (_) {}
       previewAudioCtx = null;
       previewGainNode = null;
-      previewMediaSource = null;
     }
+    if (animFrameId) {
+      cancelAnimationFrame(animFrameId);
+      animFrameId = null;
+    }
+    isPreviewPlaying = false;
+    isPlayingSelectionOnly = false;
+    if (playToggleBtn) playToggleBtn.textContent = "▶ プレビュー";
   }
 
-  // プレビュー再生時の GainNode 適用
-  function ensurePreviewGain() {
-    if (!currentPreviewAudio) return;
+  // 再生ヘッドの現在秒を取得
+  function getPreviewCurrentTime() {
+    if (!isPreviewPlaying || !previewAudioCtx) return previewOffset;
+    const elapsed = previewAudioCtx.currentTime - previewStartedAt;
+    const cur = previewOffset + elapsed;
+    return Math.min(audioDuration, Math.max(0, cur));
+  }
+
+  // 指定位置・長さで高精度プレビュー再生を開始（Web Audio AudioBufferSourceNode）
+  function startPreviewAt(offset, duration = null) {
+    if (!currentAudioBuffer) return;
+    cleanupPreview();
+
     try {
-      if (!previewAudioCtx) {
-        previewAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        previewMediaSource = previewAudioCtx.createMediaElementSource(currentPreviewAudio);
-        previewGainNode = previewAudioCtx.createGain();
-        previewMediaSource.connect(previewGainNode);
-        previewGainNode.connect(previewAudioCtx.destination);
-      }
-      if (previewGainNode) {
-        previewGainNode.gain.value = currentCalculatedGain;
-      }
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      previewAudioCtx = new AC();
       if (previewAudioCtx.state === "suspended") {
         previewAudioCtx.resume();
       }
+
+      previewGainNode = previewAudioCtx.createGain();
+      previewGainNode.gain.value = currentCalculatedGain || 1.0;
+      previewGainNode.connect(previewAudioCtx.destination);
+
+      previewSourceNode = previewAudioCtx.createBufferSource();
+      previewSourceNode.buffer = currentAudioBuffer;
+      previewSourceNode.connect(previewGainNode);
+
+      const st = Math.max(0, Math.min(offset, audioDuration));
+      const maxLen = Math.max(0, audioDuration - st);
+      const len = duration !== null ? Math.min(duration, maxLen) : maxLen;
+
+      previewOffset = st;
+      previewStartedAt = previewAudioCtx.currentTime;
+      previewDuration = len;
+
+      previewSourceNode.onended = () => {
+        cleanupPreview();
+        updateTimeDisplay();
+        renderWaveform();
+      };
+
+      previewSourceNode.start(0, st, len);
+      isPreviewPlaying = true;
+      if (playToggleBtn) playToggleBtn.textContent = "⏸ 一時停止";
+
+      const trackLoop = () => {
+        if (isPreviewPlaying) {
+          updateTimeDisplay();
+          renderWaveform();
+          animFrameId = requestAnimationFrame(trackLoop);
+        }
+      };
+      animFrameId = requestAnimationFrame(trackLoop);
     } catch (e) {
-      console.warn("[yt] プレビュー Web Audio 接続フォールバック:", e);
+      console.warn("[yt] プレビュー再生エラー:", e);
+      cleanupPreview();
     }
   }
 
@@ -734,37 +778,17 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
       metaArt.style.display = "none";
     }
 
-    // 3. プレビュー用 HTML5 Audio
-    const sourceBlob = new Blob([arrayBuffer], { type: "audio/mp4" });
-    const audioUrl = URL.createObjectURL(sourceBlob);
-    currentPreviewAudio = new Audio(audioUrl);
-
-    // 4. 数値入力欄の初期化
+    // 3. 数値入力欄・カット範囲の初期化
     startNumInput.max = String(Math.floor(audioDuration * 10) / 10);
     endNumInput.max = String(Math.floor(audioDuration * 10) / 10);
     startNumInput.value = "0.0";
     endNumInput.value = (Math.floor(audioDuration * 10) / 10).toFixed(1);
+    previewOffset = 0;
 
     updateCutDisplay();
     renderWaveform();
     updateNormalizeDisplay();
-
-    // プレビュー再生時の時間更新ループ
-    const trackLoop = () => {
-      if (currentPreviewAudio) {
-        const cur = currentPreviewAudio.currentTime;
-        if (isPlayingSelectionOnly && cur >= cutEndTime) {
-          currentPreviewAudio.currentTime = cutStartTime;
-        } else if (cur >= audioDuration) {
-          currentPreviewAudio.pause();
-          playToggleBtn.textContent = "▶ プレビュー";
-        }
-        updateTimeDisplay();
-        renderWaveform();
-      }
-      animFrameId = requestAnimationFrame(trackLoop);
-    };
-    animFrameId = requestAnimationFrame(trackLoop);
+    updateTimeDisplay();
   }
 
   // 時間フォーマット (分:秒.小数点1桁)
@@ -777,7 +801,7 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
   }
 
   function updateTimeDisplay() {
-    const cur = currentPreviewAudio ? currentPreviewAudio.currentTime : 0;
+    const cur = getPreviewCurrentTime();
     curTimeDisplay.textContent = `${formatSec(cur)} / ${formatSec(audioDuration)}`;
   }
 
@@ -836,59 +860,61 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
     ctx.fillRect(Math.max(0, endX - 2), 0, 2, height);
 
     // 現在の再生ヘッド線 (白)
-    if (currentPreviewAudio) {
-      const curX = (currentPreviewAudio.currentTime / audioDuration) * width;
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(curX, 0, 2, height);
-    }
+    const curTime = getPreviewCurrentTime();
+    const curX = (curTime / audioDuration) * width;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(curX, 0, 2, height);
   }
 
   // 波形クリックでシーク
   waveformWrap.addEventListener("click", (e) => {
-    if (!currentPreviewAudio || audioDuration <= 0) return;
+    if (!currentAudioBuffer || audioDuration <= 0) return;
     const rect = waveformWrap.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    currentPreviewAudio.currentTime = ratio * audioDuration;
-    renderWaveform();
-    updateTimeDisplay();
+    const seekTime = ratio * audioDuration;
+    previewOffset = seekTime;
+    if (isPreviewPlaying) {
+      startPreviewAt(seekTime, isPlayingSelectionOnly ? Math.max(0.1, cutEndTime - seekTime) : null);
+    } else {
+      updateTimeDisplay();
+      renderWaveform();
+    }
   });
 
   // 再生トグル
   playToggleBtn.addEventListener("click", () => {
-    if (!currentPreviewAudio) return;
-    isPlayingSelectionOnly = false;
-    if (currentPreviewAudio.paused) {
-      ensurePreviewGain();
-      currentPreviewAudio.play();
-      playToggleBtn.textContent = "⏸ 一時停止";
+    if (!currentAudioBuffer) return;
+    if (isPreviewPlaying) {
+      cleanupPreview();
+      updateTimeDisplay();
+      renderWaveform();
     } else {
-      currentPreviewAudio.pause();
-      playToggleBtn.textContent = "▶ プレビュー";
+      isPlayingSelectionOnly = false;
+      const startPos = previewOffset >= audioDuration - 0.1 ? 0 : previewOffset;
+      startPreviewAt(startPos);
     }
   });
 
   // カット範囲のみ再生
   playSelectionBtn.addEventListener("click", () => {
-    if (!currentPreviewAudio) return;
+    if (!currentAudioBuffer) return;
     isPlayingSelectionOnly = true;
-    currentPreviewAudio.currentTime = cutStartTime;
-    ensurePreviewGain();
-    currentPreviewAudio.play();
-    playToggleBtn.textContent = "⏸ 一時停止";
+    const playLength = Math.max(0.1, cutEndTime - cutStartTime);
+    startPreviewAt(cutStartTime, playLength);
   });
 
   // 現在位置を開始に設定
   setStartHereBtn.addEventListener("click", () => {
-    if (!currentPreviewAudio) return;
-    cutStartTime = Math.min(cutEndTime - 0.1, Math.max(0, currentPreviewAudio.currentTime));
+    const cur = getPreviewCurrentTime();
+    cutStartTime = Math.min(cutEndTime - 0.1, Math.max(0, cur));
     updateCutDisplay();
     renderWaveform();
   });
 
   // 現在位置を終了に設定
   setEndHereBtn.addEventListener("click", () => {
-    if (!currentPreviewAudio) return;
-    cutEndTime = Math.max(cutStartTime + 0.1, Math.min(audioDuration, currentPreviewAudio.currentTime));
+    const cur = getPreviewCurrentTime();
+    cutEndTime = Math.max(cutStartTime + 0.1, Math.min(audioDuration, cur));
     updateCutDisplay();
     renderWaveform();
   });
