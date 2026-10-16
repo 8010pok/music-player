@@ -8,7 +8,7 @@
 
 import { getAllTracks, deleteTrack, removeTrackFromAllPlaylists } from "../store/library-db.js";
 import { groupTracksIntoAlbums, parseTrackIndex } from "../metadata/album-util.js";
-import { setQueueAndPlay, setShuffleMode, stopPlayback, prewarmTrack, prewarmTracks } from "../player/audio-engine.js";
+import { setQueueAndPlay, setShuffleMode, stopPlayback, prewarmTrack, prewarmTracks, playNextTrack, addToQueueEnd } from "../player/audio-engine.js";
 import { appState } from "../state.js";
 import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
 import { go } from "../router.js";
@@ -43,9 +43,9 @@ export async function mount(root) {
   root.innerHTML = render(album);
   const refs = collectRefs(root);
 
-  // ★ アルバム画面を開いた時点で楽曲を先行プリウォーム（タップ即時再生＆次曲即時スタンバイ）
+  // ★ アルバム画面を開いた時点で楽曲を先行プリウォーム（キャッシュ済み曲のみ最大5曲）
   if (album && Array.isArray(album.tracks)) {
-    prewarmTracks(album.tracks.map((t) => t.id), 10);
+    prewarmTracks(album.tracks.map((t) => t.id), 5);
   }
 
   refs.backBtn.addEventListener("click", () => {
@@ -89,6 +89,43 @@ export async function mount(root) {
   if (refs.artWrapBtn) {
     refs.artWrapBtn.addEventListener("click", openAlbumEditor);
   }
+  if (refs.cacheAllBtn) {
+    refs.cacheAllBtn.addEventListener("click", async () => {
+      refs.cacheAllBtn.disabled = true;
+      const uncached = album.tracks.filter((t) => (t.source === "gdrive" || (t.id && t.id.startsWith("gd-"))) && !t.cached);
+      if (uncached.length === 0) {
+        toast("すべての曲がすでに保存されています", "info");
+        return;
+      }
+      toast(`${uncached.length} 曲のオフライン保存を開始します…`, "info");
+      let done = 0;
+      const total = uncached.length;
+      const { getBlob } = await import("../store/library-db.js");
+      let index = 0;
+      let success = 0;
+      const CONCURRENCY = 2;
+      async function worker() {
+        while (index < uncached.length) {
+          const curIdx = index++;
+          const t = uncached[curIdx];
+          try {
+            await getBlob(t.id);
+            t.cached = true;
+            success++;
+          } catch (e) {
+            console.warn("一括保存失敗", t.id, e);
+          }
+          done++;
+          if (refs.cacheBtnText) {
+            refs.cacheBtnText.textContent = `保存中 (${done}/${total})`;
+          }
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, uncached.length) }, () => worker()));
+      toast(`${success} / ${total} 曲のオフライン保存が完了しました`, "ok");
+      mount(root);
+    });
+  }
   refs.list.addEventListener("click", (e) => onListClick(e, root));
   refs.list.addEventListener("pointerdown", (e) => {
     const row = e.target.closest(".track-row");
@@ -97,8 +134,8 @@ export async function mount(root) {
     }
   }, { passive: true });
 
-  // 再生中トラックのハイライト追従
-  unsubState = appState.subscribe(["currentTrack", "isPlaying"], () => {
+  // 再生中トラック・ローディング中トラックのハイライト追従
+  unsubState = appState.subscribe(["currentTrack", "isPlaying", "loadingTrackId"], () => {
     updatePlayingHighlight(refs);
   });
   updatePlayingHighlight(refs);
@@ -168,6 +205,13 @@ function render(alb) {
           <svg class="ic" viewBox="0 0 24 24"><path d="M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg>
           <span>シャッフル</span>
         </button>
+        ${alb.tracks.some((t) => (t.source === "gdrive" || (t.id && t.id.startsWith("gd-"))) && !t.cached)
+          ? `<button class="album-action-btn secondary" id="btn-album-cache-all" title="未キャッシュの曲を一括オフライン保存">
+              <svg class="ic" viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>
+              <span id="album-cache-btn-text">一括保存 (${alb.tracks.filter((t) => (t.source === "gdrive" || (t.id && t.id.startsWith("gd-"))) && !t.cached).length})</span>
+            </button>`
+          : ""
+        }
         <button class="album-action-btn secondary" id="btn-album-edit" title="アルバム情報・収録曲を一括編集">
           <svg class="ic" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
           <span>一括編集</span>
@@ -191,7 +235,7 @@ function renderTrackRows(alb) {
   const isMultiDisc = alb.discCount > 1;
 
   for (const t of alb.tracks) {
-    const discNum = parseTrackIndex(t.discNo, 1);
+    const discNum = parseTrackIndex(t.discNo != null ? t.discNo : t?.discNumber, 1);
     if (isMultiDisc && discNum !== currentDisc) {
       currentDisc = discNum;
       html += `
@@ -207,7 +251,7 @@ function renderTrackRows(alb) {
       ? `<span class="track-loved" title="Loved" aria-label="Loved">♥</span>`
       : `<span class="track-loved-spacer" aria-hidden="true"></span>`;
 
-    const trackIndex = parseTrackIndex(t.trackNo, 0);
+    const trackIndex = parseTrackIndex(t.trackNo != null ? t.trackNo : t?.trackNumber, 0);
     const trackNumDisplay = trackIndex > 0 ? String(trackIndex) : "-";
     const durStr = formatTime(t.duration || 0);
 
@@ -228,6 +272,8 @@ function renderTrackRows(alb) {
         </div>
         <div class="album-track-right">
           ${lovedMark}
+          <button class="icon-btn track-action-btn" data-act="play-next" title="次に再生">⏭</button>
+          <button class="icon-btn track-action-btn" data-act="add-queue" title="キューの末尾に追加">＋</button>
           <button class="icon-btn edit-track-btn" data-act="edit" title="曲の情報を編集">
             <svg class="ic" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
           </button>
@@ -249,6 +295,8 @@ function collectRefs(root) {
     artWrapBtn: root.querySelector("#btn-album-art-wrap"),
     playAllBtn: root.querySelector("#btn-album-play-all"),
     playShuffleBtn: root.querySelector("#btn-album-play-shuffle"),
+    cacheAllBtn: root.querySelector("#btn-album-cache-all"),
+    cacheBtnText: root.querySelector("#album-cache-btn-text"),
     editAlbumBtn: root.querySelector("#btn-album-edit"),
     deleteAlbumBtn: root.querySelector("#btn-album-delete"),
     list: root.querySelector("#album-track-list"),
@@ -257,6 +305,18 @@ function collectRefs(root) {
 
 async function onListClick(e, root) {
   const btn = e.target.closest("button[data-act]");
+  if (btn && btn.dataset.act === "play-next") {
+    const row = btn.closest(".track-row");
+    const t = album.tracks.find((x) => x.id === row?.dataset.id);
+    if (t) playNextTrack(t);
+    return;
+  }
+  if (btn && btn.dataset.act === "add-queue") {
+    const row = btn.closest(".track-row");
+    const t = album.tracks.find((x) => x.id === row?.dataset.id);
+    if (t) addToQueueEnd(t);
+    return;
+  }
   if (btn && btn.dataset.act === "edit") {
     const row = btn.closest(".track-row");
     const id = row?.dataset.id;
@@ -343,14 +403,19 @@ function updatePlayingHighlight(refs) {
   if (!refs || !refs.list) return;
   const s = appState.get();
   const curId = s.currentTrack?.id || null;
+  const loadingId = s.loadingTrackId || null;
   const isPlaying = !!s.isPlaying;
   const rows = refs.list.querySelectorAll(".album-track-row[data-id]");
   rows.forEach((row) => {
     const isCur = !!curId && row.dataset.id === curId;
+    const isLoading = !!loadingId && row.dataset.id === loadingId;
     row.classList.toggle("is-playing", isCur);
+    row.classList.toggle("is-loading", isLoading);
     const slot = row.querySelector(".album-track-num-slot");
     if (slot) {
-      if (isCur) {
+      if (isLoading) {
+        slot.innerHTML = `<span class="track-spinner" aria-label="読み込み中"></span>`;
+      } else if (isCur) {
         slot.innerHTML = `<div class="eq-anim ${isPlaying ? "" : "is-paused"}" aria-label="再生中"><span class="eq-bar b1"></span><span class="eq-bar b2"></span><span class="eq-bar b3"></span></div>`;
       } else {
         const origNum = row.dataset.trackNum || "-";

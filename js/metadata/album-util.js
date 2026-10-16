@@ -88,20 +88,22 @@ export function getAlbumKey(track) {
  * @returns {number}
  */
 export function compareAlbumTracks(a, b) {
-  // 1. discNo (未指定は Disc 1)
-  const discA = parseTrackIndex(a?.discNo, 1);
-  const discB = parseTrackIndex(b?.discNo, 1);
+  // 1. discNo / discNumber (未指定は Disc 1)
+  const discA = parseTrackIndex(a?.discNo != null ? a.discNo : a?.discNumber, 1);
+  const discB = parseTrackIndex(b?.discNo != null ? b.discNo : b?.discNumber, 1);
   if (discA !== discB) return discA - discB;
 
-  // 2. trackNo の有無判定
-  const strA = a?.trackNo != null ? String(a.trackNo).trim() : "";
-  const strB = b?.trackNo != null ? String(b.trackNo).trim() : "";
+  // 2. trackNo / trackNumber の有無判定
+  const rawA = a?.trackNo != null ? a.trackNo : a?.trackNumber;
+  const rawB = b?.trackNo != null ? b.trackNo : b?.trackNumber;
+  const strA = rawA != null ? String(rawA).trim() : "";
+  const strB = rawB != null ? String(rawB).trim() : "";
   const hasA = /^\d+/.test(strA);
   const hasB = /^\d+/.test(strB);
 
   if (hasA && hasB) {
-    const numA = parseTrackIndex(strA, 0);
-    const numB = parseTrackIndex(strB, 0);
+    const numA = parseTrackIndex(strA, 999);
+    const numB = parseTrackIndex(strB, 999);
     if (numA !== numB) return numA - numB;
   } else if (hasA !== hasB) {
     // trackNo がある曲が前、ない曲が後ろ
@@ -163,7 +165,7 @@ export function groupTracksIntoAlbums(tracks) {
     album.trackCount = album.tracks.length;
 
     // ディスク数集計
-    const discs = new Set(album.tracks.map((t) => parseTrackIndex(t.discNo, 1)));
+    const discs = new Set(album.tracks.map((t) => parseTrackIndex(t.discNo != null ? t.discNo : t?.discNumber, 1)));
     album.discCount = Math.max(1, discs.size);
 
     // artworkBlob を持つ先頭トラック

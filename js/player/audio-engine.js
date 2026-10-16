@@ -21,7 +21,7 @@
  */
 
 import { appState } from "../state.js";
-import { getBlob, recordHistory, updateTrack, getAllTracks } from "../store/library-db.js";
+import { getBlob, hasCachedBlob, recordHistory, updateTrack, getAllTracks } from "../store/library-db.js";
 import {
   applyEffectsSetting,
   applyEqGains,
@@ -111,6 +111,11 @@ const state = {
   lastSessionSaveAt: 0,   // 再生セッション状態の localStorage 自動保存スロットリング用
 };
 
+// スリープタイマー管理 (オフ / 15分 / 30分 / 60分 / 曲終了時)
+let sleepTimerId = null;
+let sleepTimerTargetTime = 0;
+let sleepTimerMode = "off";
+
 // Pre-warm（先行事前取得）インメモリキャッシュ
 const prewarmCache = new Map();
 
@@ -118,8 +123,9 @@ const prewarmCache = new Map();
  * ユーザーが曲をタップ（pointerdown / touchstart）した瞬間に
  * 先行して Blob 取得 / Object URL 生成を開始する
  * @param {string} trackId
+ * @param {{ onlyIfCached?: boolean }} [options]
  */
-export function prewarmTrack(trackId) {
+export function prewarmTrack(trackId, { onlyIfCached = false } = {}) {
   if (!trackId || prewarmCache.has(trackId)) return;
   const entry = {
     promise: null,
@@ -130,6 +136,10 @@ export function prewarmTrack(trackId) {
 
   entry.promise = (async () => {
     try {
+      if (onlyIfCached && typeof trackId === "string" && trackId.startsWith("gd-")) {
+        const cached = await hasCachedBlob(trackId);
+        if (!cached) return null;
+      }
       const blob = await getBlob(trackId);
       if (!blob) return null;
       const url = URL.createObjectURL(blob);
@@ -156,15 +166,18 @@ export function prewarmTrack(trackId) {
 }
 
 /**
- * 複数トラックの音源を先行プリウォーム（アルバム・プレイリスト画面表示時の即時再生用）
+ * 複数トラックの音源を先行プリウォーム（画面表示時の即時再生用）
+ * - すでにローカル（IndexedDB）にキャッシュされている曲（最大3〜5曲まで）のみを対象とし、
+ *   未キャッシュのGoogle Drive曲を勝手にバックグラウンド通信でフェッチしない
  * @param {Array<string>} trackIds
- * @param {number} [limit=10]
+ * @param {number} [limit=5]
  */
-export function prewarmTracks(trackIds, limit = 10) {
+export function prewarmTracks(trackIds, limit = 5) {
   if (!Array.isArray(trackIds)) return;
-  const targets = trackIds.slice(0, limit);
+  const max = Math.min(Math.max(1, limit), 5);
+  const targets = trackIds.slice(0, max);
   for (const id of targets) {
-    if (id) prewarmTrack(id);
+    if (id) prewarmTrack(id, { onlyIfCached: true });
   }
 }
 
@@ -647,6 +660,16 @@ function playPreloadedSync(index, track, url) {
  */
 function advanceFromEnded() {
   if (state.queue.length === 0) return;
+
+  // ★ スリープタイマー: 「この曲の終わりで停止」
+  if (sleepTimerMode === "end-of-track") {
+    setSleepTimer("off");
+    state.userPausedExplicitly = true;
+    try { audioEl.pause(); } catch {}
+    toast("曲の終了に合わせて再生を一時停止しました", "info");
+    return;
+  }
+
   const repeat = appState.get().repeatMode;
   const next = computeNextIndex();
 
@@ -706,10 +729,13 @@ function advanceFromEnded() {
 
 export async function playPrev() {
   if (state.queue.length === 0) return;
-  // 再生位置が 3 秒を超えていたら曲頭に戻すだけ（前曲には行かない）。
-  // 一般的な音楽プレイヤーと同じ挙動。
-  if (audioEl.currentTime > 3) {
+  // 再生位置が 3 秒以上の場合は曲頭に戻すだけ（前曲には行かない）。
+  // アプリ内操作および MediaSession (ロック画面/イヤホン) で完全統一
+  const curTime = audioEl?.currentTime || appState.get().currentTime || 0;
+  if (curTime >= 3) {
     try { audioEl.currentTime = 0; } catch {}
+    appState.set({ currentTime: 0 });
+    updateMediaPositionState({ position: 0 });
     return;
   }
   let prev = state.queueIndex - 1;
@@ -719,6 +745,8 @@ export async function playPrev() {
       prev = state.queue.length - 1;
     } else {
       try { audioEl.currentTime = 0; } catch {}
+      appState.set({ currentTime: 0 });
+      updateMediaPositionState({ position: 0 });
       return;
     }
   }
@@ -732,10 +760,18 @@ export async function playPrev() {
  * 再生ボタン or 「play」アクションハンドラ用のトグル。
  * - currentTrack が無い場合はライブラリ先頭曲を自動再生（mp3player 互換）
  * - 既に paused なら play、playing なら pause
+ * - 起動時のセッション復元直後など src 未ロード状態の場合は、保存された秒数から再生開始
  */
 export async function togglePlay() {
-  if (!appState.get().currentTrack) {
+  const curTrack = appState.get().currentTrack;
+  if (!curTrack) {
     await autoStartFirstTrack();
+    return;
+  }
+  // 起動時のセッション復元直後など、src がまだロードされていない場合
+  if (!state.currentObjectUrl || !audioEl.src) {
+    const startSec = appState.get().currentTime || 0;
+    await loadAndPlay(curTrack, { startTime: startSec });
     return;
   }
   // ★ iOS: 再生再開もユーザー操作起点で audioSession.type="playback" を再宣言する
@@ -758,6 +794,140 @@ export async function togglePlay() {
     clearResumeWatchdog();
     audioEl.pause();
   }
+}
+
+/**
+ * 任意のトラックを現在の曲の「次」に挿入する（割り込み再生）
+ * @param {object} track
+ */
+export function playNextTrack(track) {
+  if (!track || !track.id) return;
+  if (state.queue.length === 0 || state.queueIndex < 0) {
+    setQueueAndPlay([track], 0);
+    return;
+  }
+  const insertIndex = state.queueIndex + 1;
+  state.queue.splice(insertIndex, 0, track);
+  if (state.origQueue) {
+    state.origQueue.push(track);
+  }
+  appState.set({ queue: state.queue.map((t) => t.id) });
+  schedulePreload();
+  toast(`「${track.title || "曲"}」を次に再生に設定しました`, "ok");
+}
+
+/**
+ * 任意のトラックを再生キューの末尾に追加する
+ * @param {object} track
+ */
+export function addToQueueEnd(track) {
+  if (!track || !track.id) return;
+  if (state.queue.length === 0 || state.queueIndex < 0) {
+    setQueueAndPlay([track], 0);
+    return;
+  }
+  state.queue.push(track);
+  if (state.origQueue) {
+    state.origQueue.push(track);
+  }
+  appState.set({ queue: state.queue.map((t) => t.id) });
+  schedulePreload();
+  toast(`「${track.title || "曲"}」をキューの末尾に追加しました`, "ok");
+}
+
+/**
+ * 再生キューから指定インデックスの曲を削除する
+ * @param {number} index
+ */
+export async function removeFromQueue(index) {
+  if (index < 0 || index >= state.queue.length) return;
+  if (index === state.queueIndex) {
+    if (state.queue.length === 1) {
+      stopPlayback();
+      return;
+    }
+    await playNext();
+    const removeIdx = index < state.queueIndex ? index : index;
+    state.queue.splice(removeIdx, 1);
+    state.queueIndex = Math.max(0, state.queueIndex - 1);
+    appState.set({ queue: state.queue.map((t) => t.id), queueIndex: state.queueIndex });
+    schedulePreload();
+    return;
+  }
+  state.queue.splice(index, 1);
+  if (index < state.queueIndex) {
+    state.queueIndex--;
+  }
+  appState.set({ queue: state.queue.map((t) => t.id), queueIndex: state.queueIndex });
+  schedulePreload();
+}
+
+/**
+ * キューの指定インデックスへジャンプ再生
+ * @param {number} index
+ */
+export async function jumpToQueueIndex(index) {
+  if (index < 0 || index >= state.queue.length) return;
+  state.queueIndex = index;
+  appState.set({ queueIndex: index });
+  const track = state.queue[index];
+  if (track) {
+    await loadAndPlay(track);
+  }
+}
+
+/**
+ * スリープタイマーを設定する
+ * @param {"off" | "15" | "30" | "60" | "end-of-track" | number} mode
+ */
+export function setSleepTimer(mode) {
+  if (sleepTimerId) {
+    clearInterval(sleepTimerId);
+    sleepTimerId = null;
+  }
+  sleepTimerMode = String(mode);
+  if (!mode || sleepTimerMode === "off") {
+    sleepTimerTargetTime = 0;
+    appState.set({ sleepTimer: { mode: "off", remainingSec: 0, active: false } });
+    toast("スリープタイマーをオフにしました", "info");
+    return;
+  }
+
+  if (sleepTimerMode === "end-of-track") {
+    sleepTimerTargetTime = 0;
+    appState.set({ sleepTimer: { mode: "end-of-track", remainingSec: 0, active: true } });
+    toast("現在の曲の終了で停止します", "ok");
+    return;
+  }
+
+  const mins = parseInt(sleepTimerMode, 10);
+  if (mins > 0) {
+    const totalSec = mins * 60;
+    sleepTimerTargetTime = Date.now() + totalSec * 1000;
+    appState.set({ sleepTimer: { mode: sleepTimerMode, remainingSec: totalSec, active: true } });
+    toast(`スリープタイマーを ${mins} 分に設定しました`, "ok");
+
+    sleepTimerId = setInterval(() => {
+      const remainingMs = sleepTimerTargetTime - Date.now();
+      const remSec = Math.max(0, Math.ceil(remainingMs / 1000));
+      if (remSec <= 0) {
+        clearInterval(sleepTimerId);
+        sleepTimerId = null;
+        sleepTimerMode = "off";
+        sleepTimerTargetTime = 0;
+        appState.set({ sleepTimer: { mode: "off", remainingSec: 0, active: false } });
+        state.userPausedExplicitly = true;
+        try { audioEl.pause(); } catch {}
+        toast("スリープタイマーにより再生を一時停止しました", "info");
+      } else {
+        appState.set({ sleepTimer: { mode: sleepTimerMode, remainingSec: remSec, active: true } });
+      }
+    }, 1000);
+  }
+}
+
+export function getSleepTimerState() {
+  return appState.get().sleepTimer || { mode: "off", remainingSec: 0, active: false };
 }
 
 /**
@@ -950,7 +1120,7 @@ function isSupersededTransition(myToken, ownUrl) {
   return true;
 }
 
-async function loadAndPlay(track) {
+async function loadAndPlay(track, { startTime = 0 } = {}) {
   // ★ iOS: 再生開始のたびに(ユーザー操作起点で)audioSession.type="playback" を
   //   再宣言する。init 時の一度きり設定だけだと、コールド起動でメディアプレイヤー
   //   認識がリセットされた状態(特にマナーモード ON 時)では、ロック画面の音声が
@@ -961,6 +1131,9 @@ async function loadAndPlay(track) {
   setupAudioSession();
 
   resetSession(track?.id);
+
+  // 通信/ロード待機中の視覚フィードバック（スピナー表示用）
+  appState.set({ loadingTrackId: track?.id || null });
 
   // ★ Phase 0: 音源 URL / Blob の取得（transitioning 開始前）
   let targetUrl = null;
@@ -988,6 +1161,9 @@ async function loadAndPlay(track) {
       targetUrl = URL.createObjectURL(blob);
     }
   }
+
+  // 音源取得完了または失敗のためローディング解除
+  appState.set({ loadingTrackId: null });
 
   if (!targetUrl) {
     console.warn("音源データ未発見", track.id);
@@ -1018,10 +1194,14 @@ async function loadAndPlay(track) {
       audioEl.playbackRate = getEffectivePlaybackRate();
       applyTrackVolume(audioEl, track);
 
+      if (startTime > 0) {
+        try { audioEl.currentTime = startTime; } catch {}
+      }
+
       appState.set({
         currentTrack: track,
         duration: track.duration || 0,
-        currentTime: 0,
+        currentTime: startTime || 0,
         scrobbleProgress: 0,
         nowPlayingSent: false,
         scrobbledForCurrent: false,
@@ -1031,7 +1211,7 @@ async function loadAndPlay(track) {
 
       // === play() の前に MediaSession を即座に同期設定 ===
       updateMediaSessionMetadata(track);
-      updateMediaPositionState({ position: 0, duration: track.duration });
+      updateMediaPositionState({ position: startTime || 0, duration: track.duration });
 
       // EQ context はバックグラウンドで resume (play() の開始を待たせない)
       resumeEqContext().catch(() => {});
@@ -1042,6 +1222,9 @@ async function loadAndPlay(track) {
         if (p && typeof p.then === "function") {
           p.then(() => {
             state.consecutiveSkips = 0;
+            if (startTime > 0) {
+              try { audioEl.currentTime = startTime; } catch {}
+            }
             if (myToken === state.transitionToken) state.transitioning = false;
           }).catch(async (err) => {
             if (myToken === state.transitionToken) state.transitioning = false;
@@ -1058,6 +1241,9 @@ async function loadAndPlay(track) {
           });
         } else {
           state.consecutiveSkips = 0;
+          if (startTime > 0) {
+            try { audioEl.currentTime = startTime; } catch {}
+          }
           if (myToken === state.transitionToken) state.transitioning = false;
         }
       } catch (err) {
@@ -1076,6 +1262,7 @@ async function loadAndPlay(track) {
       }).catch(() => {});
     }
   } finally {
+    appState.set({ loadingTrackId: null });
     // 遷移完了。ただし自分が最新遷移のときだけ transitioning を解除する。
     // (並行する別の loadAndPlay / playPreloadedSync が後から始まっていたら、
     //  そちらが解除を担当する。古い処理が新しい遷移のフラグを倒さない。)
@@ -1609,8 +1796,11 @@ export function saveSessionState() {
     const session = {
       trackId: curTrack.id,
       queueIds: state.queue.map((t) => t.id),
+      origQueueIds: state.origQueue ? state.origQueue.map((t) => t.id) : null,
+      shuffleMode: appState.get().shuffleMode,
+      repeatMode: appState.get().repeatMode,
       queueIndex: state.queueIndex,
-      currentTime: Math.floor(audioEl.currentTime || 0),
+      currentTime: Math.floor(audioEl?.currentTime || appState.get().currentTime || 0),
       currentPlaylistId: appState.get().currentPlaylistId || null,
       currentPlaylistName: appState.get().currentPlaylistName || null,
       updatedAt: Date.now(),
@@ -1653,7 +1843,11 @@ export async function restoreSessionState() {
 
     state.queue = queueTracks;
     state.queueIndex = idx;
-    state.origQueue = null;
+    if (Array.isArray(session.origQueueIds)) {
+      state.origQueue = session.origQueueIds.map((id) => trackMap.get(id)).filter(Boolean);
+    } else {
+      state.origQueue = null;
+    }
     state.userPausedExplicitly = true; // 復元時は一時停止状態で待機
 
     appState.set({
@@ -1663,6 +1857,8 @@ export async function restoreSessionState() {
       duration: curTrack.duration || 0,
       currentTime: session.currentTime || 0,
       isPlaying: false,
+      shuffleMode: !!session.shuffleMode,
+      repeatMode: session.repeatMode || "none",
       currentPlaylistId: session.currentPlaylistId || null,
       currentPlaylistName: session.currentPlaylistName || null,
     });

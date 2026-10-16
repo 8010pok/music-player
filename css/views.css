@@ -485,11 +485,66 @@
 .player-footer-bar {
   display: flex;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: space-between;
   width: 100%;
   max-width: 480px;
   padding: 0 6px;
   margin-top: -2px;
+}
+
+.player-footer-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-footer-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+:root[data-theme="light"] .btn-footer-action {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.1);
+}
+
+.btn-footer-action:hover {
+  color: var(--fg);
+  background: var(--bg-elev);
+  border-color: rgba(255, 255, 255, 0.22);
+  transform: translateY(-1px);
+}
+
+:root[data-theme="light"] .btn-footer-action:hover {
+  background: rgba(0, 0, 0, 0.09);
+  border-color: rgba(0, 0, 0, 0.18);
+}
+
+.btn-footer-action:active {
+  transform: scale(0.96);
+}
+
+.btn-footer-action.is-active {
+  color: #ffffff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.btn-footer-action .ic {
+  width: 16px;
+  height: 16px;
+  display: block;
+  fill: currentColor;
 }
 
 .btn-lyrics-pill {
@@ -3557,5 +3612,184 @@
 }
 .artist-link:hover {
   text-decoration: underline;
+}
+
+/* スピナー（未キャッシュ曲ロード中・ダウンロード中） */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.track-spinner, .loading-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: var(--accent, #0a84ff);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: middle;
+}
+
+/* 再生待ちキュー (Up Next) ドロワー */
+.player-queue-drawer {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 70%;
+  max-height: 480px;
+  background: var(--bg-surface, #1c1c1e);
+  border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+  border-radius: 20px 20px 0 0;
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  z-index: 50;
+  overflow: hidden;
+  animation: slide-up 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes slide-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+.player-queue-drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+}
+
+.player-queue-drawer-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--fg);
+}
+
+.player-queue-count {
+  font-size: 11px;
+  color: var(--fg-muted);
+  background: var(--bg-elev);
+  padding: 2px 6px;
+  border-radius: 10px;
+}
+
+.player-queue-list-wrap {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 8px 12px;
+}
+
+.player-queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.player-queue-item {
+  display: grid;
+  grid-template-columns: 24px 1fr auto 28px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-elev);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.player-queue-item:hover {
+  background: var(--bg-elev-2);
+}
+
+.player-queue-item.is-current {
+  border: 1px solid var(--accent);
+  background: rgba(10, 132, 255, 0.12);
+}
+
+.player-queue-idx-slot {
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-align: center;
+}
+
+.player-queue-item-info {
+  min-width: 0;
+}
+
+.player-queue-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg);
+}
+
+.player-queue-item-artist {
+  font-size: 11px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.player-queue-item-dur {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.player-queue-item-remove {
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  font-size: 14px;
+  padding: 4px;
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.player-queue-item-remove:hover {
+  color: var(--danger, #ff453a);
+  background: rgba(255, 69, 58, 0.1);
+}
+
+.queue-eq-anim {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 12px;
+  justify-content: center;
+}
+
+.queue-eq-anim .eq-bar {
+  width: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+}
+
+.queue-eq-anim .b1 { height: 60%; animation: eq-anim 0.7s infinite alternate; }
+.queue-eq-anim .b2 { height: 100%; animation: eq-anim 0.5s infinite alternate; }
+.queue-eq-anim .b3 { height: 40%; animation: eq-anim 0.9s infinite alternate; }
+
+.sleep-timer-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 10px;
+  margin-left: 4px;
+  font-weight: 600;
 }
 

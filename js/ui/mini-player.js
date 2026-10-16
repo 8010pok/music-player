@@ -68,9 +68,15 @@ export function initMiniPlayer() {
     } else {
       titleEl.textContent = track.title || "(無題)";
     }
-    artistEl.textContent = track.artist || "(不明)";
-    playBtn.classList.toggle("is-playing", !!s.isPlaying);
-    playBtn.setAttribute("aria-label", s.isPlaying ? "一時停止" : "再生");
+    const isLoading = !!(s.loadingTrackId && (!track || s.loadingTrackId === track.id));
+    playBtn.classList.toggle("is-loading", isLoading);
+    if (isLoading) {
+      artistEl.innerHTML = `<span class="track-spinner"></span> 読み込み中...`;
+    } else {
+      artistEl.textContent = track.artist || "(不明)";
+    }
+    playBtn.classList.toggle("is-playing", !!s.isPlaying && !isLoading);
+    playBtn.setAttribute("aria-label", isLoading ? "読み込み中" : s.isPlaying ? "一時停止" : "再生");
 
     const dur = s.duration || 0;
     const cur = s.currentTime || 0;
@@ -91,7 +97,7 @@ export function initMiniPlayer() {
     }
   };
 
-  appState.subscribe(["currentTrack", "isPlaying", "currentTime", "duration"], updateVisibility);
+  appState.subscribe(["currentTrack", "isPlaying", "currentTime", "duration", "loadingTrackId"], updateVisibility);
   // ルート変更および画面復帰時にも追従
   window.addEventListener("hashchange", updateVisibility);
   window.addEventListener("pageshow", updateVisibility);

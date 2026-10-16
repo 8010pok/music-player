@@ -12,7 +12,7 @@
 import { extractMetadata, readDurationViaAudio } from "../metadata/index.js";
 import { mimeFromName, formatFromName } from "../metadata/util.js";
 import { putTrack, getTrack, getAllTracks, updateTrack, setTracksOrder, deleteTrack, getStorageEstimate, getBlob, removeTrackFromAllPlaylists } from "../store/library-db.js";
-import { setQueueAndPlay, stopPlayback, prewarmTrack, prewarmTracks } from "../player/audio-engine.js";
+import { setQueueAndPlay, stopPlayback, prewarmTrack, prewarmTracks, playNextTrack, addToQueueEnd } from "../player/audio-engine.js";
 import { toast, confirm, openModal, escapeHtml, escapeAttr } from "./components.js";
 import { appState } from "../state.js";
 import { go, getLastView, saveLastView } from "../router.js";
@@ -813,13 +813,16 @@ function rowHtml(t, cur) {
   const toggleIcon = enabled ? "🔊" : "🔇";
   const toggleTitle = enabled ? "一時的に再生無効にする" : "再生を再び有効にする";
 
-  const eqIndicator = playing
+  const loading = appState.get().loadingTrackId === t.id;
+  const eqIndicator = loading
+    ? `<div class="track-eq-indicator" aria-label="読み込み中"><span class="track-spinner"></span></div>`
+    : playing
     ? `<div class="track-eq-indicator" aria-label="再生中"><span class="track-eq-bar"></span><span class="track-eq-bar"></span><span class="track-eq-bar"></span></div>`
     : ``;
   const artContainer = `<div class="track-art-wrap">${artImg}${eqIndicator}</div>`;
 
   return `
-    <li class="track-row ${playing ? "is-playing" : ""} ${enabled ? "" : "is-disabled"} ${isManual ? "is-manual" : ""}" data-id="${escapeAttr(t.id)}">
+    <li class="track-row ${playing ? "is-playing" : ""} ${loading ? "is-loading" : ""} ${enabled ? "" : "is-disabled"} ${isManual ? "is-manual" : ""}" data-id="${escapeAttr(t.id)}">
       ${handle}
       ${artContainer}
       <div class="track-info">
@@ -828,6 +831,8 @@ function rowHtml(t, cur) {
       </div>
       <div class="track-actions">
         ${lovedMark}
+        <button class="icon-btn track-action-btn" data-act="play-next" title="次に再生">⏭</button>
+        <button class="icon-btn track-action-btn" data-act="add-queue" title="キューの末尾に追加">＋</button>
         <button class="icon-btn" data-act="edit" title="曲の情報を編集">✏</button>
         <button class="icon-btn" data-act="toggle" title="${toggleTitle}">${toggleIcon}</button>
         <button class="icon-btn" data-act="delete" title="削除">🗑</button>
@@ -910,6 +915,15 @@ async function onListClick(e, refs) {
   const act = btn.dataset.act;
   const t = tracksCache.find((x) => x.id === id);
   if (!t) return;
+
+  if (act === "play-next") {
+    playNextTrack(t);
+    return;
+  }
+  if (act === "add-queue") {
+    addToQueueEnd(t);
+    return;
+  }
 
   if (act === "edit") {
     await editTrackMetadata(t, () => {

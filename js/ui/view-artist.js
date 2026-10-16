@@ -141,13 +141,13 @@ function render(art) {
       <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 18px; margin-bottom: 8px;">
         <div class="artist-section-title" style="margin: 0;">アルバム (${art.albumCount})</div>
         <select id="artist-album-sort" style="font-size: 11px; padding: 3px 8px; border-radius: 6px; background: var(--bg-surface, var(--bg-elev)); color: var(--fg); border: 1px solid var(--border-color, var(--border)); cursor: pointer;">
+          <option value="year-asc" selected>リリース順 (古い順)</option>
           <option value="year-desc">リリース順 (新しい順)</option>
-          <option value="year-asc">リリース順 (古い順)</option>
           <option value="title-asc">アルバム名 (昇順)</option>
         </select>
       </div>
       <div class="album-grid" id="artist-album-grid" role="list">
-        ${renderAlbumCards(art.albums)}
+        ${renderAlbumCards(sortAlbums(art.albums, "year-asc"))}
       </div>
 
       <!-- 全曲一覧セクション -->

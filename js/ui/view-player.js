@@ -10,7 +10,7 @@
  */
 
 import { appState } from "../state.js";
-import { getAudioElement, togglePlay, playNext, playPrev, seekTo, setShuffleMode, setRepeatMode, setPlaybackRate } from "../player/audio-engine.js";
+import { getAudioElement, togglePlay, playNext, playPrev, seekTo, setShuffleMode, setRepeatMode, setPlaybackRate, getQueue, jumpToQueueIndex, removeFromQueue, setSleepTimer, getSleepTimerState } from "../player/audio-engine.js";
 import { getPublic, setPublic } from "../store/settings.js";
 import { extractMetadata } from "../metadata/index.js";
 import { initVisualizer, startVisualizer, stopVisualizer, decodePcmForVisualization } from "../player/visualizer.js";
@@ -41,6 +41,8 @@ const ICONS = {
   back15: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/><text x="12" y="15.6" font-size="7.5" font-weight="700" text-anchor="middle">15</text></svg>',
   fwd15: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V1l5 5-5 5V7c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6h2c0 4.42-3.58 8-8 8s-8-3.58-8-8 3.58-8 8-8z"/><text x="12" y="15.6" font-size="7.5" font-weight="700" text-anchor="middle">15</text></svg>',
   lyrics: '<svg class="ic ic-lyrics" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c-4.97 0-9 3.58-9 8 0 1.84.72 3.53 1.95 4.86L4 20l4.47-1.12C9.57 19.14 10.76 19.3 12 19.3c4.97 0 9-3.58 9-8s-4.03-8.3-9-8.3zm0 14.3c-1.04 0-2.03-.23-2.92-.64l-.21-.1-2.22.55.57-2.12-.14-.2C6.31 13.73 5.7 12.44 5.7 11c0-3.31 3.14-6 7.3-6s7.3 2.69 7.3 6-3.14 6.3-7.3 6.3z"/></svg>',
+  timer: '<svg class="ic ic-timer" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/></svg>',
+  queue: '<svg class="ic ic-queue" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"/></svg>',
   dismiss: '<svg class="ic ic-dismiss" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/></svg>',
 };
 
@@ -79,9 +81,17 @@ export async function mount(root) {
   // 状態購読
   // scrobbleResult を含めることで、送信成功/キュー登録/失敗のメッセージを
   // 即座に反映できる。
+  let queueOpen = false;
+  let updateSleepTimerBadge = () => {};
+  let renderQueueList = () => {};
+
   const unsub = appState.subscribe(
-    ["currentTrack", "isPlaying", "duration", "currentTime", "scrobbleProgress", "scrobbleResult", "scrobbleReason", "scrobbleRejectedTrack", "shuffleMode", "repeatMode", "authState"],
-    (s) => updateUI(refs, s)
+    ["currentTrack", "isPlaying", "duration", "currentTime", "scrobbleProgress", "scrobbleResult", "scrobbleReason", "scrobbleRejectedTrack", "shuffleMode", "repeatMode", "authState", "sleepTimer", "queue"],
+    (s) => {
+      updateUI(refs, s);
+      updateSleepTimerBadge(s.sleepTimer);
+      if (queueOpen) renderQueueList(refs);
+    }
   );
 
   // ===== 歌詞(同期/非同期)表示 (P3 & オンライン歌詞取得) =====
@@ -612,6 +622,158 @@ export async function mount(root) {
     });
   }
 
+  // ===== 再生待ちキュー (Up Next) =====
+  function setQueueDrawerVisible(visible) {
+    queueOpen = visible;
+    if (refs.queueDrawer) {
+      refs.queueDrawer.hidden = !visible;
+      refs.queueDrawer.setAttribute("aria-hidden", String(!visible));
+      if (visible) {
+        renderQueueList(refs);
+        setTimeout(() => {
+          const curEl = refs.queueList?.querySelector(".player-queue-item.is-current");
+          if (curEl) curEl.scrollIntoView({ block: "center", behavior: "smooth" });
+        }, 50);
+      }
+    }
+    if (refs.queueToggleBtn) {
+      refs.queueToggleBtn.classList.toggle("is-active", visible);
+    }
+  }
+
+  renderQueueList = function(r) {
+    if (!r.queueList) return;
+    const queue = getQueue();
+    const curIdx = appState.get().queueIndex;
+    if (r.queueCount) {
+      r.queueCount.textContent = `${queue.length} 曲`;
+    }
+    if (queue.length === 0) {
+      r.queueList.innerHTML = `<li class="empty-state" style="padding: 24px; text-align: center; color: var(--fg-muted);">キューに曲がありません</li>`;
+      return;
+    }
+
+    r.queueList.innerHTML = queue.map((t, idx) => {
+      const isCur = idx === curIdx;
+      const durStr = formatTime(t.duration || 0);
+      const eq = isCur
+        ? `<div class="queue-eq-anim"><span class="eq-bar b1"></span><span class="eq-bar b2"></span><span class="eq-bar b3"></span></div>`
+        : `<span class="queue-idx">${idx + 1}</span>`;
+      return `
+        <li class="player-queue-item ${isCur ? "is-current" : ""}" data-idx="${idx}">
+          <div class="player-queue-idx-slot">${eq}</div>
+          <div class="player-queue-item-info">
+            <div class="player-queue-item-title">${escapeHtml(t.title || "(無題)")}</div>
+            <div class="player-queue-item-artist">${escapeHtml(t.artist || "(不明)")}</div>
+          </div>
+          <span class="player-queue-item-dur">${durStr}</span>
+          <button class="player-queue-item-remove" data-act="remove" data-idx="${idx}" title="キューから削除" aria-label="キューから削除">✕</button>
+        </li>
+      `;
+    }).join("");
+  };
+
+  if (refs.queueToggleBtn) {
+    refs.queueToggleBtn.addEventListener("click", () => setQueueDrawerVisible(!queueOpen));
+  }
+  if (refs.queueCloseBtn) {
+    refs.queueCloseBtn.addEventListener("click", () => setQueueDrawerVisible(false));
+  }
+  if (refs.queueList) {
+    refs.queueList.addEventListener("click", async (e) => {
+      const removeBtn = e.target.closest('button[data-act="remove"]');
+      if (removeBtn) {
+        e.stopPropagation();
+        const idx = parseInt(removeBtn.dataset.idx, 10);
+        if (!isNaN(idx)) {
+          await removeFromQueue(idx);
+          renderQueueList(refs);
+        }
+        return;
+      }
+      const item = e.target.closest(".player-queue-item");
+      if (item) {
+        const idx = parseInt(item.dataset.idx, 10);
+        if (!isNaN(idx)) {
+          await jumpToQueueIndex(idx);
+          renderQueueList(refs);
+        }
+      }
+    });
+  }
+
+  // ===== スリープタイマー =====
+  updateSleepTimerBadge = function(timer) {
+    if (!refs.sleepTimerBadge || !refs.sleepTimerLabel) return;
+    const t = timer || getSleepTimerState();
+    if (!t || !t.active || t.mode === "off") {
+      refs.sleepTimerBadge.hidden = true;
+      refs.sleepTimerLabel.textContent = "タイマー";
+      refs.sleepTimerBtn?.classList.remove("is-active");
+    } else if (t.mode === "end-of-track") {
+      refs.sleepTimerBadge.hidden = false;
+      refs.sleepTimerBadge.textContent = "曲終了時";
+      refs.sleepTimerLabel.textContent = "曲終了で停止";
+      refs.sleepTimerBtn?.classList.add("is-active");
+    } else {
+      refs.sleepTimerBadge.hidden = false;
+      const m = Math.floor(t.remainingSec / 60);
+      const s = t.remainingSec % 60;
+      refs.sleepTimerBadge.textContent = `${m}:${s < 10 ? "0" : ""}${s}`;
+      refs.sleepTimerLabel.textContent = `${m}分後`;
+      refs.sleepTimerBtn?.classList.add("is-active");
+    }
+  };
+
+  function openSleepTimerModal() {
+    const curTimer = getSleepTimerState();
+    const curMode = curTimer.mode || "off";
+    const body = document.createElement("div");
+    body.className = "sleep-timer-modal-body";
+    body.innerHTML = `
+      <div style="font-size: 13px; color: var(--fg-muted); margin-bottom: 14px;">指定した時間または現在の曲の終了に合わせて、再生を自動停止します。</div>
+      <div class="sleep-timer-options" style="display: flex; flex-direction: column; gap: 8px;">
+        <button class="btn ${curMode === "off" ? "primary" : ""}" data-mode="off" style="text-align: left; justify-content: flex-start; padding: 10px 14px; font-size: 13px;">
+          ✕ オフ（タイマー解除）
+        </button>
+        <button class="btn ${curMode === "15" ? "primary" : ""}" data-mode="15" style="text-align: left; justify-content: flex-start; padding: 10px 14px; font-size: 13px;">
+          ⏱ 15 分後
+        </button>
+        <button class="btn ${curMode === "30" ? "primary" : ""}" data-mode="30" style="text-align: left; justify-content: flex-start; padding: 10px 14px; font-size: 13px;">
+          ⏱ 30 分後
+        </button>
+        <button class="btn ${curMode === "60" ? "primary" : ""}" data-mode="60" style="text-align: left; justify-content: flex-start; padding: 10px 14px; font-size: 13px;">
+          ⏱ 60 分後
+        </button>
+        <button class="btn ${curMode === "end-of-track" ? "primary" : ""}" data-mode="end-of-track" style="text-align: left; justify-content: flex-start; padding: 10px 14px; font-size: 13px;">
+          🎵 この曲の終わりで停止
+        </button>
+      </div>
+    `;
+
+    const modal = openModal({
+      title: "🌙 スリープタイマー",
+      body,
+      actions: [
+        { label: "閉じる", onClick: () => {} }
+      ],
+    });
+
+    body.querySelectorAll("button[data-mode]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const mode = btn.dataset.mode;
+        setSleepTimer(mode);
+        updateSleepTimerBadge();
+        modal.close();
+      });
+    });
+  }
+
+  if (refs.sleepTimerBtn) {
+    refs.sleepTimerBtn.addEventListener("click", openSleepTimerModal);
+  }
+  updateSleepTimerBadge();
+
   // クリーンアップ
   return () => {
     alive = false; // in-flight な decodeUnsub コールバックの await 復帰後処理を無効化
@@ -673,12 +835,23 @@ function render() {
         <button class="icon-btn" id="btn-fwd15" aria-label="15秒進む" title="15秒進む">${ICONS.fwd15}</button>
       </div>
 
-      <!-- 画面下部アクションバー: 左下に「歌詞」ボタン -->
+      <!-- 画面下部アクションバー: 左下に「歌詞」、右下に「タイマー」「キュー」 -->
       <div class="player-footer-bar">
         <button class="btn-lyrics-pill" id="btn-lyrics-bottom" aria-label="歌詞を表示" title="歌詞を表示">
           ${ICONS.lyrics}
           <span>歌詞</span>
         </button>
+        <div class="player-footer-actions-right">
+          <button class="btn-footer-action" id="btn-sleep-timer" aria-label="スリープタイマー" title="スリープタイマー">
+            ${ICONS.timer}
+            <span id="sleep-timer-label">タイマー</span>
+            <span class="sleep-timer-badge" id="sleep-timer-badge" hidden></span>
+          </button>
+          <button class="btn-footer-action" id="btn-queue-toggle" aria-label="再生待ちキュー" title="再生待ちキュー">
+            ${ICONS.queue}
+            <span>キュー</span>
+          </button>
+        </div>
       </div>
 
       <!-- 再生モード表示（5 パターンを文言で明示） -->
@@ -749,6 +922,20 @@ function render() {
         <button class="btn-info-toggle" id="btn-info-toggle">ℹ 曲の情報 ▼</button>
         <div class="track-info-body" id="track-info-body" hidden></div>
       </div>
+
+      <!-- 再生待ちキュー (Up Next) ドロワー -->
+      <div class="player-queue-drawer" id="player-queue-drawer" hidden aria-hidden="true">
+        <div class="player-queue-drawer-header">
+          <div class="player-queue-drawer-title">
+            <span>再生待ちキュー</span>
+            <span class="player-queue-count" id="player-queue-count">0 曲</span>
+          </div>
+          <button type="button" class="btn-mini" id="btn-player-queue-close" aria-label="閉じる">✕</button>
+        </div>
+        <div class="player-queue-list-wrap">
+          <ul class="player-queue-list" id="player-queue-list"></ul>
+        </div>
+      </div>
     </section>
   `;
 }
@@ -777,6 +964,14 @@ function collectRefs(root) {
     lyricsLines: root.querySelector("#lyrics-lines"),
     lyricsToggle: root.querySelector("#btn-lyrics-toggle"),
     lyricsBottomBtn: root.querySelector("#btn-lyrics-bottom"),
+    sleepTimerBtn: root.querySelector("#btn-sleep-timer"),
+    sleepTimerBadge: root.querySelector("#sleep-timer-badge"),
+    sleepTimerLabel: root.querySelector("#sleep-timer-label"),
+    queueToggleBtn: root.querySelector("#btn-queue-toggle"),
+    queueDrawer: root.querySelector("#player-queue-drawer"),
+    queueCloseBtn: root.querySelector("#btn-player-queue-close"),
+    queueCount: root.querySelector("#player-queue-count"),
+    queueList: root.querySelector("#player-queue-list"),
     scrobbleFill: root.querySelector("#scrobble-fill"),
     scrobbleLabel: root.querySelector("#scrobble-label"),
     scrobbleFixBtn: root.querySelector("#btn-scrobble-fix"),

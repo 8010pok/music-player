@@ -19,6 +19,8 @@ class AppState extends EventTarget {
       queueIndex: -1,
       shuffleMode: false,
       repeatMode: "none",    // "none" | "one" | "all"
+      loadingTrackId: null,  // ダウンロード・ローディング待機中の trackId
+      sleepTimer: { mode: "off", remainingSec: 0, active: false }, // スリープタイマー状態
 
       // スクロブル進捗
       scrobbleProgress: 0,   // 0..1（条件達成で 1）

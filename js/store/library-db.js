@@ -243,6 +243,24 @@ export async function getBlob(id) {
 }
 
 /**
+ * トラックの音源BlobがローカルIndexedDBにキャッシュされているかを判定する
+ * @param {string} id
+ * @returns {Promise<boolean>}
+ */
+export async function hasCachedBlob(id) {
+  if (!id) return false;
+  // 非Drive曲はローカル保存済み
+  if (typeof id === "string" && !id.startsWith("gd-")) return true;
+  try {
+    const db = await openDb();
+    const count = await txReq(db.transaction("blobs").objectStore("blobs").count(id));
+    return count > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 全トラック取得（順序は未保証＝IndexedDB の主キー id=コンテンツハッシュ順で、時系列順ではない）。
  *   表示順は呼び出し側(view-library の getComparator)が JS でソートする。ここで DB レベルの整列を
  *   前提にしないこと(addedAt index は定義済みだが本関数では未使用)。
