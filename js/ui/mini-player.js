@@ -7,12 +7,12 @@
  */
 
 import { appState } from "../state.js";
-import { togglePlay, playNext, playPrev, resolveTrackArtworkFromQueue } from "../player/audio-engine.js";
+import { togglePlay, playNext, playPrev, resolveTrackArtworkFromQueue, toAbsoluteUrl } from "../player/audio-engine.js";
 import { go } from "../router.js";
 import { getArtworkUrl } from "./artwork-cache.js";
 import { escapeHtml } from "./components.js";
 
-const FALLBACK_ART_SRC = "./icons/icon-192.png";
+const FALLBACK_ART_SRC = "icons/icon-192.png";
 let initialized = false;
 
 export function initMiniPlayer() {
@@ -31,8 +31,9 @@ export function initMiniPlayer() {
 
   if (artEl) {
     artEl.addEventListener("error", () => {
-      if (artEl.getAttribute("src") !== FALLBACK_ART_SRC) {
-        artEl.src = FALLBACK_ART_SRC;
+      const fallback = toAbsoluteUrl(FALLBACK_ART_SRC);
+      if (artEl.src !== fallback) {
+        artEl.src = fallback;
         artEl.style.visibility = "visible";
       } else {
         artEl.removeAttribute("src");
@@ -78,7 +79,11 @@ export function initMiniPlayer() {
       || track.artist === "(不明アーティスト)"
       || track.artist === "(Google Drive)";
     const displayArtist = (!isPlaceholderArtist ? track.artist : (track.albumArtist || track.artist || "(不明)"));
-    const displayAlbum = (track.album && track.album !== "(不明アルバム)") ? track.album : "";
+    const isPlaceholderAlbum = !track.album
+      || track.album === "(不明アルバム)"
+      || track.album === "(不明)"
+      || track.album === "Google Drive";
+    const displayAlbum = !isPlaceholderAlbum ? track.album : "";
     const subText = [displayArtist, displayAlbum].filter(Boolean).join(" — ");
 
     const isLoading = !!(s.loadingTrackId && (!track || s.loadingTrackId === track.id));
@@ -98,9 +103,10 @@ export function initMiniPlayer() {
     }
 
     // アートワーク（曲自身 ➔ キュー内の同一アルバム曲 ➔ デフォルトアイコンの順で解決）
-    const artUrl = getArtworkUrl(track) || resolveTrackArtworkFromQueue(track) || FALLBACK_ART_SRC;
+    const rawArt = getArtworkUrl(track) || resolveTrackArtworkFromQueue(track);
+    const artUrl = rawArt ? toAbsoluteUrl(rawArt) : toAbsoluteUrl(FALLBACK_ART_SRC);
     if (artEl) {
-      if (artEl.getAttribute("src") !== artUrl) {
+      if (artEl.src !== artUrl) {
         artEl.style.visibility = "visible";
         artEl.src = artUrl;
       }

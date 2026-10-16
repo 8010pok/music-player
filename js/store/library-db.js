@@ -144,6 +144,7 @@ function ensureTrackMetadataInBackground(id, blob, extraPatch = null) {
       const track = await getTrack(id);
       if (!track) return;
       const missingArt = !track.artworkBlob && !track.artworkDataUrl && !track._noEmbeddedArt;
+      const missingDataUrl = (track.artworkBlob || !track._noEmbeddedArt) && !track.artworkDataUrl;
       const missingDuration = !track.duration || track.duration <= 0;
       const isPlaceholderArtist = !track.artist || track.artist === "(不明)" || track.artist === "(不明アーティスト)" || track.artist === "(Google Drive)";
       const isPlaceholderAlbum = !track.album || track.album === "Google Drive";
@@ -177,7 +178,14 @@ function ensureTrackMetadataInBackground(id, blob, extraPatch = null) {
 
         // アートワークは userEdited (他端末からの同期後など) であっても未保持なら音源から補完する
         if (meta.artworkBlob && !track.artworkBlob) patch.artworkBlob = meta.artworkBlob;
-        if (meta.artworkDataUrl && !track.artworkDataUrl) patch.artworkDataUrl = meta.artworkDataUrl;
+        if (meta.artworkDataUrl && !track.artworkDataUrl) {
+          patch.artworkDataUrl = meta.artworkDataUrl;
+        } else if ((meta.artworkBlob || track.artworkBlob) && !track.artworkDataUrl && !patch.artworkDataUrl) {
+          try {
+            const { blobToDataUrl } = await import("../metadata/util.js");
+            patch.artworkDataUrl = await blobToDataUrl(patch.artworkBlob || track.artworkBlob, 500);
+          } catch (_) {}
+        }
         if (!track.artworkBlob && !track.artworkDataUrl && !meta.artworkBlob && !meta.artworkDataUrl) {
           patch._noEmbeddedArt = true;
         }
@@ -185,6 +193,12 @@ function ensureTrackMetadataInBackground(id, blob, extraPatch = null) {
         if (duration && duration > 0 && (!track.duration || track.duration <= 0)) {
           patch.duration = duration;
         }
+      } else if (missingDataUrl && track.artworkBlob) {
+        // パース不要だが artworkDataUrl がまだ生成されていない場合、Base64 Data URL を生成して補完
+        try {
+          const { blobToDataUrl } = await import("../metadata/util.js");
+          patch.artworkDataUrl = await blobToDataUrl(track.artworkBlob, 500);
+        } catch (_) {}
       }
 
       if (Object.keys(patch).length > 0) {

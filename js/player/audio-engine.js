@@ -53,6 +53,27 @@ if (!audioEl && typeof document !== "undefined") {
   throw new Error("audio-el 要素が DOM に存在しません。index.html を確認してください。");
 }
 
+/**
+ * 相対URLやパスを完全修飾絶対URLに変換する（iOS MediaSession / ロック画面用）
+ * @param {string} url
+ * @returns {string}
+ */
+export function toAbsoluteUrl(url) {
+  if (!url || typeof url !== "string") return "";
+  if (url.startsWith("data:") || url.startsWith("blob:") || url.startsWith("http://") || url.startsWith("https://")) {
+    return url;
+  }
+  if (typeof window !== "undefined" && window.location) {
+    try {
+      return new URL(url, window.location.href).href;
+    } catch (_) {}
+  }
+  return url;
+}
+
+// primeAudioElement の play() プロミス追跡用（AbortError 防止）
+let primePromise = null;
+
 // 内部状態
 const state = {
   userVolume: 1.0,        // ユーザー設定音量 (0.0〜1.0)
@@ -116,8 +137,22 @@ let sleepTimerId = null;
 let sleepTimerTargetTime = 0;
 let sleepTimerMode = "off";
 
-// Pre-warm（先行事前取得）インメモリキャッシュ
+// Pre-warm（先行事前取得）インメモリキャッシュ (最大30曲のLRU)
 const prewarmCache = new Map();
+const MAX_PREWARM_ENTRIES = 30;
+
+function trimPrewarmCache() {
+  while (prewarmCache.size > MAX_PREWARM_ENTRIES) {
+    const oldestKey = prewarmCache.keys().next().value;
+    const e = prewarmCache.get(oldestKey);
+    if (e && e.objectUrl) {
+      if (e.objectUrl !== state.currentObjectUrl && e.objectUrl !== state.preloadUrl) {
+        try { URL.revokeObjectURL(e.objectUrl); } catch {}
+      }
+    }
+    prewarmCache.delete(oldestKey);
+  }
+}
 
 /**
  * ユーザーが曲をタップ（pointerdown / touchstart）した瞬間に
@@ -159,17 +194,7 @@ export function prewarmTrack(trackId, { onlyIfCached = false } = {}) {
   })();
 
   prewarmCache.set(trackId, entry);
-
-  // 60秒後に自動解放
-  setTimeout(() => {
-    const e = prewarmCache.get(trackId);
-    if (e && e.objectUrl) {
-      if (e.objectUrl !== state.currentObjectUrl && e.objectUrl !== state.preloadUrl) {
-        try { URL.revokeObjectURL(e.objectUrl); } catch {}
-      }
-    }
-    prewarmCache.delete(trackId);
-  }, 60000);
+  trimPrewarmCache();
 }
 
 /**
@@ -534,13 +559,19 @@ function primeAudioElement() {
   try {
     setupAudioSession();
     if (audioEl) {
+      // 既にアクティブ再生中の場合は無音WAV代入をスキップ（音切れ・AbortError防止）
+      if (!audioEl.paused && audioEl.src && !audioEl.src.startsWith("data:audio/wav")) {
+        return;
+      }
       state.transitioning = true;
       state.userPausedExplicitly = false;
       audioEl.loop = true;
-      audioEl.src = SILENT_AUDIO_URI;
-      const p = audioEl.play();
-      if (p && typeof p.catch === "function") {
-        p.catch(() => {});
+      if (audioEl.src !== SILENT_AUDIO_URI) {
+        audioEl.src = SILENT_AUDIO_URI;
+      }
+      primePromise = audioEl.play();
+      if (primePromise && typeof primePromise.catch === "function") {
+        primePromise.catch(() => {});
       }
     }
   } catch (e) {
@@ -765,6 +796,8 @@ function playPreloadedSync(index, track, url) {
     queueIndex: index,
     duration: track.duration || 0,
     currentTime: 0,
+    isPlaying: true,
+    loadingTrackId: null,
     scrobbleProgress: 0,
     nowPlayingSent: false,
     scrobbledForCurrent: false,
@@ -1431,6 +1464,15 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
     //   primeAudioElement() が無音 WAV ループで維持している iOS の再生アクティブ状態を
     //   非同期コンテキストで pause() すると User Gesture 権限が失われ、直後の play() が
     //   NotAllowedError でブロックされて「2回タップしないと流れない」原因になる。
+    // primeAudioElement の play() が実行中の場合、WebKit の AbortError (interrupted by load request) を
+    // 防ぐため、play() の settle を待機してから src を差し替える。
+    if (primePromise) {
+      try {
+        await primePromise;
+      } catch (_) {}
+      primePromise = null;
+    }
+
     const oldUrl = state.currentObjectUrl;
     state.currentObjectUrl = targetUrl;
     audioEl.src = targetUrl;
@@ -2237,14 +2279,28 @@ function updateMediaSessionMetadata(track) {
   const artwork = [];
   const artUrl = resolveTrackArtworkFromQueue(track);
   if (artUrl) {
+    const absArtUrl = toAbsoluteUrl(artUrl);
     const mime = (track.artworkBlob && track.artworkBlob.type)
-      || (artUrl.startsWith("data:image/png") ? "image/png" : "image/jpeg");
-    artwork.push({ src: artUrl, sizes: "512x512", type: mime });
+      || (absArtUrl.startsWith("data:image/png") ? "image/png" : "image/jpeg");
+    artwork.push({ src: absArtUrl, sizes: "512x512", type: mime });
+
+    // iOS Safari の MediaRemote (mediaserverd) は blob: URL を直接参照できない場合があるため、
+    // artworkBlob を持っている曲で artworkDataUrl がまだ無ければ非同期で Base64 Data URL を生成して再反映
+    if (absArtUrl.startsWith("blob:") && track.artworkBlob && !track.artworkDataUrl) {
+      import("../metadata/util.js").then(({ blobToDataUrl }) => {
+        return blobToDataUrl(track.artworkBlob, 500);
+      }).then((dataUrl) => {
+        if (dataUrl && appState.get().currentTrack?.id === track.id) {
+          track.artworkDataUrl = dataUrl;
+          updateMediaSessionMetadata(track);
+        }
+      }).catch(() => {});
+    }
   }
-  // フォールバック：アプリアイコン（artwork 無しの曲でもロック画面が空にならないように）
+  // フォールバック：アプリアイコン（artwork 無しの曲でもロック画面が空にならないよう絶対URLで指定）
   if (artwork.length === 0) {
-    artwork.push({ src: "./icons/icon-512.png", sizes: "512x512", type: "image/png" });
-    artwork.push({ src: "./icons/icon-192.png", sizes: "192x192", type: "image/png" });
+    artwork.push({ src: toAbsoluteUrl("icons/icon-512.png"), sizes: "512x512", type: "image/png" });
+    artwork.push({ src: toAbsoluteUrl("icons/icon-192.png"), sizes: "192x192", type: "image/png" });
   }
 
   const isPlaceholderArtist = !track.artist
@@ -2253,11 +2309,17 @@ function updateMediaSessionMetadata(track) {
     || track.artist === "(Google Drive)";
   const displayArtist = (!isPlaceholderArtist ? track.artist : (track.albumArtist || track.artist || "不明"));
 
+  const isPlaceholderAlbum = !track.album
+    || track.album === "Google Drive"
+    || track.album === "(不明アルバム)"
+    || track.album === "(不明)";
+  const displayAlbum = (!isPlaceholderAlbum ? track.album : "");
+
   try {
     navigator.mediaSession.metadata = new MediaMetadata({
       title: track.title || "不明",
       artist: displayArtist,
-      album: track.album || "",
+      album: displayAlbum,
       artwork,
     });
   } catch (e) {

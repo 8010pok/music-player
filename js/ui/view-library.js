@@ -1497,6 +1497,7 @@ async function ingestFile(file) {
     fileSize: file.size,
     originalName: file.name,
     artworkBlob: meta.artworkBlob || (existing && existing.artworkBlob) || null,
+    artworkDataUrl: meta.artworkDataUrl || (existing && existing.artworkDataUrl) || "",
     memo: (existing && existing.memo) || "",
     userEdited: existing ? !!existing.userEdited : false,
   };
