@@ -3881,27 +3881,33 @@
   vertical-align: middle;
 }
 
-/* 再生待ちキュー (Up Next) ドロワー (コンパクト表示) */
+/* 再生待ちキュー (Up Next) ドロワー (最下部超コンパクト表示・mp3等のバッジを侵食しない) */
 .player-queue-drawer {
   position: absolute;
   bottom: 0;
   left: 0;
   right: 0;
-  height: 48%;
-  max-height: 330px;
-  max-width: 540px;
+  height: 30%;
+  max-height: 200px;
+  max-width: 500px;
   margin: 0 auto;
-  background: var(--bg-surface, #1c1c1e);
-  border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
+  background: rgba(28, 28, 30, 0.96);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.15));
   border-left: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
   border-right: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
-  border-radius: 18px 18px 0 0;
+  border-radius: 16px 16px 0 0;
   box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
   display: flex;
   flex-direction: column;
   z-index: 50;
   overflow: hidden;
-  animation: slide-up 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: slide-up 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.player-queue-drawer[hidden] {
+  display: none !important;
 }
 
 @keyframes slide-up {
@@ -3913,7 +3919,7 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 14px;
+  padding: 4px 12px 5px;
   border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
 }
 

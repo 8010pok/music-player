@@ -331,9 +331,11 @@ test("16. 再生待ちキュー（Up Next）の小型化・コンパクトスタ
   const rootDir = path.join(__dirname, "..");
   const viewsCssCode = fs.readFileSync(path.join(rootDir, "css/views.css"), "utf-8");
 
-  // 1) player-queue-drawer の高さが 48% / max-height 330px 程度に小型化されていること (以前は 70% / 480px)
-  assert.match(viewsCssCode, /\.player-queue-drawer\s*\{[\s\S]*?height:\s*48%;[\s\S]*?max-height:\s*330px;/, "再生待ちキューが小型化されている");
-  // 2) アイテムとヘッダーのパディング・フォントがスリム化されていること
+  // 1) player-queue-drawer の高さが 30% / max-height 200px 程度に小型化され、mp3等のバッジを侵食しないこと
+  assert.match(viewsCssCode, /\.player-queue-drawer\s*\{[\s\S]*?height:\s*30%;[\s\S]*?max-height:\s*200px;/, "再生待ちキューが200px以下の最下部超コンパクト設計になっている");
+  // 2) hidden 属性がついた時に確実に非表示 (display: none !important) になること
+  assert.match(viewsCssCode, /\.player-queue-drawer\[hidden\]\s*\{[\s\S]*?display:\s*none\s*!important;/, "hidden 時に確実に display: none !important で折りたたまれる");
+  // 3) アイテムとヘッダーのパディング・フォントがスリム化されていること
   assert.match(viewsCssCode, /\.player-queue-item\s*\{[\s\S]*?padding:\s*5px 8px;/, "player-queue-item がスリム化されている");
 });
 

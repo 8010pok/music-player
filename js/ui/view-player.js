@@ -666,6 +666,7 @@ export async function mount(root) {
     queueOpen = visible;
     if (refs.queueDrawer) {
       refs.queueDrawer.hidden = !visible;
+      refs.queueDrawer.style.display = visible ? "flex" : "none";
       refs.queueDrawer.setAttribute("aria-hidden", String(!visible));
       if (visible) {
         renderQueueList(refs);
@@ -679,6 +680,9 @@ export async function mount(root) {
       refs.queueToggleBtn.classList.toggle("is-active", visible);
     }
   }
+
+  // 初期状態は確実に非表示（折りたたみ）にしておく
+  setQueueDrawerVisible(false);
 
   renderQueueList = function(r) {
     if (!r.queueList) return;
@@ -713,17 +717,27 @@ export async function mount(root) {
   };
 
   if (refs.queueToggleBtn) {
-    refs.queueToggleBtn.addEventListener("click", () => setQueueDrawerVisible(!queueOpen));
+    refs.queueToggleBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setQueueDrawerVisible(!queueOpen);
+    });
   }
   if (refs.queueCloseBtn) {
-    refs.queueCloseBtn.addEventListener("click", () => setQueueDrawerVisible(false));
+    refs.queueCloseBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setQueueDrawerVisible(false);
+    });
   }
   if (refs.queueCollapseBtn) {
-    refs.queueCollapseBtn.addEventListener("click", () => setQueueDrawerVisible(false));
+    refs.queueCollapseBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setQueueDrawerVisible(false);
+    });
   }
   if (refs.queueHeader) {
     refs.queueHeader.addEventListener("click", (e) => {
       if (e.target.closest("button")) return;
+      e.stopPropagation();
       setQueueDrawerVisible(false);
     });
   }
