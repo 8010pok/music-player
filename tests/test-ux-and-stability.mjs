@@ -151,3 +151,51 @@ test("10. アーティスト画面のキュー操作・スピナー展開 ＆ �
   assert.match(viewPlayerCode, /go\(["']album["'],\s*\{\s*key\s*\}\)/, "view-player からアルバム詳細へ遷移");
   assert.match(viewPlayerCode, /is-clickable/, "view-player でクリック可能クラスを付与");
 });
+
+test("11. 全JSモジュールのimport/export整合性 ＆ コメント外定義の検証", () => {
+  const rootDir = path.join(__dirname, "..");
+  const audioEngineCode = fs.readFileSync(path.join(rootDir, "js/player/audio-engine.js"), "utf-8");
+  const strippedAudioEngine = audioEngineCode.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*/g, "");
+  assert.match(
+    strippedAudioEngine,
+    /const\s+SESSION_STORAGE_KEY\s*=\s*["']music_player_session["']/,
+    "SESSION_STORAGE_KEY がコメント外で有効に定義されている"
+  );
+
+  function walkJs(dir) {
+    let list = [];
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) list.push(...walkJs(p));
+      else if (entry.name.endsWith(".js")) list.push(p);
+    }
+    return list;
+  }
+
+  const jsFiles = walkJs(path.join(rootDir, "js"));
+  for (const file of jsFiles) {
+    const code = fs.readFileSync(file, "utf-8");
+    const importRegex = /import\s+\{([^}]+)\}\s+from\s+["']([^"']+)["']/g;
+    let m;
+    while ((m = importRegex.exec(code)) !== null) {
+      const names = m[1]
+        .split(",")
+        .map((s) => s.trim().split(/\s+as\s+/)[0].trim())
+        .filter(Boolean);
+      const rel = m[2];
+      const target = path.resolve(path.dirname(file), rel);
+      assert.ok(fs.existsSync(target), `${path.relative(rootDir, file)} の import 先 ${rel} が存在する`);
+      const targetCode = fs.readFileSync(target, "utf-8");
+      for (const name of names) {
+        const expRegex = new RegExp(
+          `export\\s+(?:async\\s+)?(?:function(?:\\s*\\*)?|const|let|var|class)\\s+${name}\\b|export\\s*\\{[^}]*\\b${name}\\b`
+        );
+        assert.match(
+          targetCode,
+          expRegex,
+          `${path.relative(rootDir, file)} が import している "${name}" が ${rel} から export されている`
+        );
+      }
+    }
+  }
+});

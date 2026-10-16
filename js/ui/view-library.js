@@ -385,8 +385,8 @@ export async function mount(root) {
   // 並び替え（手動ソート時のみ動作）
   const cleanupReorder = installReorder(refs);
 
-  // 再生中ハイライト
-  unsubState = appState.subscribe(["currentTrack"], () => renderList(refs));
+  // 再生中ハイライト & ローディングスピナー追従
+  unsubState = appState.subscribe(["currentTrack", "loadingTrackId"], () => renderList(refs));
 
   // 「現在再生中のプレイリスト」バナー
   const unsubPlaylist = appState.subscribe(
@@ -795,7 +795,7 @@ function rowHtml(t, cur) {
   // ★ ただし検索/「無効非表示」フィルタが効いていると一覧は部分集合になり、
   //   onDragEnd が可視行だけに order を振り直して全体の手動順を壊してしまう。
   //   フィルタ中はハンドルを出さず(=is-manual も付けず)並び替えを無効化する。
-  const filterActive = !!filterText || !showDisabled;
+  const filterActive = !!filterText || !showDisabled || quickFilter !== "all";
   const isManual = sortKey === "manual-asc" && !filterActive;
   const handle = isManual
     ? `<span class="drag-handle" data-act="handle" role="button" tabindex="0" aria-label="並び替えハンドル（ドラッグで上下移動）" title="ドラッグで並び替え">☰</span>`

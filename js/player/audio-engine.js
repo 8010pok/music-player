@@ -138,14 +138,21 @@ export function prewarmTrack(trackId, { onlyIfCached = false } = {}) {
     try {
       if (onlyIfCached && typeof trackId === "string" && trackId.startsWith("gd-")) {
         const cached = await hasCachedBlob(trackId);
-        if (!cached) return null;
+        if (!cached) {
+          prewarmCache.delete(trackId);
+          return null;
+        }
       }
       const blob = await getBlob(trackId);
-      if (!blob) return null;
+      if (!blob) {
+        prewarmCache.delete(trackId);
+        return null;
+      }
       const url = URL.createObjectURL(blob);
       entry.objectUrl = url;
       return url;
     } catch (e) {
+      prewarmCache.delete(trackId);
       console.warn("[audio-engine] prewarm 失敗", trackId, e);
       return null;
     }
@@ -812,6 +819,7 @@ export function playNextTrack(track) {
     state.origQueue.push(track);
   }
   appState.set({ queue: state.queue.map((t) => t.id) });
+  saveSessionState();
   schedulePreload();
   toast(`「${track.title || "曲"}」を次に再生に設定しました`, "ok");
 }
@@ -831,6 +839,7 @@ export function addToQueueEnd(track) {
     state.origQueue.push(track);
   }
   appState.set({ queue: state.queue.map((t) => t.id) });
+  saveSessionState();
   schedulePreload();
   toast(`「${track.title || "曲"}」をキューの末尾に追加しました`, "ok");
 }
@@ -841,24 +850,37 @@ export function addToQueueEnd(track) {
  */
 export async function removeFromQueue(index) {
   if (index < 0 || index >= state.queue.length) return;
+  const removedTrack = state.queue[index];
   if (index === state.queueIndex) {
     if (state.queue.length === 1) {
       stopPlayback();
       return;
     }
-    await playNext();
-    const removeIdx = index < state.queueIndex ? index : index;
-    state.queue.splice(removeIdx, 1);
-    state.queueIndex = Math.max(0, state.queueIndex - 1);
+    state.queue.splice(index, 1);
+    if (state.origQueue && removedTrack) {
+      const origIdx = state.origQueue.findIndex((t) => t.id === removedTrack.id);
+      if (origIdx >= 0) state.origQueue.splice(origIdx, 1);
+    }
+    const nextIdx = index >= state.queue.length ? 0 : index;
+    state.queueIndex = nextIdx;
     appState.set({ queue: state.queue.map((t) => t.id), queueIndex: state.queueIndex });
-    schedulePreload();
+    saveSessionState();
+    const nextTrack = state.queue[nextIdx];
+    if (nextTrack) {
+      await loadAndPlay(nextTrack);
+    }
     return;
   }
   state.queue.splice(index, 1);
+  if (state.origQueue && removedTrack) {
+    const origIdx = state.origQueue.findIndex((t) => t.id === removedTrack.id);
+    if (origIdx >= 0) state.origQueue.splice(origIdx, 1);
+  }
   if (index < state.queueIndex) {
     state.queueIndex--;
   }
   appState.set({ queue: state.queue.map((t) => t.id), queueIndex: state.queueIndex });
+  saveSessionState();
   schedulePreload();
 }
 
@@ -1783,7 +1805,7 @@ function setupMediaSession() {
  * よって統合前 mp3player と同じく、pagehide 系の明示クリーンアップは
  * 廃止する。iOS は PWA が真に終了したときには JS context 破棄に伴い
  * MediaSession を自動的に片付ける。
- *
+ */
 const SESSION_STORAGE_KEY = "music_player_session";
 
 /**

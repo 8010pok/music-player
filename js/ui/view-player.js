@@ -84,15 +84,22 @@ export async function mount(root) {
   // scrobbleResult を含めることで、送信成功/キュー登録/失敗のメッセージを
   // 即座に反映できる。
   let queueOpen = false;
+  let lastQueueSig = "";
   let updateSleepTimerBadge = () => {};
   let renderQueueList = () => {};
 
   const unsub = appState.subscribe(
-    ["currentTrack", "isPlaying", "duration", "currentTime", "scrobbleProgress", "scrobbleResult", "scrobbleReason", "scrobbleRejectedTrack", "shuffleMode", "repeatMode", "authState", "sleepTimer", "queue"],
+    ["currentTrack", "isPlaying", "duration", "currentTime", "scrobbleProgress", "scrobbleResult", "scrobbleReason", "scrobbleRejectedTrack", "shuffleMode", "repeatMode", "authState", "sleepTimer", "queue", "queueIndex"],
     (s) => {
       updateUI(refs, s);
       updateSleepTimerBadge(s.sleepTimer);
-      if (queueOpen) renderQueueList(refs);
+      if (queueOpen) {
+        const sig = `${s.currentTrack?.id || ""}:${s.queueIndex}:${(s.queue || []).join(",")}`;
+        if (sig !== lastQueueSig) {
+          lastQueueSig = sig;
+          renderQueueList(refs);
+        }
+      }
     }
   );
 
