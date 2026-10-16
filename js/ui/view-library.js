@@ -448,9 +448,9 @@ function render() {
           </button>
         </div>
         <div class="library-add-buttons">
-          <button class="btn primary" id="btn-add-gdrive" style="background: var(--accent); color: #fff; font-weight: bold; flex: 1; min-width: 120px;" title="Google Drive から曲やフォルダを一括追加">☁ Google Drive</button>
-          <button class="btn" id="btn-add-youtube" style="background: #cc0000; color: #fff; font-weight: bold; flex: 1; min-width: 120px;" title="YouTubeのリンクから音源をダウンロードしてGoogle Drive/端末に保存">▶ YouTubeから保存</button>
-          <button class="btn" id="btn-add-combined" style="flex: 1; min-width: 120px; font-weight: 500;" title="端末内の音源ファイル・フォルダを追加">📁 端末から追加</button>
+          <button class="btn btn-add-source btn-add-gdrive primary" id="btn-add-gdrive" title="Google Drive から曲やフォルダを一括追加">☁ Google Drive</button>
+          <button class="btn btn-add-source btn-add-youtube" id="btn-add-youtube" title="YouTubeのリンクから音源をダウンロードしてGoogle Drive/端末に保存">▶ YouTubeから保存</button>
+          <button class="btn btn-add-source btn-add-combined" id="btn-add-combined" title="端末内の音源ファイル・フォルダを追加">📁 端末から追加</button>
         </div>
         <input type="file" id="file-input" multiple
                accept=".mp3,.m4a,.m4b,.aac,.mp4,.flac,.ogg,.oga,.opus,.wav,.webm,audio/*"

@@ -369,10 +369,42 @@ export function getEffectivePlaybackRate() {
   return Math.max(0.25, Math.min(4, Number(pub.playbackRate) || 1.0));
 }
 
+const SILENT_AUDIO_URI = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
+
+/**
+ * ユーザー操作 (click / tap) の同期コールスタック内で audio 要素を起動する。
+ *
+ * モバイルブラウザ (iOS Safari / WebKit / Android Chrome 等) は、ユーザー操作起点で
+ * 直ちに play() を呼ばないと、直後の await (IndexedDB や Drive 通信) で User Gesture
+ * トークンが失効し、その後の play() が Autoplay 制限でブロックされて一時停止状態のままになる
+ * （「一度タップしてから再生ボタンを押さないと再生されない」現象の根本原因）。
+ * 同期スタック内で無音オーディオを再生開始しておくことで、非同期ロード完了後に
+ * 本体の音源を即座にワンクリックで鳴らすことができる。
+ */
+function primeAudioElement() {
+  try {
+    setupAudioSession();
+    if (audioEl) {
+      state.userPausedExplicitly = false;
+      if (audioEl.paused) {
+        audioEl.loop = true;
+        audioEl.src = SILENT_AUDIO_URI;
+        const p = audioEl.play();
+        if (p && typeof p.catch === "function") {
+          p.catch(() => {});
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[audio-engine] primeAudioElement 失敗", e);
+  }
+}
+
 /* ============ 外部API ============ */
 
 export async function playTrackImmediate(track) {
   if (!track) return;
+  primeAudioElement();
   await loadAndPlay(track);
 }
 
@@ -401,7 +433,10 @@ export async function setQueueAndPlay(tracks, startIndex = 0) {
     return;
   }
 
-  // 2. まだメモリにない場合でも、ユーザー操作コンテキストを逃さず最速で loadAndPlay を実行
+  // 2. まだメモリにない場合: ユーザー操作コンテキスト内で同期プライミングを行い
+  //    ブラウザの User Gesture 失効を防ぎ、ワンクリックで即座に再生させる
+  primeAudioElement();
+
   await loadAndPlay(cur);
 }
 
@@ -894,6 +929,7 @@ export async function jumpToQueueIndex(index) {
   appState.set({ queueIndex: index });
   const track = state.queue[index];
   if (track) {
+    primeAudioElement();
     await loadAndPlay(track);
   }
 }
@@ -1188,6 +1224,11 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
   appState.set({ loadingTrackId: null });
 
   if (!targetUrl) {
+    try {
+      audioEl.pause();
+      audioEl.loop = false;
+      audioEl.src = "";
+    } catch {}
     console.warn("音源データ未発見", track.id);
     const reason = (blobErr && blobErr.message) ? blobErr.message : "ファイル本体が見つかりません";
     await skipToNextOnError(reason, track);
@@ -1513,6 +1554,8 @@ function onTimeUpdate() {
 }
 
 function onEnded() {
+  if (state.transitioning) return;
+  if (audioEl.src && audioEl.src.startsWith("data:audio/wav")) return;
   if (!appState.get().scrobbledForCurrent) {
     const track = appState.get().currentTrack;
     if (track) {

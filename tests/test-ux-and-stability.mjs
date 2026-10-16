@@ -199,3 +199,75 @@ test("11. 全JSモジュールのimport/export整合性 ＆ コメント外定�
     }
   }
 });
+
+test("12. ワンクリック再生 (primeAudioElement / SILENT_AUDIO_URI) の検証", () => {
+  const rootDir = path.join(__dirname, "..");
+  const audioEngineCode = fs.readFileSync(path.join(rootDir, "js/player/audio-engine.js"), "utf-8");
+
+  assert.match(
+    audioEngineCode,
+    /const\s+SILENT_AUDIO_URI\s*=\s*["']data:audio\/wav;base64,/,
+    "SILENT_AUDIO_URI が定義されている"
+  );
+  assert.match(
+    audioEngineCode,
+    /function\s+primeAudioElement\s*\(\)\s*\{/,
+    "primeAudioElement 関数が定義されている"
+  );
+  assert.match(
+    audioEngineCode,
+    /setQueueAndPlay[\s\S]*?primeAudioElement\(\)/,
+    "setQueueAndPlay 内で primeAudioElement() が呼ばれている"
+  );
+  assert.match(
+    audioEngineCode,
+    /jumpToQueueIndex[\s\S]*?primeAudioElement\(\)/,
+    "jumpToQueueIndex 内で primeAudioElement() が呼ばれている"
+  );
+  assert.match(
+    audioEngineCode,
+    /function\s+onEnded\s*\(\)\s*\{[\s\S]*?data:audio\/wav/,
+    "onEnded 内で silent audio の終了イベントがガードされている"
+  );
+});
+
+test("13. 鮮明な歌詞スタイル ＆ スマホライブラリ追加ボタンのはみ出し防止の検証", () => {
+  const rootDir = path.join(__dirname, "..");
+  const viewsCss = fs.readFileSync(path.join(rootDir, "css/views.css"), "utf-8");
+  const playerJs = fs.readFileSync(path.join(rootDir, "js/ui/view-player.js"), "utf-8");
+  const libraryJs = fs.readFileSync(path.join(rootDir, "js/ui/view-library.js"), "utf-8");
+
+  // 歌詞のブラー除去と鮮明化
+  assert.doesNotMatch(
+    viewsCss,
+    /\.lyrics-line\s*\{[^}]*filter:\s*blur\(/,
+    "lyrics-line から blur フィルタが完全に除去されている"
+  );
+  assert.match(
+    viewsCss,
+    /\.btn-lyrics-dismiss\b/,
+    "歌詞画面にジャケットに戻る dismiss ボタンのスタイルが定義されている"
+  );
+  assert.match(
+    playerJs,
+    /id=["']btn-lyrics-dismiss["']/,
+    "view-player.js の HTML 内に btn-lyrics-dismiss ボタンが配置されている"
+  );
+
+  // ライブラリ追加ボタンのレスポンシブ配置（はみ出し防止）
+  assert.match(
+    viewsCss,
+    /\.library-add-buttons\s*\{[\s\S]*?grid-template-columns:/,
+    "library-add-buttons がグリッドレイアウトで定義されている"
+  );
+  assert.match(
+    viewsCss,
+    /@media\s*\(max-width:\s*480px\)\s*\{[\s\S]*?#btn-add-gdrive[\s\S]*?grid-column:\s*1\s*\/\s*-1/,
+    "480px 以下のスマホ画面で Google Drive ボタンが全幅、他2ボタンが2列に収まるレスポンシブ定義がある"
+  );
+  assert.doesNotMatch(
+    libraryJs,
+    /id=["']btn-add-combined["'][^>]*min-width:\s*120px/,
+    "view-library.js 内の 端末から追加ボタンのハードコード min-width が除去されている"
+  );
+});

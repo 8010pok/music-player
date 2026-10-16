@@ -391,6 +391,9 @@ export async function mount(root) {
   }
   // アート上の歌詞/ジャケット切替ボタンで開閉
   refs.lyricsToggle.addEventListener("click", () => showLyrics(!lyricsVisible));
+  if (refs.lyricsDismissBtn) {
+    refs.lyricsDismissBtn.addEventListener("click", () => showLyrics(false));
+  }
   // ジャケットタップで歌詞を表示
   refs.art.addEventListener("click", () => { if (!lyricsVisible) showLyrics(true); });
   // アートワーク読み込み失敗時は「？」アイコンを出さず安全に隠す
@@ -830,6 +833,7 @@ function render() {
         <img class="player-art" id="player-art" alt="" />
         <!-- 歌詞オーバーレイ(初期 hidden。表示制御・同期ハイライトは P3 で配線) -->
         <div class="player-lyrics-overlay" id="player-lyrics-overlay" hidden aria-hidden="true">
+          <button class="btn-lyrics-dismiss" id="btn-lyrics-dismiss" aria-label="ジャケットに戻る" title="ジャケットに戻る">✕ ジャケットに戻る</button>
           <div class="lyrics-lines" id="lyrics-lines"></div>
         </div>
         <!-- 歌詞⇄ジャケット切替ボタン(歌詞がある曲でのみ P3 で表示) -->
@@ -993,6 +997,7 @@ function collectRefs(root) {
     lyricsOverlay: root.querySelector("#player-lyrics-overlay"),
     lyricsLines: root.querySelector("#lyrics-lines"),
     lyricsToggle: root.querySelector("#btn-lyrics-toggle"),
+    lyricsDismissBtn: root.querySelector("#btn-lyrics-dismiss"),
     lyricsBottomBtn: root.querySelector("#btn-lyrics-bottom"),
     sleepTimerBtn: root.querySelector("#btn-sleep-timer"),
     sleepTimerBadge: root.querySelector("#sleep-timer-badge"),

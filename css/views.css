@@ -406,64 +406,122 @@
 .player-view #btn-love .ic-heart { fill: none; stroke: currentColor; stroke-width: 2; }
 .player-view #btn-love.is-active .ic-heart { fill: currentColor; stroke: none; }
 
-/* ===== 歌詞オーバーレイ (Apple Music Sing 風フォーカス＆ブラー) ===== */
+/* ===== 歌詞オーバーレイ (Apple Music Sing 風 クリア＆シャープ表示) ===== */
 .player-lyrics-overlay {
   position: absolute;
   inset: 0;
   z-index: 1;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  background: rgba(12, 14, 20, 0.86);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  padding: 24px 16px;
-  mask-image: linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%);
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%);
+  background: rgba(12, 14, 20, 0.90);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  padding: 16px 16px 40px;
+  mask-image: linear-gradient(to bottom, transparent 0%, black 4%, black 96%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 4%, black 96%, transparent 100%);
 }
 .player-lyrics-overlay[hidden] { display: none; }
+
+.btn-lyrics-dismiss {
+  position: sticky;
+  top: 8px;
+  float: right;
+  z-index: 10;
+  margin-bottom: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 999px;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+.btn-lyrics-dismiss:hover {
+  background: rgba(255, 255, 255, 0.28);
+  transform: translateY(-1px);
+}
+.btn-lyrics-dismiss:active {
+  transform: scale(0.96);
+}
+:root[data-theme="light"] .btn-lyrics-dismiss {
+  color: #1d1d1f;
+  background: rgba(0, 0, 0, 0.08);
+  border-color: rgba(0, 0, 0, 0.16);
+}
+
 .lyrics-lines {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   text-align: center;
-  padding: 40px 0;
+  padding: 30px 10px 60px;
+  max-width: 540px;
+  margin: 0 auto;
+  clear: both;
 }
+
 .lyrics-line {
-  font-size: 15px;
-  line-height: 1.6;
-  color: var(--fg-muted);
+  font-size: 16px;
+  line-height: 1.65;
+  color: rgba(255, 255, 255, 0.65);
   word-break: break-word;
-  opacity: 0.32;
-  filter: blur(0.8px);
-  transform: scale(0.97);
-  transform-origin: center center;
-  transition: opacity 0.32s cubic-bezier(0.16, 1, 0.3, 1),
-              transform 0.32s cubic-bezier(0.16, 1, 0.3, 1),
-              filter 0.32s ease,
-              color 0.25s ease;
+  opacity: 1;
+  filter: none;
+  font-weight: 600;
+  transform: none;
+  transition: color 0.2s ease, font-size 0.2s ease, transform 0.2s ease, opacity 0.2s ease;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
+:root[data-theme="light"] .lyrics-line {
+  color: rgba(0, 0, 0, 0.60);
+}
+
 .lyrics-line.is-active {
   color: #ffffff;
   opacity: 1.0;
   filter: none;
-  font-weight: 700;
-  transform: scale(1.05);
-  text-shadow: 0 2px 20px rgba(255, 255, 255, 0.40);
+  font-weight: 800;
+  font-size: 21px;
+  line-height: 1.5;
+  transform: scale(1.03);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
 }
 :root[data-theme="light"] .lyrics-line.is-active {
-  color: #1d1d1f;
-  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.22);
+  color: #000000;
+  text-shadow: none;
 }
+
 .lyrics-line.is-synced {
   cursor: pointer;
 }
 .lyrics-line.is-synced:hover {
-  opacity: 0.70;
-  filter: none;
+  color: #ffffff;
+  opacity: 1;
 }
+:root[data-theme="light"] .lyrics-line.is-synced:hover {
+  color: #000000;
+}
+
+.lyrics-line:not(.is-synced) {
+  font-size: 16px;
+  line-height: 1.8;
+  font-weight: 500;
+  color: var(--fg);
+  opacity: 0.95;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .lyrics-line {
-    filter: none !important;
     transform: none !important;
     transition: opacity 0.15s ease, color 0.15s ease !important;
   }
@@ -991,13 +1049,71 @@
 }
 
 .library-add-buttons {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
   gap: 8px;
 }
 
-.library-add-buttons .btn {
-  flex: 1;
+.library-add-buttons .btn,
+.library-add-buttons .btn-add-source {
   min-height: 40px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  border-radius: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-sizing: border-box;
+  transition: transform 0.12s ease, opacity 0.15s ease, background 0.15s ease;
+}
+
+.library-add-buttons .btn-add-gdrive {
+  background: var(--accent);
+  color: #ffffff;
+  border: 1px solid var(--accent);
+}
+
+.library-add-buttons .btn-add-youtube {
+  background: #cc0000;
+  color: #ffffff;
+  border: 1px solid #cc0000;
+}
+
+.library-add-buttons .btn-add-combined {
+  background: var(--bg-surface);
+  color: var(--fg);
+  border: 1px solid var(--border-color);
+}
+
+.library-add-buttons .btn:active,
+.library-add-buttons .btn-add-source:active {
+  transform: scale(0.97);
+}
+
+@media (max-width: 480px) {
+  .library-add-buttons {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .library-add-buttons .btn-add-gdrive,
+  .library-add-buttons #btn-add-gdrive {
+    grid-column: 1 / -1;
+    min-height: 42px;
+    font-size: 14px;
+  }
+  .library-add-buttons .btn-add-youtube,
+  .library-add-buttons #btn-add-youtube,
+  .library-add-buttons .btn-add-combined,
+  .library-add-buttons #btn-add-combined {
+    min-height: 38px;
+    font-size: 12px;
+    padding: 6px 8px;
+  }
 }
 
 .library-rescan-row {
