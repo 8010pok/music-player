@@ -10,7 +10,7 @@
 import { getAllTracks } from "../store/library-db.js";
 import { groupTracksIntoArtists } from "../metadata/artist-util.js";
 import { sortAlbums } from "../metadata/album-util.js";
-import { setQueueAndPlay, setShuffleMode, prewarmTracks } from "../player/audio-engine.js";
+import { setQueueAndPlay, setShuffleMode, prewarmTrack, prewarmTracks, playNextTrack, addToQueueEnd } from "../player/audio-engine.js";
 import { appState } from "../state.js";
 import { getArtworkUrl } from "./artwork-cache.js";
 import { go } from "../router.js";
@@ -31,7 +31,10 @@ export async function mount(root) {
 
   const allTracks = await getAllTracks();
   const allArtists = groupTracksIntoArtists(allTracks);
-  artist = allArtists.find((a) => a.name.trim().toLowerCase() === artistName.trim().toLowerCase());
+  const targetLower = artistName.trim().toLowerCase();
+  artist =
+    allArtists.find((a) => a.name.trim().toLowerCase() === targetLower) ||
+    allArtists.find((a) => a.tracks.some((t) => (t.artist || "").trim().toLowerCase() === targetLower));
 
   if (!artist) {
     toast("アーティストが見つかりません", "err");
@@ -44,9 +47,9 @@ export async function mount(root) {
 
   root.innerHTML = render(artist);
 
-  // ★ アーティスト画面表示時に楽曲を先行プリウォーム
+  // ★ アーティスト画面表示時にキャッシュ済み楽曲を先行プリウォーム（最大5曲）
   if (artist && Array.isArray(artist.tracks)) {
-    prewarmTracks(artist.tracks.map((t) => t.id), 10);
+    prewarmTracks(artist.tracks.map((t) => t.id), 5);
   }
   const refs = collectRefs(root);
 
@@ -80,11 +83,17 @@ export async function mount(root) {
     });
   }
 
-  // 曲一覧クリック委譲
+  // 曲一覧クリック委譲 & タップ直前プリウォーム
   refs.trackList.addEventListener("click", (e) => onTrackClick(e, root));
+  refs.trackList.addEventListener("pointerdown", (e) => {
+    const row = e.target.closest(".artist-track-item");
+    if (row && row.dataset.id) {
+      prewarmTrack(row.dataset.id);
+    }
+  }, { passive: true });
 
-  // 再生中ハイライト
-  unsubState = appState.subscribe(["currentTrack"], () => {
+  // 再生中ハイライト & ローディングスピナー追従
+  unsubState = appState.subscribe(["currentTrack", "isPlaying", "loadingTrackId"], () => {
     updatePlayingHighlight(refs);
   });
   updatePlayingHighlight(refs);
@@ -190,19 +199,28 @@ function renderTrackRows(tracks) {
   return tracks
     .map((t, index) => {
       const dur = t.duration ? formatTime(t.duration) : "—";
-      const lovedIcon = t.loved ? "♥" : "";
+      const lovedIcon = t.loved ? `<span class="track-loved-indicator" title="お気に入り">♥</span>` : "";
       const albTitle = t.album || "";
+      const isGdrive = t.source === "gdrive" || (t.id && t.id.startsWith("gd-"));
+      const gdriveMark = isGdrive
+        ? `<span class="source-badge gdrive-badge" title="Google Drive 音源">☁</span>`
+        : "";
+      const numStr = String(index + 1);
 
       return `
-        <li class="artist-track-item ${t.enabled === false ? "is-disabled" : ""}" data-id="${escapeAttr(t.id)}">
-          <span class="track-index">${index + 1}</span>
+        <li class="artist-track-item ${t.enabled === false ? "is-disabled" : ""}" data-id="${escapeAttr(t.id)}" data-track-num="${escapeAttr(numStr)}">
+          <span class="artist-track-num-slot"><span class="track-index">${escapeHtml(numStr)}</span></span>
           <div class="track-main">
-            <div class="track-title">${escapeHtml(t.title || "(無題)")}${t.memo ? ` <span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
+            <div class="track-title">${gdriveMark}${escapeHtml(t.title || "(無題)")}${t.memo ? ` <span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
             <div class="track-meta">${escapeHtml(albTitle)}</div>
           </div>
-          <button class="track-btn-edit" data-action="edit" title="曲の情報を編集" aria-label="曲の情報を編集">✏</button>
-          ${lovedIcon ? `<span class="track-loved-indicator" title="お気に入り">${lovedIcon}</span>` : ""}
-          <span class="track-duration">${dur}</span>
+          <div class="artist-track-actions">
+            ${lovedIcon}
+            <button class="icon-btn track-action-btn" data-action="play-next" title="次に再生" aria-label="次に再生">⏭</button>
+            <button class="icon-btn track-action-btn" data-action="add-queue" title="キューの末尾に追加" aria-label="キューの末尾に追加">＋</button>
+            <button class="track-btn-edit" data-action="edit" title="曲の情報を編集" aria-label="曲の情報を編集">✏</button>
+            <span class="track-duration">${dur}</span>
+          </div>
         </li>
       `;
     })
@@ -237,17 +255,28 @@ async function playArtist(shuffle = false) {
 }
 
 async function onTrackClick(e, root) {
-  const editBtn = e.target.closest('[data-action="edit"]');
+  const actBtn = e.target.closest("[data-action]");
   const row = e.target.closest(".artist-track-item");
   if (!row) return;
   const trackId = row.dataset.id;
   const track = artist.tracks.find((t) => t.id === trackId);
   if (!track) return;
 
-  if (editBtn) {
+  if (actBtn) {
     e.stopPropagation();
-    editTrackMetadata(track, () => mount(root));
-    return;
+    const act = actBtn.dataset.action;
+    if (act === "play-next") {
+      playNextTrack(track);
+      return;
+    }
+    if (act === "add-queue") {
+      addToQueueEnd(track);
+      return;
+    }
+    if (act === "edit") {
+      editTrackMetadata(track, () => mount(root));
+      return;
+    }
   }
 
   if (track.enabled === false) {
@@ -264,11 +293,26 @@ async function onTrackClick(e, root) {
 
 function updatePlayingHighlight(refs) {
   if (!refs || !refs.trackList) return;
-  const cur = appState.get().currentTrack;
-  const curId = cur?.id || null;
+  const s = appState.get();
+  const curId = s.currentTrack?.id || null;
+  const loadingId = s.loadingTrackId || null;
+  const isPlaying = !!s.isPlaying;
 
   refs.trackList.querySelectorAll(".artist-track-item").forEach((el) => {
-    const isPlaying = el.dataset.id === curId;
-    el.classList.toggle("is-playing", isPlaying);
+    const isCur = !!curId && el.dataset.id === curId;
+    const isLoading = !!loadingId && el.dataset.id === loadingId;
+    el.classList.toggle("is-playing", isCur);
+    el.classList.toggle("is-loading", isLoading);
+    const slot = el.querySelector(".artist-track-num-slot");
+    if (slot) {
+      if (isLoading) {
+        slot.innerHTML = `<span class="track-spinner" aria-label="読み込み中"></span>`;
+      } else if (isCur) {
+        slot.innerHTML = `<div class="eq-anim ${isPlaying ? "" : "is-paused"}" aria-label="再生中"><span class="eq-bar b1"></span><span class="eq-bar b2"></span><span class="eq-bar b3"></span></div>`;
+      } else {
+        const origNum = el.dataset.trackNum || "";
+        slot.innerHTML = `<span class="track-index">${escapeHtml(origNum)}</span>`;
+      }
+    }
   });
 }

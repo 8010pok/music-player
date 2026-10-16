@@ -135,3 +135,19 @@ test("9. UIコンポーネント (Up Nextドロワー, スリープタイマー�
   assert.match(viewsCssCode, /\.track-spinner/, "CSSに .track-spinner が存在");
   assert.match(viewsCssCode, /\.sleep-timer-badge/, "CSSに .sleep-timer-badge が存在");
 });
+
+test("10. アーティスト画面のキュー操作・スピナー展開 ＆ フルプレイヤーからの詳細遷移の検証", () => {
+  const viewArtistCode = fs.readFileSync(path.join(__dirname, "../js/ui/view-artist.js"), "utf-8");
+  const viewPlayerCode = fs.readFileSync(path.join(__dirname, "../js/ui/view-player.js"), "utf-8");
+
+  // アーティスト詳細画面の「次に再生」「キュー追加」「スピナー」
+  assert.match(viewArtistCode, /data-action="play-next"/, "view-artist に次に再生ボタン配置");
+  assert.match(viewArtistCode, /data-action="add-queue"/, "view-artist にキュー追加ボタン配置");
+  assert.match(viewArtistCode, /loadingTrackId/, "view-artist が loadingTrackId を購読");
+  assert.match(viewArtistCode, /track-spinner/, "view-artist にローディングスピナー表示が存在");
+
+  // フルプレイヤーからのアーティスト・アルバム詳細画面への遷移
+  assert.match(viewPlayerCode, /go\(["']artist["'],\s*\{\s*name\s*\}\)/, "view-player からアーティスト詳細へ遷移");
+  assert.match(viewPlayerCode, /go\(["']album["'],\s*\{\s*key\s*\}\)/, "view-player からアルバム詳細へ遷移");
+  assert.match(viewPlayerCode, /is-clickable/, "view-player でクリック可能クラスを付与");
+});

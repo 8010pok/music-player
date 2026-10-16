@@ -22,6 +22,8 @@ import { editTrackMetadata } from "./metadata-editor.js";
 import { openNormalizeModal } from "./normalize-modal.js";
 import { fetchOnlineLyrics } from "../metadata/lrclib.js";
 import { parseLrc } from "../metadata/lyrics.js";
+import { go } from "../router.js";
+import { getAlbumKey, getAlbumArtist } from "../metadata/album-util.js";
 
 /**
  * 独自コントロール用の inline SVG アイコン群。
@@ -622,6 +624,27 @@ export async function mount(root) {
     });
   }
 
+  // ===== アーティスト名・アルバム名タップで詳細画面へダイレクト遷移 =====
+  if (refs.artist) {
+    refs.artist.addEventListener("click", () => {
+      const t = appState.get().currentTrack;
+      if (!t) return;
+      const name = (t.albumArtist || t.artist || getAlbumArtist(t) || "").trim();
+      if (!name || name === "(不明)") return;
+      go("artist", { name });
+    });
+  }
+  if (refs.album) {
+    refs.album.addEventListener("click", () => {
+      const t = appState.get().currentTrack;
+      if (!t || !t.album) return;
+      const key = getAlbumKey(t);
+      if (key) {
+        go("album", { key });
+      }
+    });
+  }
+
   // ===== 再生待ちキュー (Up Next) =====
   function setQueueDrawerVisible(visible) {
     queueOpen = visible;
@@ -1191,7 +1214,11 @@ function updateUI(refs, s) {
   if (!t) {
     refs.title.textContent = "再生中の曲はありません";
     refs.artist.textContent = "ライブラリから曲を選んでください";
+    refs.artist.classList.remove("is-clickable");
+    refs.artist.removeAttribute("title");
     refs.album.textContent = "";
+    refs.album.classList.remove("is-clickable");
+    refs.album.removeAttribute("title");
     refs.art.removeAttribute("src");
     refs.art.style.visibility = "hidden";
     refs.playBtn.classList.remove("is-playing");
@@ -1225,8 +1252,23 @@ function updateUI(refs, s) {
   } else {
     refs.title.textContent = t.title || "(無題)";
   }
+  const hasArtist = !!(t.artist || t.albumArtist);
   refs.artist.textContent = t.artist || "(不明)";
+  refs.artist.classList.toggle("is-clickable", hasArtist);
+  if (hasArtist) {
+    refs.artist.setAttribute("title", "タップでアーティスト詳細へ");
+  } else {
+    refs.artist.removeAttribute("title");
+  }
+
+  const hasAlbum = !!t.album;
   refs.album.textContent = t.album || "";
+  refs.album.classList.toggle("is-clickable", hasAlbum);
+  if (hasAlbum) {
+    refs.album.setAttribute("title", "タップでアルバム詳細へ");
+  } else {
+    refs.album.removeAttribute("title");
+  }
 
   if (refs._lastQualityTrackId !== t.id) {
     refs._lastQualityTrackId = t.id;

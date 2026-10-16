@@ -186,6 +186,23 @@
   font-weight: 500;
   word-break: break-word;
 }
+.player-artist.is-clickable,
+.player-album.is-clickable {
+  cursor: pointer;
+  transition: opacity 0.15s, color 0.15s;
+}
+.player-artist.is-clickable:hover,
+.player-album.is-clickable:hover {
+  text-decoration: underline;
+  opacity: 0.85;
+}
+.player-album.is-clickable:hover {
+  color: var(--fg);
+}
+.player-artist.is-clickable:active,
+.player-album.is-clickable:active {
+  opacity: 0.65;
+}
 
 .player-album {
   margin: 2px 0 0;
@@ -3581,7 +3598,7 @@
 
 .artist-track-item {
   display: grid;
-  grid-template-columns: 28px 1fr auto auto auto;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
@@ -3590,6 +3607,18 @@
   border-radius: 8px;
   cursor: pointer;
   transition: background 0.15s;
+}
+
+.artist-track-num-slot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.artist-track-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .artist-track-item:hover {
