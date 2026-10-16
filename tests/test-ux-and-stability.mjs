@@ -365,4 +365,35 @@ test("17. 3点リーダー横グリッド化 ＆ 曲一覧への適用 ＆ キ�
   assert.match(artworkCache, /brokenAttempts/, "brokenAttempts による3回一時許容リトライ機構が実装されている");
 });
 
+test("18. モーダルの「閉じる」ボタン動作保証 ＆ 背景タップクローズの検証", () => {
+  const rootDir = path.join(__dirname, "..");
+  const componentsCode = fs.readFileSync(path.join(rootDir, "js/ui/components.js"), "utf-8");
+  const viewAlbumCode = fs.readFileSync(path.join(rootDir, "js/ui/view-album.js"), "utf-8");
+  const viewLibraryCode = fs.readFileSync(path.join(rootDir, "js/ui/view-library.js"), "utf-8");
+
+  // 1) components.js: openModal で onClick が省略されたアクションでも例外を出さず安全に閉じること
+  assert.match(
+    componentsCode,
+    /typeof\s+a\.onClick\s*===\s*["']function["']\s*\?\s*await\s+a\.onClick\(\)\s*:\s*true/,
+    "openModal で onClick が未定義でも安全に close() が呼ばれる"
+  );
+
+  // 2) components.js: モーダル背景 (modal-root) をタップした時に閉じるハンドラが登録されていること
+  assert.match(
+    componentsCode,
+    /if\s*\(\s*e\.target\s*===\s*root\s*\)\s*\{\s*close\(\);\s*\}/,
+    "モーダル背景タップで close() が呼ばれる"
+  );
+  assert.match(
+    componentsCode,
+    /root\.removeEventListener\(["']click["'],\s*onRootClick\)/,
+    "close 時に背景タップリスナーが適切にクリーンアップされる"
+  );
+
+  // 3) view-album.js と view-library.js で「閉じる」アクションが定義されていること
+  assert.match(viewAlbumCode, /label:\s*["']閉じる["']/, "view-album に「閉じる」ボタンが定義されている");
+  assert.match(viewLibraryCode, /label:\s*["']閉じる["']/, "view-library に「閉じる」ボタンが定義されている");
+});
+
+
 

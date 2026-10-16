@@ -89,9 +89,17 @@ export function openModal({ title, body, actions = [] }) {
       }
     };
 
+    const onRootClick = (e) => {
+      if (e.target === root) {
+        close();
+      }
+    };
+    root.addEventListener("click", onRootClick);
+
     const close = () => {
       document.removeEventListener("keydown", onKeydown);
       document.removeEventListener("compositionend", onCompositionEnd);
+      root.removeEventListener("click", onRootClick);
       root.hidden = true;
       root.innerHTML = "";
       resolve();
@@ -110,7 +118,7 @@ export function openModal({ title, body, actions = [] }) {
         btn.textContent = a.label;
         btn.addEventListener("click", async () => {
           try {
-            const r = await a.onClick();
+            const r = typeof a.onClick === "function" ? await a.onClick() : true;
             if (r !== false) close();
           } catch (err) {
             toast(String(err && err.message || err), "err");

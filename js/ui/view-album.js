@@ -466,7 +466,7 @@ function openTrackActionsModal(track, root) {
     title: "曲メニュー",
     body: wrap,
     actions: [
-      { label: "閉じる" },
+      { label: "閉じる", onClick: () => {} },
     ],
   });
 

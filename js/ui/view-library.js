@@ -1183,7 +1183,7 @@ function openLibraryTrackActionsModal(track, refs) {
     title: "曲メニュー",
     body: wrap,
     actions: [
-      { label: "閉じる" },
+      { label: "閉じる", onClick: () => {} },
     ],
   });
 
