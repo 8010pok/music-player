@@ -11,9 +11,9 @@
 
 import { extractMetadata, readDurationViaAudio } from "../metadata/index.js";
 import { mimeFromName, formatFromName } from "../metadata/util.js";
-import { putTrack, getTrack, getAllTracks, updateTrack, setTracksOrder, deleteTrack, getStorageEstimate, getBlob, removeTrackFromAllPlaylists } from "../store/library-db.js";
+import { putTrack, getTrack, getAllTracks, updateTrack, setTracksOrder, deleteTrack, getStorageEstimate, getBlob, removeTrackFromAllPlaylists, getAllPlaylists, savePlaylist, addTracksToPlaylist } from "../store/library-db.js";
 import { setQueueAndPlay, stopPlayback, prewarmTrack, prewarmTracks, playNextTrack, addToQueueEnd } from "../player/audio-engine.js";
-import { toast, confirm, openModal, escapeHtml, escapeAttr } from "./components.js";
+import { toast, confirm, openModal, dismissActiveModal, promptForm, escapeHtml, escapeAttr } from "./components.js";
 import { appState } from "../state.js";
 import { go, getLastView, saveLastView } from "../router.js";
 import { getArtworkUrl, releaseArtwork, markArtworkBroken } from "./artwork-cache.js";
@@ -925,11 +925,9 @@ function rowHtml(t, cur) {
       </div>
       <div class="track-actions">
         ${lovedMark}
-        <button class="icon-btn track-action-btn" data-act="play-next" title="次に再生">⏭</button>
-        <button class="icon-btn track-action-btn" data-act="add-queue" title="キューの末尾に追加">＋</button>
-        <button class="icon-btn" data-act="edit" title="曲の情報を編集">✏</button>
-        <button class="icon-btn" data-act="toggle" title="${toggleTitle}">${toggleIcon}</button>
-        <button class="icon-btn" data-act="delete" title="削除">🗑</button>
+        <button class="icon-btn track-more-btn" data-act="more" title="曲メニュー" aria-label="曲メニュー">
+          <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.75"/><circle cx="12" cy="12" r="1.75"/><circle cx="12" cy="19" r="1.75"/></svg>
+        </button>
       </div>
     </li>
   `;
@@ -1010,12 +1008,18 @@ async function onListClick(e, refs) {
   const t = tracksCache.find((x) => x.id === id);
   if (!t) return;
 
+  if (act === "more") {
+    openLibraryTrackActionsModal(t, refs);
+    return;
+  }
   if (act === "play-next") {
     playNextTrack(t);
+    toast("次に再生に追加しました", "info");
     return;
   }
   if (act === "add-queue") {
     addToQueueEnd(t);
+    toast("再生キューに追加しました", "info");
     return;
   }
 
@@ -1027,110 +1031,294 @@ async function onListClick(e, refs) {
   }
 
   if (act === "toggle") {
-    // === iOS タップ反応性 (実機フィードバック対応) ===
-    // 以前は await updateTrack の後に DOM を書き換えていたため、
-    // IndexedDB 書き込み完了まで「タップしたのに何も起きない」ように見える
-    // ケースがあった (ゴミ箱は confirm モーダルがすぐ出るので体感差があった)。
-    // → DOM は同期的に即座に書き換え、DB は後追いで非同期に書く。
-    //   失敗時のみロールバックして toast でユーザに通知する。
-    const prev = (t.enabled !== false);
-    const next = !prev;
-    const row = btn.closest(".track-row");
-    // 1) 楽観更新: DOM とキャッシュを先に書き換える
-    t.enabled = next;
-    if (row) {
-      row.classList.toggle("is-disabled", !next);
+    toggleTrackEnabled(t, refs, btn);
+    return;
+  }
+
+  if (act === "delete") {
+    await deleteTrackWithConfirm(t, refs);
+    return;
+  }
+}
+
+/**
+ * 曲の再生有効/無効トグル処理（直列化キュー＋楽観更新）
+ */
+function toggleTrackEnabled(t, refs, btn = null) {
+  const id = t.id;
+  const prev = (t.enabled !== false);
+  const next = !prev;
+  const row = btn ? btn.closest(".track-row") : refs.list?.querySelector(`.track-row[data-id="${cssEscape(id)}"]`);
+  // 1) 楽観更新: DOM とキャッシュを先に書き換える
+  t.enabled = next;
+  if (row) {
+    row.classList.toggle("is-disabled", !next);
+    if (btn && btn.dataset.act === "toggle") {
       btn.textContent = next ? "🔊" : "🔇";
       btn.title = next ? "一時的に再生無効にする" : "再生を再び有効にする";
     }
-    // 2) 再生中の曲を無効化したら即時停止
-    if (!next && appState.get().currentTrack?.id === id) {
-      stopPlayback();
-      toast("再生中の曲を無効化したため停止しました", "info");
-    }
-    // 3) 「無効も表示」が OFF のときだけ、行を消すために再描画
-    //    それ以外は DOM 直編集のみで十分 (余分な再描画でタップ列が壊れない)
-    if (!next && !showDisabled) {
-      renderList(refs);
-    }
-    // 4) DB 書き込みは非同期 (await しない)。同一曲の連続トグルは id 単位で直列化する。
-    //    library-db の書き込みは一過性 abort 時にリトライ(最大 ~300ms 遅延)するため、直列化
-    //    しないと「1回目のリトライが2回目より後に commit して古い値が確定する順序逆転」で
-    //    DB と楽観更新 UI が乖離しうる。直列化により後発トグルは前の書き込み完了後に commit
-    //    され、最後のトグル値に収束する。
-    const runWrite = () => updateTrack(id, { enabled: next });
-    const prevChain = enabledWriteChains.get(id) || Promise.resolve();
-    // 前段の成否に関わらず次の書き込みを実行する(前段が失敗しても後発トグルは確定させる)。
-    const myChain = prevChain.then(runWrite, runWrite);
-    enabledWriteChains.set(id, myChain);
-    myChain.then(
-      () => { if (enabledWriteChains.get(id) === myChain) enabledWriteChains.delete(id); },
-      (err) => {
-        // 画面遷移後(unmount/別マウント)に失敗した場合は、文脈外のエラートーストや detached
-        //   refs への renderList を避ける。今表示中のライブラリと異なる refs なら、自分の保留
-        //   チェーンだけ片付けて静かに抜ける(書き込みは abort=未コミットで DB は旧値のまま、
-        //   再マウント時の getAllTracks が正となるためロールバック描画は不要)。
-        if (activeRefs !== refs) {
-          if (enabledWriteChains.get(id) === myChain) enabledWriteChains.delete(id);
-          return;
-        }
-        // 自分が最新の書き込みでなければ、後続トグルが状態を確定させるのでロールバックしない
-        // (中間トグルの失敗で誤った「失敗」トーストやちらつきを出さない)。
-        if (enabledWriteChains.get(id) !== myChain) return;
-        enabledWriteChains.delete(id);
-        console.warn("enabled 更新失敗", err);
-        // ロールバック
-        t.enabled = prev;
-        const curRow = refs.list.querySelector(`.track-row[data-id="${cssEscape(id)}"]`);
-        if (curRow) {
-          curRow.classList.toggle("is-disabled", !prev);
-          const tgl = curRow.querySelector('button[data-act="toggle"]');
-          if (tgl) {
-            tgl.textContent = prev ? "🔊" : "🔇";
-            tgl.title = prev ? "一時的に再生無効にする" : "再生を再び有効にする";
-          }
-        } else {
-          // 楽観更新後に再描画(例: 再生中曲の無効化→stopPlayback→currentTrack 購読で
-          // renderList)が走り対象行が DOM から消えている場合は、行を直接戻せない。
-          // ロールバック済みの tracksCache に合わせて一覧全体を描き直す。
-          renderList(refs);
-        }
-        toast("再生有効/無効の切替に失敗しました", "err");
-      }
-    );
-  } else if (act === "delete") {
-    const yes = await confirm(`「${t.title || "(無題)"}」を削除しますか？`, { danger: true, okLabel: "削除" });
-    if (yes) {
-      // 現在再生中の曲を削除する場合は、まず再生を停止する
-      if (appState.get().currentTrack?.id === id) {
-        stopPlayback();
-      }
-      // 削除本体の失敗は握り潰さず通知する(他経路と同じ「意味あるメッセージで通知」方針)。
-      //   失敗時は以降のカスケード除去/キャッシュ更新/成功トーストへ進まず、行は残したままにする。
-      try {
-        await deleteTrack(id);
-      } catch (e) {
-        console.warn("曲削除に失敗", e);
-        toast("削除に失敗しました。もう一度お試しください", "err");
+  }
+  // 2) 再生中の曲を無効化したら即時停止
+  if (!next && appState.get().currentTrack?.id === id) {
+    stopPlayback();
+    toast("再生中の曲を無効化したため停止しました", "info");
+  }
+  // 3) 「無効も表示」が OFF のときだけ、行を消すために再描画
+  if (!next && !showDisabled) {
+    renderList(refs);
+  }
+  // 4) DB 書き込み（直列化チェーン）
+  const runWrite = () => updateTrack(id, { enabled: next });
+  const prevChain = enabledWriteChains.get(id) || Promise.resolve();
+  const myChain = prevChain.then(runWrite, runWrite);
+  enabledWriteChains.set(id, myChain);
+  myChain.then(
+    () => { if (enabledWriteChains.get(id) === myChain) enabledWriteChains.delete(id); },
+    (err) => {
+      if (activeRefs !== refs) {
+        if (enabledWriteChains.get(id) === myChain) enabledWriteChains.delete(id);
         return;
       }
-      // 削除した曲に保留中の有効/無効トグル書き込みが残っていると、その後の遅延失敗で
-      //   「切替に失敗」トーストが削除済み曲について誤表示される。保留チェーンを片付ける
-      //   (in-flight Promise の失敗ハンドラは get(id)!==myChain で早期 return する)。
+      if (enabledWriteChains.get(id) !== myChain) return;
       enabledWriteChains.delete(id);
-      // ★ プレイリストに残る孤児 trackId をカスケード削除する(曲数水増し/DB 肥大の防止)。
-      //   ベストエフォート: 失敗してもトラック削除自体は成功扱いにする。
-      await removeTrackFromAllPlaylists(id).catch((err) => console.warn("プレイリストからの除去失敗", err));
-      releaseArtwork(id);
-      recordLibraryModified();
-      tracksCache = tracksCache.filter((x) => x.id !== id);
+      console.warn("enabled 更新失敗", err);
+      // ロールバック
+      t.enabled = prev;
+      const curRow = refs.list?.querySelector(`.track-row[data-id="${cssEscape(id)}"]`);
+      if (curRow) {
+        curRow.classList.toggle("is-disabled", !prev);
+        const tgl = curRow.querySelector('button[data-act="toggle"]');
+        if (tgl) {
+          tgl.textContent = prev ? "🔊" : "🔇";
+          tgl.title = prev ? "一時的に再生無効にする" : "再生を再び有効にする";
+        }
+      } else {
+        renderList(refs);
+      }
+      toast("再生有効/無効の切替に失敗しました", "err");
+    }
+  );
+}
+
+/**
+ * 曲削除（確認ダイアログ付き）
+ */
+async function deleteTrackWithConfirm(t, refs) {
+  const id = t.id;
+  const yes = await confirm(`「${t.title || "(無題)"}」を削除しますか？`, { danger: true, okLabel: "削除" });
+  if (!yes) return;
+  if (appState.get().currentTrack?.id === id) {
+    stopPlayback();
+  }
+  try {
+    await deleteTrack(id);
+  } catch (e) {
+    console.warn("曲削除に失敗", e);
+    toast("削除に失敗しました。もう一度お試しください", "err");
+    return;
+  }
+  enabledWriteChains.delete(id);
+  await removeTrackFromAllPlaylists(id).catch((err) => console.warn("プレイリストからの除去失敗", err));
+  releaseArtwork(id);
+  recordLibraryModified();
+  tracksCache = tracksCache.filter((x) => x.id !== id);
+  renderList(refs);
+  try { await refreshStorage(refs); } catch (e) { console.warn("削除後のストレージ表示更新に失敗", e); }
+  toast("削除しました", "ok");
+}
+
+/**
+ * ライブラリ曲の 3点リーダーメニュー（横グリッド配置）
+ */
+function openLibraryTrackActionsModal(track, refs) {
+  if (!track) return;
+  const isLoved = !!track.loved;
+  const isEnabled = track.enabled !== false;
+  const artUrl = getArtworkUrl(track) || "./icons/icon-192.png";
+  const artistText = track.artist || track.albumArtist || "(不明アーティスト)";
+
+  const wrap = document.createElement("div");
+  wrap.className = "track-menu-sheet";
+  wrap.innerHTML = `
+    <div class="track-menu-header">
+      <img class="track-menu-header-art" src="${escapeAttr(artUrl)}" alt="" onerror="this.src='./icons/icon-192.png'" />
+      <div class="track-menu-header-info">
+        <div class="track-menu-header-title">${escapeHtml(track.title || "(無題)")}</div>
+        <div class="track-menu-header-sub">${escapeHtml(artistText)}</div>
+      </div>
+    </div>
+    <div class="track-menu-grid">
+      <button type="button" class="track-menu-btn" data-act="play-next">
+        <span class="track-menu-btn-icon">⏭</span>
+        <span class="track-menu-btn-label">次に再生</span>
+      </button>
+      <button type="button" class="track-menu-btn" data-act="add-queue">
+        <span class="track-menu-btn-icon">➕</span>
+        <span class="track-menu-btn-label">キュー末尾</span>
+      </button>
+      <button type="button" class="track-menu-btn" data-act="playlist">
+        <span class="track-menu-btn-icon">📑</span>
+        <span class="track-menu-btn-label">プレイリスト</span>
+      </button>
+      <button type="button" class="track-menu-btn" data-act="edit">
+        <span class="track-menu-btn-icon">✏️</span>
+        <span class="track-menu-btn-label">情報編集</span>
+      </button>
+      <button type="button" class="track-menu-btn" data-act="love">
+        <span class="track-menu-btn-icon">${isLoved ? "💔" : "❤️"}</span>
+        <span class="track-menu-btn-label">${isLoved ? "お気に入り解除" : "お気に入り"}</span>
+      </button>
+      <button type="button" class="track-menu-btn" data-act="toggle">
+        <span class="track-menu-btn-icon">${isEnabled ? "🔇" : "🔊"}</span>
+        <span class="track-menu-btn-label">${isEnabled ? "再生無効化" : "再生有効化"}</span>
+      </button>
+      <button type="button" class="track-menu-btn danger" data-act="delete">
+        <span class="track-menu-btn-icon">🗑️</span>
+        <span class="track-menu-btn-label">削除</span>
+      </button>
+    </div>
+  `;
+
+  openModal({
+    title: "曲メニュー",
+    body: wrap,
+    actions: [
+      { label: "閉じる" },
+    ],
+  });
+
+  wrap.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-act]");
+    if (!btn) return;
+    const act = btn.dataset.act;
+    dismissActiveModal();
+
+    if (act === "play-next") {
+      playNextTrack(track);
+      toast("次に再生に追加しました", "info");
+      return;
+    }
+    if (act === "add-queue") {
+      addToQueueEnd(track);
+      toast("再生キューの末尾に追加しました", "info");
+      return;
+    }
+    if (act === "playlist") {
+      openAddToPlaylistModal(track);
+      return;
+    }
+    if (act === "edit") {
+      await editTrackMetadata(track, () => {
+        renderList(refs);
+      });
+      return;
+    }
+    if (act === "love") {
+      const nextLoved = !track.loved;
+      track.loved = nextLoved;
+      updateTrack(track.id, { loved: nextLoved }).catch((err) => {
+        console.warn("loved update failed", err);
+      });
       renderList(refs);
-      // 削除は完了済み。ストレージ表示更新は副次的なので失敗しても握り潰し、
-      // 削除成功の toast は必ず出す(未処理例外で toast が出ないのを防ぐ)。
-      try { await refreshStorage(refs); } catch (e) { console.warn("削除後のストレージ表示更新に失敗", e); }
-      toast("削除しました", "ok");
+      toast(nextLoved ? "お気に入りに追加しました" : "お気に入りを解除しました", "info");
+      return;
+    }
+    if (act === "toggle") {
+      toggleTrackEnabled(track, refs);
+      const isNowEnabled = track.enabled !== false;
+      toast(isNowEnabled ? "曲を有効にしました" : "曲を一時的に無効にしました", "info");
+      return;
+    }
+    if (act === "delete") {
+      await deleteTrackWithConfirm(track, refs);
+      return;
+    }
+  });
+}
+
+/**
+ * プレイリスト選択・追加モーダル（ライブラリ用）
+ */
+async function openAddToPlaylistModal(track) {
+  const playlists = await getAllPlaylists();
+  const wrap = document.createElement("div");
+  wrap.className = "playlist-picker-modal";
+
+  let listHtml = `
+    <div class="playlist-picker-list">
+      <button type="button" class="playlist-picker-item create-new" id="btn-create-playlist-for-lib-track">
+        <span class="pl-picker-icon">➕</span>
+        <div class="pl-picker-text">
+          <div class="pl-picker-title">新規プレイリストを作成して追加</div>
+        </div>
+      </button>
+  `;
+
+  if (playlists.length === 0) {
+    listHtml += `<div class="empty-hint" style="padding: 16px 10px; font-size: 13px; color: var(--fg-muted); text-align: center;">作成済みのプレイリストはありません</div>`;
+  } else {
+    for (const pl of playlists) {
+      const count = Array.isArray(pl.trackIds) ? pl.trackIds.length : 0;
+      const alreadyIn = Array.isArray(pl.trackIds) && pl.trackIds.includes(track.id);
+      listHtml += `
+        <button type="button" class="playlist-picker-item ${alreadyIn ? "is-added" : ""}" data-pl-id="${escapeAttr(pl.id)}">
+          <span class="pl-picker-icon">📑</span>
+          <div class="pl-picker-text">
+            <div class="pl-picker-title">${escapeHtml(pl.name || "(無題)")}</div>
+            <div class="pl-picker-sub">${count}曲 ${alreadyIn ? "（追加済み）" : ""}</div>
+          </div>
+          ${alreadyIn ? '<span class="pl-picker-check">✓</span>' : ""}
+        </button>
+      `;
     }
   }
+  listHtml += `</div>`;
+  wrap.innerHTML = listHtml;
+
+  openModal({
+    title: `「${track.title || "曲"}」をプレイリストに追加`,
+    body: wrap,
+    actions: [
+      { label: "キャンセル" },
+    ],
+  });
+
+  const createBtn = wrap.querySelector("#btn-create-playlist-for-lib-track");
+  if (createBtn) {
+    createBtn.addEventListener("click", async () => {
+      dismissActiveModal();
+      const res = await promptForm("新規プレイリスト", [
+        { name: "name", label: "プレイリスト名", value: "", placeholder: "例: マイベスト" },
+      ], { okLabel: "作成して追加" });
+      if (res && res.name && res.name.trim()) {
+        const newId = "pl-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6);
+        const newPl = {
+          id: newId,
+          name: res.name.trim(),
+          trackIds: [track.id],
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        await savePlaylist(newPl);
+        toast(`「${newPl.name}」を作成し曲を追加しました`, "ok");
+      }
+    });
+  }
+
+  const items = wrap.querySelectorAll(".playlist-picker-item[data-pl-id]");
+  items.forEach((item) => {
+    item.addEventListener("click", async () => {
+      const plId = item.dataset.plId;
+      dismissActiveModal();
+      try {
+        await addTracksToPlaylist(plId, [track.id]);
+        toast("プレイリストに追加しました", "ok");
+      } catch (err) {
+        console.warn("プレイリスト追加失敗", err);
+        toast("プレイリスト追加に失敗しました", "err");
+      }
+    });
+  });
 }
 
 /* ============ 手動並び替え（Pointer Events 統一）============ */

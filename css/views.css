@@ -4051,3 +4051,186 @@
   font-weight: 600;
 }
 
+/* ===== 3点リーダー曲メニュー（横並びグリッド形式・あふれ防止） ===== */
+.track-menu-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0 10px;
+  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  margin-bottom: 8px;
+}
+
+.track-menu-header-art {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: var(--bg-elev);
+  flex-shrink: 0;
+}
+
+.track-menu-header-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.track-menu-header-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.track-menu-header-sub {
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.track-menu-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 4px 0 2px;
+}
+
+@media (max-width: 360px) {
+  .track-menu-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.track-menu-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 11px 4px;
+  background: var(--bg-elev, #252528);
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  border-radius: 12px;
+  color: var(--fg, #ffffff);
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s, border-color 0.15s;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  min-height: 64px;
+}
+
+.track-menu-btn:hover {
+  background: var(--bg-elev-2, #303034);
+  border-color: var(--accent);
+}
+
+.track-menu-btn:active {
+  transform: scale(0.95);
+  background: var(--bg-elev-2, #303034);
+}
+
+.track-menu-btn.danger {
+  color: var(--danger, #ff453a);
+}
+
+.track-menu-btn.danger:hover {
+  border-color: var(--danger, #ff453a);
+}
+
+.track-menu-btn-icon {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.track-menu-btn-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  line-height: 1.2;
+}
+
+/* ライブラリ曲一覧の 3点リーダーボタン */
+.track-more-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  color: var(--fg-muted);
+  cursor: pointer;
+  opacity: 0.8;
+  transition: background 0.15s, opacity 0.15s, color 0.15s;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.track-more-btn:hover,
+.track-more-btn:active {
+  opacity: 1;
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+:root[data-theme="light"] .track-more-btn:hover,
+:root[data-theme="light"] .track-more-btn:active {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.track-more-btn .ic {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+/* 再生待ちキューの折りたたみハンドル・ヘッダー */
+.player-queue-drawer-header {
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.player-queue-drawer-header:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.queue-drawer-drag-pill {
+  width: 36px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 2px;
+  margin: 6px auto 2px;
+  cursor: pointer;
+}
+
+:root[data-theme="light"] .queue-drawer-drag-pill {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.btn-queue-collapse {
+  background: transparent;
+  border: none;
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.btn-queue-collapse:hover {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+

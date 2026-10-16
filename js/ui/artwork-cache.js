@@ -12,28 +12,33 @@
  */
 
 const idToUrl = new Map();
-const brokenIds = new Set();
+const brokenAttempts = new Map();
 
 /**
  * トラックに対応するアートワーク URL を返す。
  * 無ければ null。
  *
- * ⚠️ 重要: キャッシュのキーは track.id のみで、artworkBlob の内容変化は検知しない。
- *   そのため、同じ id のアートワークを差し替えた場合(例: メタデータ再スキャンで
- *   artworkBlob を更新)は、再描画(getArtworkUrl 再呼び出し)を起こす **前** に
- *   必ず releaseArtwork(id) を呼ぶこと。解放しないと古い URL がキャッシュヒットで
- *   返り続け、新しいアートワークが表示されない(view-library.js rescanMeta 参照)。
- *
- * @param {object} track  { id, artworkBlob? }
+ * @param {object} track  { id, artworkDataUrl?, artworkUrl?, artworkBlob? }
  * @returns {string|null}
  */
 export function getArtworkUrl(track) {
   if (!track || !track.id) return null;
-  if (brokenIds.has(track.id)) return null;
-  // ★ Base64 Data URL があれば最優先（revoke されず iOS MediaSession でも完全安定）
+
+  // 1. Base64 Data URL があれば最優先（revoke されず iOS Safari / PWA でも 100% 安定）
   if (track.artworkDataUrl && typeof track.artworkDataUrl === "string" && track.artworkDataUrl.startsWith("data:")) {
     return track.artworkDataUrl;
   }
+
+  // 2. 外部 URL (Google Drive サムネイル / http / https) があれば返す
+  if (track.artworkUrl && typeof track.artworkUrl === "string" && (track.artworkUrl.startsWith("http://") || track.artworkUrl.startsWith("https://") || track.artworkUrl.startsWith("data:"))) {
+    return track.artworkUrl;
+  }
+
+  // 3. ロード失敗としてマークされている場合は null を返す（壊れた Blob による「？」表示防止）
+  if (brokenAttempts.has(track.id)) {
+    return null;
+  }
+
   if (!track.artworkBlob) return null;
 
   const cached = idToUrl.get(track.id);
@@ -52,12 +57,13 @@ export function getArtworkUrl(track) {
 }
 
 /**
- * 画像ロード失敗時に呼び出し、壊れた URL のキャッシュを破棄して以降の「？」表示を防ぐ。
+ * 画像ロード失敗時に呼び出し、壊れた URL のキャッシュを破棄して再生成・フォールバックを促す。
  * @param {string} id
  */
 export function markArtworkBroken(id) {
   if (!id) return;
-  brokenIds.add(id);
+  const count = (brokenAttempts.get(id) || 0) + 1;
+  brokenAttempts.set(id, count);
   const u = idToUrl.get(id);
   if (u) {
     try { URL.revokeObjectURL(u); } catch {}
@@ -69,7 +75,8 @@ export function markArtworkBroken(id) {
  * 指定 ID のキャッシュ URL を破棄する（トラック削除時やアートワーク差し替え時など）。
  */
 export function releaseArtwork(id) {
-  brokenIds.delete(id);
+  if (!id) return;
+  brokenAttempts.delete(id);
   const u = idToUrl.get(id);
   if (u) {
     try { URL.revokeObjectURL(u); } catch {}
@@ -84,7 +91,7 @@ export function releaseArtwork(id) {
  * する。解放後に再描画されれば getArtworkUrl が遅延再生成するため表示には影響しない。
  */
 export function releaseAllArtwork() {
-  brokenIds.clear();
+  brokenAttempts.clear();
   for (const u of idToUrl.values()) {
     try { URL.revokeObjectURL(u); } catch {}
   }

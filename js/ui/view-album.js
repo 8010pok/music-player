@@ -421,84 +421,100 @@ function formatTime(sec) {
 function openTrackActionsModal(track, root) {
   if (!track) return;
   const isLoved = !!track.loved;
-  const actions = [
-    {
-      label: "⏭ 次に再生",
-      primary: true,
-      onClick: () => {
-        playNextTrack(track);
-      },
-    },
-    {
-      label: "＋ 再生待ちキューの最後に追加",
-      onClick: () => {
-        addToQueueEnd(track);
-      },
-    },
-    {
-      label: "📑 プレイリストに追加",
-      onClick: () => {
-        openAddToPlaylistModal(track);
-      },
-    },
-    {
-      label: "✏️ メタデータ（曲情報）を編集",
-      onClick: () => {
-        editTrackMetadata(track, () => mount(root));
-      },
-    },
-    {
-      label: isLoved ? "💔 お気に入り（Loved）を解除" : "❤️ お気に入り（Loved）に追加",
-      onClick: async () => {
-        const nextLoved = !isLoved;
-        await updateTrack(track.id, { loved: nextLoved });
-        track.loved = nextLoved;
-        toast(nextLoved ? "お気に入りに追加しました" : "お気に入りを解除しました", "ok");
-        mount(root);
-      },
-    },
-    {
-      label: "🗑️ ライブラリから削除",
-      danger: true,
-      onClick: async () => {
-        const yes = await confirm(`「${track.title || "(無題)"}」を削除しますか？\n（曲データは完全に削除されます）`, { danger: true, okLabel: "削除" });
-        if (yes) {
-          if (appState.get().currentTrack?.id === track.id) {
-            stopPlayback();
-          }
-          try {
-            await deleteTrack(track.id);
-          } catch (err) {
-            console.warn("曲削除に失敗", err);
-            toast("削除に失敗しました", "err");
-            return;
-          }
-          await removeTrackFromAllPlaylists(track.id).catch(() => {});
-          releaseArtwork(track.id);
-          album.tracks = album.tracks.filter((x) => x.id !== track.id);
-          if (album.tracks.length === 0) {
-            toast("アルバムの全曲が削除されました", "ok");
-            go("albums");
-          } else {
-            toast("削除しました", "ok");
-            mount(root);
-          }
-        }
-      },
-    },
-  ];
+  const artUrl = getArtworkUrl(track) || (album && album.artworkTrack ? getArtworkUrl(album.artworkTrack) : null) || "./icons/icon-192.png";
+  const artistText = track.artist || (album ? album.albumArtist : "") || "(不明アーティスト)";
 
-  const bodyEl = document.createElement("div");
-  bodyEl.style.fontSize = "13px";
-  bodyEl.style.color = "var(--fg-muted)";
-  bodyEl.style.padding = "4px 0 8px";
-  const artistText = track.artist || (album ? album.albumArtist : "");
-  bodyEl.textContent = artistText ? `アーティスト: ${artistText}` : "";
+  const wrap = document.createElement("div");
+  wrap.className = "track-menu-sheet";
+  wrap.innerHTML = `
+    <div class="track-menu-header">
+      <img class="track-menu-header-art" src="${escapeAttr(artUrl)}" alt="" onerror="this.src='./icons/icon-192.png'" />
+      <div class="track-menu-header-info">
+        <div class="track-menu-header-title">${escapeHtml(track.title || "(無題)")}</div>
+        <div class="track-menu-header-sub">${escapeHtml(artistText)}</div>
+      </div>
+    </div>
+    <div class="track-menu-grid">
+      <button type="button" class="track-menu-btn" data-act="play-next">
+        <span class="track-menu-btn-icon">⏭</span>
+        <span class="track-menu-btn-label">次に再生</span>
+      </button>
+      <button type="button" class="track-menu-btn" data-act="add-queue">
+        <span class="track-menu-btn-icon">➕</span>
+        <span class="track-menu-btn-label">キュー末尾</span>
+      </button>
+      <button type="button" class="track-menu-btn" data-act="playlist">
+        <span class="track-menu-btn-icon">📑</span>
+        <span class="track-menu-btn-label">プレイリスト</span>
+      </button>
+      <button type="button" class="track-menu-btn" data-act="edit">
+        <span class="track-menu-btn-icon">✏️</span>
+        <span class="track-menu-btn-label">情報編集</span>
+      </button>
+      <button type="button" class="track-menu-btn" data-act="love">
+        <span class="track-menu-btn-icon">${isLoved ? "💔" : "❤️"}</span>
+        <span class="track-menu-btn-label">${isLoved ? "お気に入り解除" : "お気に入り"}</span>
+      </button>
+      <button type="button" class="track-menu-btn danger" data-act="delete">
+        <span class="track-menu-btn-icon">🗑️</span>
+        <span class="track-menu-btn-label">削除</span>
+      </button>
+    </div>
+  `;
 
   openModal({
-    title: track.title || "(無題)",
-    body: bodyEl,
-    actions,
+    title: "曲メニュー",
+    body: wrap,
+    actions: [
+      { label: "閉じる" },
+    ],
+  });
+
+  wrap.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-act]");
+    if (!btn) return;
+    const act = btn.dataset.act;
+    dismissActiveModal();
+
+    if (act === "play-next") {
+      playNextTrack(track);
+    } else if (act === "add-queue") {
+      addToQueueEnd(track);
+    } else if (act === "playlist") {
+      openAddToPlaylistModal(track);
+    } else if (act === "edit") {
+      editTrackMetadata(track, () => mount(root));
+    } else if (act === "love") {
+      const nextLoved = !isLoved;
+      await updateTrack(track.id, { loved: nextLoved });
+      track.loved = nextLoved;
+      toast(nextLoved ? "お気に入りに追加しました" : "お気に入りを解除しました", "ok");
+      mount(root);
+    } else if (act === "delete") {
+      const yes = await confirm(`「${track.title || "(無題)"}」を削除しますか？\n（曲データは完全に削除されます）`, { danger: true, okLabel: "削除" });
+      if (yes) {
+        if (appState.get().currentTrack?.id === track.id) {
+          stopPlayback();
+        }
+        try {
+          await deleteTrack(track.id);
+        } catch (err) {
+          console.warn("曲削除に失敗", err);
+          toast("削除に失敗しました", "err");
+          return;
+        }
+        await removeTrackFromAllPlaylists(track.id).catch(() => {});
+        releaseArtwork(track.id);
+        album.tracks = album.tracks.filter((x) => x.id !== track.id);
+        if (album.tracks.length === 0) {
+          toast("アルバムの全曲が削除されました", "ok");
+          go("albums");
+        } else {
+          toast("削除しました", "ok");
+          mount(root);
+        }
+      }
+    }
   });
 }
 

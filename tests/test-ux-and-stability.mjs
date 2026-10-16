@@ -315,9 +315,9 @@ test("15. アルバムページの曲タイトル視認性向上 ＆ 3点リー�
 
   // 2) 3点リーダーから次に再生、キュー末尾追加、プレイリスト追加、メタデータ編集、削除を選べること
   assert.match(viewAlbumCode, /function openTrackActionsModal/, "openTrackActionsModal が実装されている");
-  assert.match(viewAlbumCode, /label:\s*["']⏭ 次に再生["']/, "メニューに「次に再生」が含まれる");
-  assert.match(viewAlbumCode, /label:\s*["']📑 プレイリストに追加["']/, "メニューに「プレイリストに追加」が含まれる");
-  assert.match(viewAlbumCode, /label:\s*["']✏️ メタデータ（曲情報）を編集["']/, "メニューに「メタデータ（曲情報）を編集」が含まれる");
+  assert.match(viewAlbumCode, /data-act="play-next"/, "メニューに「次に再生」が含まれる");
+  assert.match(viewAlbumCode, /data-act="playlist"/, "メニューに「プレイリスト」が含まれる");
+  assert.match(viewAlbumCode, /data-act="edit"/, "メニューに「情報編集」が含まれる");
 
   // 3) プレイリスト追加モーダル (openAddToPlaylistModal) で新規作成＆既存選択ができること
   assert.match(viewAlbumCode, /async function openAddToPlaylistModal/, "openAddToPlaylistModal が実装されている");
@@ -336,4 +336,33 @@ test("16. 再生待ちキュー（Up Next）の小型化・コンパクトスタ
   // 2) アイテムとヘッダーのパディング・フォントがスリム化されていること
   assert.match(viewsCssCode, /\.player-queue-item\s*\{[\s\S]*?padding:\s*5px 8px;/, "player-queue-item がスリム化されている");
 });
+
+test("17. 3点リーダー横グリッド化 ＆ 曲一覧への適用 ＆ キュー折りたたみ ＆ アートワークキャッシュ安定化の検証", () => {
+  const rootDir = path.join(__dirname, "..");
+  const viewsCss = fs.readFileSync(path.join(rootDir, "css/views.css"), "utf-8");
+  const viewLibrary = fs.readFileSync(path.join(rootDir, "js/ui/view-library.js"), "utf-8");
+  const viewAlbum = fs.readFileSync(path.join(rootDir, "js/ui/view-album.js"), "utf-8");
+  const viewPlayer = fs.readFileSync(path.join(rootDir, "js/ui/view-player.js"), "utf-8");
+  const artworkCache = fs.readFileSync(path.join(rootDir, "js/ui/artwork-cache.js"), "utf-8");
+
+  // 1) 3点リーダーメニューが横グリッド形式 (.track-menu-grid) でコンパクトにレイアウトされていること
+  assert.match(viewsCss, /\.track-menu-grid\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3,\s*1fr\);/, "3点リーダーメニューが横3列グリッドで定義されている");
+  assert.match(viewAlbum, /class="track-menu-grid"/, "view-album のメニューが track-menu-grid を使用している");
+  assert.match(viewLibrary, /class="track-menu-grid"/, "view-library のメニューが track-menu-grid を使用している");
+
+  // 2) ライブラリ曲一覧でも 3点リーダーボタン (.track-more-btn) に集約され、直接配置ボタンが撤廃されていること
+  assert.match(viewLibrary, /class="icon-btn track-more-btn" data-act="more"/, "view-library に track-more-btn が配置されている");
+  assert.ok(!viewLibrary.includes('class="icon-btn track-action-btn" data-act="play-next"'), "view-library から直接配置の次に再生ボタンが撤廃されている");
+
+  // 3) 再生待ちキュー (Up Next) に折りたたみドラッグピルと折りたたみボタンが配置されていること
+  assert.match(viewPlayer, /class="queue-drawer-drag-pill"/, "view-player に queue-drawer-drag-pill が配置されている");
+  assert.match(viewPlayer, /id="btn-player-queue-collapse"/, "view-player に btn-player-queue-collapse が配置されている");
+  assert.match(viewPlayer, /queueCollapseBtn\.addEventListener\("click"/, "折りたたみボタンにクリックリスナーが登録されている");
+
+  // 4) アートワークキャッシュで恒久ブラックリストが廃止され、artworkDataUrl / artworkUrl が最優先で返却されること
+  assert.ok(!artworkCache.includes("const brokenIds = new Set()"), "恒久ブラックリスト brokenIds が廃止されている");
+  assert.match(artworkCache, /track\.artworkDataUrl/, "Base64 artworkDataUrl が最優先で返却される");
+  assert.match(artworkCache, /brokenAttempts/, "brokenAttempts による3回一時許容リトライ機構が実装されている");
+});
+
 

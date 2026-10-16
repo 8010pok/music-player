@@ -10,7 +10,7 @@
  */
 
 import { appState } from "../state.js";
-import { getAudioElement, togglePlay, playNext, playPrev, seekTo, setShuffleMode, setRepeatMode, setPlaybackRate, getQueue, jumpToQueueIndex, removeFromQueue, setSleepTimer, getSleepTimerState, resolveTrackArtworkFromQueue } from "../player/audio-engine.js";
+import { getAudioElement, togglePlay, playNext, playPrev, seekTo, setShuffleMode, setRepeatMode, setPlaybackRate, getQueue, jumpToQueueIndex, removeFromQueue, setSleepTimer, getSleepTimerState, resolveTrackArtworkFromQueue, toAbsoluteUrl } from "../player/audio-engine.js";
 import { getPublic, setPublic } from "../store/settings.js";
 import { extractMetadata } from "../metadata/index.js";
 import { initVisualizer, startVisualizer, stopVisualizer, decodePcmForVisualization } from "../player/visualizer.js";
@@ -396,12 +396,18 @@ export async function mount(root) {
   }
   // ジャケットタップで歌詞を表示
   refs.art.addEventListener("click", () => { if (!lyricsVisible) showLyrics(true); });
-  // アートワーク読み込み失敗時は「？」アイコンを出さず安全に隠す
+  // アートワーク読み込み失敗時はアプリアイコンに安全にフォールバック
   refs.art.addEventListener("error", () => {
     const cur = appState.get().currentTrack;
     if (cur && cur.id) markArtworkBroken(cur.id);
-    refs.art.removeAttribute("src");
-    refs.art.style.visibility = "hidden";
+    const fallback = toAbsoluteUrl("icons/icon-512.png");
+    if (refs.art.src !== fallback) {
+      refs.art.src = fallback;
+      refs.art.style.visibility = "visible";
+    } else {
+      refs.art.removeAttribute("src");
+      refs.art.style.visibility = "hidden";
+    }
   });
   refs.art.addEventListener("load", () => {
     refs.art.style.visibility = "visible";
@@ -712,6 +718,21 @@ export async function mount(root) {
   if (refs.queueCloseBtn) {
     refs.queueCloseBtn.addEventListener("click", () => setQueueDrawerVisible(false));
   }
+  if (refs.queueCollapseBtn) {
+    refs.queueCollapseBtn.addEventListener("click", () => setQueueDrawerVisible(false));
+  }
+  if (refs.queueHeader) {
+    refs.queueHeader.addEventListener("click", (e) => {
+      if (e.target.closest("button")) return;
+      setQueueDrawerVisible(false);
+    });
+  }
+  // キューが開いている時、外側タップで自動折りたたみ
+  root.addEventListener("click", (e) => {
+    if (!queueOpen) return;
+    if (e.target.closest("#player-queue-drawer") || e.target.closest("#btn-queue-toggle")) return;
+    setQueueDrawerVisible(false);
+  });
   if (refs.queueList) {
     refs.queueList.addEventListener("click", async (e) => {
       const removeBtn = e.target.closest('button[data-act="remove"]');
@@ -959,11 +980,13 @@ function render() {
 
       <!-- 再生待ちキュー (Up Next) ドロワー -->
       <div class="player-queue-drawer" id="player-queue-drawer" hidden aria-hidden="true">
-        <div class="player-queue-drawer-header">
+        <div class="player-queue-drawer-header" id="player-queue-header">
+          <div class="queue-drawer-drag-pill" title="タップして折りたたむ"></div>
           <div class="player-queue-drawer-title">
             <span>再生待ちキュー</span>
             <span class="player-queue-count" id="player-queue-count">0 曲</span>
           </div>
+          <button type="button" class="btn-queue-collapse" id="btn-player-queue-collapse" title="折りたたむ">▼ 折りたたむ</button>
           <button type="button" class="btn-mini" id="btn-player-queue-close" aria-label="閉じる">✕</button>
         </div>
         <div class="player-queue-list-wrap">
@@ -1004,6 +1027,8 @@ function collectRefs(root) {
     sleepTimerLabel: root.querySelector("#sleep-timer-label"),
     queueToggleBtn: root.querySelector("#btn-queue-toggle"),
     queueDrawer: root.querySelector("#player-queue-drawer"),
+    queueHeader: root.querySelector("#player-queue-header"),
+    queueCollapseBtn: root.querySelector("#btn-player-queue-collapse"),
     queueCloseBtn: root.querySelector("#btn-player-queue-close"),
     queueCount: root.querySelector("#player-queue-count"),
     queueList: root.querySelector("#player-queue-list"),
@@ -1294,9 +1319,10 @@ function updateUI(refs, s) {
   }
 
   // アートワーク URL は ID キャッシュ経由で取得（曲自身 ➔ キュー内の同一アルバム曲 ➔ デフォルトアイコン）
-  const artUrl = getArtworkUrl(t) || resolveTrackArtworkFromQueue(t) || "./icons/icon-512.png";
+  const resolvedArt = getArtworkUrl(t) || resolveTrackArtworkFromQueue(t);
+  const artUrl = resolvedArt ? toAbsoluteUrl(resolvedArt) : toAbsoluteUrl("icons/icon-512.png");
   if (artUrl) {
-    if (refs.art.getAttribute("src") !== artUrl) {
+    if (refs.art.src !== artUrl) {
       refs.art.style.visibility = "visible";
       refs.art.src = artUrl;
     }
