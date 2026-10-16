@@ -168,8 +168,8 @@ export function groupTracksIntoAlbums(tracks) {
     const discs = new Set(album.tracks.map((t) => parseTrackIndex(t.discNo != null ? t.discNo : t?.discNumber, 1)));
     album.discCount = Math.max(1, discs.size);
 
-    // artworkBlob を持つ先頭トラック
-    album.artworkTrack = album.tracks.find((t) => t && t.artworkBlob) || null;
+    // artworkBlob または artworkDataUrl を持つ先頭トラック
+    album.artworkTrack = album.tracks.find((t) => t && (t.artworkBlob || t.artworkDataUrl || t.artworkUrl)) || null;
 
     result.push(album);
   }

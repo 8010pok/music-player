@@ -10,7 +10,7 @@
  */
 
 import { appState } from "../state.js";
-import { getAudioElement, togglePlay, playNext, playPrev, seekTo, setShuffleMode, setRepeatMode, setPlaybackRate, getQueue, jumpToQueueIndex, removeFromQueue, setSleepTimer, getSleepTimerState } from "../player/audio-engine.js";
+import { getAudioElement, togglePlay, playNext, playPrev, seekTo, setShuffleMode, setRepeatMode, setPlaybackRate, getQueue, jumpToQueueIndex, removeFromQueue, setSleepTimer, getSleepTimerState, resolveTrackArtworkFromQueue } from "../player/audio-engine.js";
 import { getPublic, setPublic } from "../store/settings.js";
 import { extractMetadata } from "../metadata/index.js";
 import { initVisualizer, startVisualizer, stopVisualizer, decodePcmForVisualization } from "../player/visualizer.js";
@@ -1264,8 +1264,13 @@ function updateUI(refs, s) {
   } else {
     refs.title.textContent = t.title || "(無題)";
   }
-  const hasArtist = !!(t.artist || t.albumArtist);
-  refs.artist.textContent = t.artist || "(不明)";
+  const isPlaceholderArtist = !t.artist
+    || t.artist === "(不明)"
+    || t.artist === "(不明アーティスト)"
+    || t.artist === "(Google Drive)";
+  const displayArtist = (!isPlaceholderArtist ? t.artist : (t.albumArtist || t.artist || "(不明)"));
+  const hasArtist = !!(displayArtist && displayArtist !== "(不明)" && displayArtist !== "(不明アーティスト)" && displayArtist !== "(Google Drive)");
+  refs.artist.textContent = displayArtist;
   refs.artist.classList.toggle("is-clickable", hasArtist);
   if (hasArtist) {
     refs.artist.setAttribute("title", "タップでアーティスト詳細へ");
@@ -1273,8 +1278,9 @@ function updateUI(refs, s) {
     refs.artist.removeAttribute("title");
   }
 
-  const hasAlbum = !!t.album;
-  refs.album.textContent = t.album || "";
+  const displayAlbum = (t.album && t.album !== "(不明アルバム)") ? t.album : "";
+  const hasAlbum = !!displayAlbum;
+  refs.album.textContent = displayAlbum;
   refs.album.classList.toggle("is-clickable", hasAlbum);
   if (hasAlbum) {
     refs.album.setAttribute("title", "タップでアルバム詳細へ");
@@ -1287,9 +1293,8 @@ function updateUI(refs, s) {
     updateAudioQualityDisplay(refs, t);
   }
 
-  // アートワーク URL は ID キャッシュ経由で取得（URL再生成しないため
-  // 更新ごとの一瞬の画像消えやリーク・読込失敗を避けられる）
-  const artUrl = getArtworkUrl(t) || t.artworkUrl || null;
+  // アートワーク URL は ID キャッシュ経由で取得（曲自身 ➔ キュー内の同一アルバム曲 ➔ デフォルトアイコン）
+  const artUrl = getArtworkUrl(t) || resolveTrackArtworkFromQueue(t) || "./icons/icon-512.png";
   if (artUrl) {
     if (refs.art.getAttribute("src") !== artUrl) {
       refs.art.style.visibility = "visible";

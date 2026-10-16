@@ -378,15 +378,41 @@ export async function mount(root) {
   refs.list.addEventListener("pointerdown", (e) => {
     const row = e.target.closest(".track-row");
     if (row && row.dataset.id) {
-      prewarmTrack(row.dataset.id);
+      prewarmTrack(row.dataset.id, { onlyIfCached: true });
     }
   }, { passive: true });
 
   // 並び替え（手動ソート時のみ動作）
   const cleanupReorder = installReorder(refs);
 
-  // 再生中ハイライト & ローディングスピナー追従
-  unsubState = appState.subscribe(["currentTrack", "loadingTrackId"], () => renderList(refs));
+  // ★ 再生中ハイライト & ローディングスピナー追従:
+  //   renderList(refs) を毎回呼ぶと innerHTML 全体が再生成され、
+  //   タップ途中（pointerdown → pointerup の間）に DOM 行が破棄されて
+  //   click イベントが消失する原因になっていた。
+  //   既存 DOM 行のクラスとインジケータのみを差分更新する軽量関数を使う。
+  unsubState = appState.subscribe(["currentTrack", "isPlaying", "loadingTrackId"], () => {
+    updatePlayingHighlight(refs);
+  });
+
+  // バックグラウンドでのメタデータ・アートワーク補完や同期完了時にキャッシュと表示を更新
+  const onTrackUpdated = (e) => {
+    const updated = e?.detail?.track;
+    if (!updated || !updated.id) return;
+    const idx = tracksCache.findIndex((t) => t.id === updated.id);
+    if (idx >= 0) {
+      tracksCache[idx] = { ...tracksCache[idx], ...updated };
+      cachedAlbumsGroup = null;
+      cachedArtistsGroup = null;
+      dirtyTabs.albums = true;
+      dirtyTabs.artists = true;
+      updateTrackRowInPlace(refs, tracksCache[idx]);
+    }
+  };
+  const onLibrarySynced = () => {
+    if (activeRefs) reloadTracks(activeRefs);
+  };
+  window.addEventListener("music-player:track-updated", onTrackUpdated);
+  window.addEventListener("music-player:library-synced", onLibrarySynced);
 
   // 「現在再生中のプレイリスト」バナー
   const unsubPlaylist = appState.subscribe(
@@ -398,6 +424,8 @@ export async function mount(root) {
     if (unsubState) unsubState();
     unsubState = null;
     if (unsubPlaylist) unsubPlaylist();
+    window.removeEventListener("music-player:track-updated", onTrackUpdated);
+    window.removeEventListener("music-player:library-synced", onLibrarySynced);
     if (cleanupReorder) cleanupReorder();
     if (virtualList) {
       virtualList.destroy();
@@ -407,6 +435,72 @@ export async function mount(root) {
     //   activeRefs を解除する(同 refs で再マウントされた場合は mount が再セットする)。
     activeRefs = null;
   };
+}
+
+/**
+ * 曲一覧の再生中ハイライト・スピナーのみを DOM 再構築なしで軽量更新する
+ */
+function updatePlayingHighlight(refs) {
+  if (!refs || !refs.list) return;
+  const s = appState.get();
+  const curId = s.currentTrack?.id || null;
+  const loadingId = s.loadingTrackId || null;
+  const rows = refs.list.querySelectorAll(".track-row[data-id]");
+  rows.forEach((row) => {
+    const id = row.dataset.id;
+    const isPlaying = !!curId && id === curId;
+    const isLoading = !!loadingId && id === loadingId;
+    row.classList.toggle("is-playing", isPlaying);
+    row.classList.toggle("is-loading", isLoading);
+    const wrap = row.querySelector(".track-art-wrap");
+    if (wrap) {
+      const existingEq = wrap.querySelector(".track-eq-indicator");
+      if (isLoading) {
+        const html = `<div class="track-eq-indicator" aria-label="読み込み中"><span class="track-spinner"></span></div>`;
+        if (existingEq) existingEq.outerHTML = html;
+        else wrap.insertAdjacentHTML("beforeend", html);
+      } else if (isPlaying) {
+        const html = `<div class="track-eq-indicator" aria-label="再生中"><span class="track-eq-bar"></span><span class="track-eq-bar"></span><span class="track-eq-bar"></span></div>`;
+        if (existingEq) existingEq.outerHTML = html;
+        else wrap.insertAdjacentHTML("beforeend", html);
+      } else if (existingEq) {
+        existingEq.remove();
+      }
+    }
+  });
+}
+
+/**
+ * 単一トラックのメタデータ/アートワーク更新を既存 DOM 行へ即時反映する
+ */
+function updateTrackRowInPlace(refs, t) {
+  if (!refs || !refs.list || !t?.id) return;
+  const row = refs.list.querySelector(`.track-row[data-id="${cssEscape(t.id)}"]`);
+  if (!row) return;
+  const subEl = row.querySelector(".track-sub");
+  if (subEl) {
+    const sub = [t.artist || "(不明)", t.album || ""].filter(Boolean).join(" — ");
+    subEl.textContent = sub;
+  }
+  const wrap = row.querySelector(".track-art-wrap");
+  const artUrl = getArtworkUrl(t);
+  if (wrap && artUrl) {
+    const curImg = wrap.querySelector("img.track-art");
+    if (curImg) {
+      if (curImg.getAttribute("src") !== artUrl) curImg.src = artUrl;
+    } else {
+      const placeholder = wrap.querySelector(".track-art");
+      if (placeholder) {
+        const img = document.createElement("img");
+        img.className = "track-art";
+        img.src = artUrl;
+        img.alt = "";
+        img.loading = "lazy";
+        img.decoding = "async";
+        placeholder.replaceWith(img);
+      }
+    }
+  }
 }
 
 /**

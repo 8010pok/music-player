@@ -17,6 +17,7 @@ import { searchTrackMetadata, searchAlbumMetadata, fetchArtworkBlob, fetchAlbumT
 import { retryScrobbleForTrack } from "../lastfm/scrobble.js";
 import { openNormalizeModal } from "./normalize-modal.js";
 import { recordLibraryModified } from "../store/sync-service.js";
+import { blobToDataUrl } from "../metadata/util.js";
 
 /**
  * 1曲分のメタデータ編集モーダルを表示
@@ -29,7 +30,7 @@ export function editTrackMetadata(track, onUpdated) {
 
   return new Promise((resolve) => {
     let pendingArtworkBlob = undefined;
-    const initialArtUrl = track.artworkBlob ? getArtworkUrl(track) : null;
+    const initialArtUrl = getArtworkUrl(track);
     let localPreviewUrl = null;
 
     const body = document.createElement("div");
@@ -409,8 +410,18 @@ export function editTrackMetadata(track, onUpdated) {
 
             if (pendingArtworkBlob !== undefined) {
               patch.artworkBlob = pendingArtworkBlob;
+              if (pendingArtworkBlob instanceof Blob) {
+                try {
+                  patch.artworkDataUrl = await blobToDataUrl(pendingArtworkBlob, 500);
+                } catch {
+                  patch.artworkDataUrl = null;
+                }
+              } else {
+                patch.artworkDataUrl = null;
+              }
             }
 
+            releaseArtwork(track.id);
             await updateTrack(track.id, patch);
             releaseArtwork(track.id);
             recordLibraryModified();
@@ -457,7 +468,7 @@ export function editAlbumMetadata(album, onUpdated) {
 
   return new Promise((resolve) => {
     let pendingArtworkBlob = undefined;
-    const currentArtTrack = album.artworkTrack || album.tracks.find((t) => t.artworkBlob);
+    const currentArtTrack = album.artworkTrack || album.tracks.find((t) => t.artworkBlob || t.artworkDataUrl);
     const initialArtUrl = currentArtTrack ? getArtworkUrl(currentArtTrack) : null;
     let localPreviewUrl = null;
 
@@ -831,6 +842,15 @@ export function editAlbumMetadata(album, onUpdated) {
             if (genre) basePatch.genre = genre;
             if (pendingArtworkBlob !== undefined) {
               basePatch.artworkBlob = pendingArtworkBlob;
+              if (pendingArtworkBlob instanceof Blob) {
+                try {
+                  basePatch.artworkDataUrl = await blobToDataUrl(pendingArtworkBlob, 500);
+                } catch {
+                  basePatch.artworkDataUrl = null;
+                }
+              } else {
+                basePatch.artworkDataUrl = null;
+              }
             }
 
             for (const t of album.tracks) {
@@ -842,6 +862,7 @@ export function editAlbumMetadata(album, onUpdated) {
               else if (trackArtist) individualPatch.artist = trackArtist;
               if (perTrack.memo !== undefined) individualPatch.memo = perTrack.memo;
 
+              releaseArtwork(t.id);
               await updateTrack(t.id, individualPatch);
               releaseArtwork(t.id);
               Object.assign(t, individualPatch);
@@ -854,7 +875,7 @@ export function editAlbumMetadata(album, onUpdated) {
             if (genre) album.genre = genre;
             if (pendingArtworkBlob !== undefined) {
               if (pendingArtworkBlob) {
-                album.artworkTrack = { ...album.tracks[0], artworkBlob: pendingArtworkBlob };
+                album.artworkTrack = { ...album.tracks[0], artworkBlob: pendingArtworkBlob, artworkDataUrl: basePatch.artworkDataUrl || null };
               } else {
                 album.artworkTrack = null;
               }

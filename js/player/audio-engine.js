@@ -21,7 +21,7 @@
  */
 
 import { appState } from "../state.js";
-import { getBlob, hasCachedBlob, recordHistory, updateTrack, getAllTracks } from "../store/library-db.js";
+import { getBlob, getTrack, hasCachedBlob, recordHistory, updateTrack, getAllTracks } from "../store/library-db.js";
 import {
   applyEffectsSetting,
   applyEqGains,
@@ -39,7 +39,7 @@ import { getPublic, setPublic } from "../store/settings.js";
 // 毎回 createObjectURL / revokeObjectURL を繰り返すと、iOS の
 // 背景フェッチ（ロック画面メタデータ反映）と競合し、リピートで同じ曲に
 // 戻ったときに lockscreen のアートワーク画像が空白になる事象を起こす。
-import { getArtworkUrl } from "../ui/artwork-cache.js";
+import { getArtworkUrl, releaseArtwork } from "../ui/artwork-cache.js";
 // 再生エラー時のスキップ通知。components.js は UI レイヤだが、
 // ユーザに「読み込めない曲をスキップした」ことを知らせるために最小依存で使う。
 import { toast } from "../ui/components.js";
@@ -239,7 +239,11 @@ export function initAudioEngine({ onNowPlaying, onScrobble } = {}) {
     el.addEventListener("timeupdate", (e) => { if (e.target === audioEl) onTimeUpdate(e); });
     el.addEventListener("durationchange", (e) => {
       if (e.target === audioEl) {
-        appState.set({ duration: audioEl.duration || 0 });
+        if (state.transitioning || (audioEl.src && audioEl.src.startsWith("data:audio/wav"))) return;
+        const d = audioEl.duration;
+        if (isFinite(d) && d > 0.5) {
+          appState.set({ duration: d });
+        }
       }
     });
     el.addEventListener("error", (e) => {
@@ -258,6 +262,19 @@ export function initAudioEngine({ onNowPlaying, onScrobble } = {}) {
   }
 
   attachElementListeners(audioEl);
+
+  // ★ IndexedDB のトラック更新・端末間同期完了時に、現在曲・キュー・ミニプレイヤー・ロック画面へ即時反映
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("music-player:track-updated", (e) => {
+      const detail = e?.detail;
+      if (detail && detail.track) {
+        applyUpdatedTrackToPlayer(detail.track, detail.patch);
+      }
+    });
+    window.addEventListener("music-player:library-synced", () => {
+      refreshPlayerMetadataFromDb().catch(() => {});
+    });
+  }
 
   state.userVolume = clampVolume(audioEl.volume ?? 1.0);
   applyTrackVolume(audioEl);
@@ -301,6 +318,109 @@ export function initAudioEngine({ onNowPlaying, onScrobble } = {}) {
   // audio.loop は使わない（iOS のロック画面挙動に影響するため）。
   // 単曲リピートは onEnded → advanceFromEnded の JS 制御で実装する。
   audioEl.loop = false;
+}
+
+/**
+ * トラック情報の更新（バックグラウンドメタデータ抽出・編集・同期）を
+ * 再生中キュー・appState.currentTrack・ミニプレイヤー・ロック画面(MediaSession)へ即時反映する
+ * @param {object} updatedTrack
+ * @param {object} [patch]
+ */
+export function applyUpdatedTrackToPlayer(updatedTrack, patch = null) {
+  if (!updatedTrack || !updatedTrack.id) return;
+  const id = updatedTrack.id;
+
+  // キュー内の該当トラックを最新情報に更新
+  for (let i = 0; i < state.queue.length; i++) {
+    if (state.queue[i] && state.queue[i].id === id) {
+      state.queue[i] = { ...state.queue[i], ...updatedTrack };
+    }
+  }
+  if (Array.isArray(state.origQueue)) {
+    for (let i = 0; i < state.origQueue.length; i++) {
+      if (state.origQueue[i] && state.origQueue[i].id === id) {
+        state.origQueue[i] = { ...state.origQueue[i], ...updatedTrack };
+      }
+    }
+  }
+
+  const cur = appState.get().currentTrack;
+  if (!cur || cur.id !== id) return;
+
+  // playCount / lastPlayedAt のみの更新時は UI 再描画やアートワーク破棄を起こさない
+  if (patch && typeof patch === "object") {
+    const keys = Object.keys(patch);
+    if (keys.length > 0 && keys.every((k) => k === "playCount" || k === "lastPlayedAt" || k === "_noEmbeddedArt")) {
+      Object.assign(cur, patch);
+      return;
+    }
+  }
+
+  // アートワークが更新・補完された場合は ID キャッシュを解放して新 URL を生成させる
+  if (
+    !patch ||
+    patch.artworkBlob !== undefined ||
+    patch.artworkDataUrl !== undefined ||
+    (!cur.artworkBlob && updatedTrack.artworkBlob) ||
+    (!cur.artworkDataUrl && updatedTrack.artworkDataUrl)
+  ) {
+    releaseArtwork(id);
+  }
+
+  const mergedCur = { ...cur, ...updatedTrack };
+  const nextDur = (mergedCur.duration && mergedCur.duration > 0)
+    ? mergedCur.duration
+    : (appState.get().duration || 0);
+
+  appState.set({
+    currentTrack: mergedCur,
+    duration: nextDur,
+  });
+  updateMediaSessionMetadata(mergedCur);
+}
+
+/**
+ * IndexedDB から指定トラックの最新レコードを読み出し、プレイヤー状態に反映する（非同期・ノンブロッキング）
+ * @param {string} trackId
+ */
+function hydrateTrackMetadata(trackId) {
+  if (!trackId) return;
+  getTrack(trackId)
+    .then((dbTrack) => {
+      if (dbTrack && dbTrack.id === trackId) {
+        applyUpdatedTrackToPlayer(dbTrack);
+      }
+    })
+    .catch(() => {});
+}
+
+/**
+ * ライブラリ同期完了時などに IndexedDB の全トラック最新メタデータを現在曲とキューに再反映する
+ */
+export async function refreshPlayerMetadataFromDb() {
+  try {
+    const cur = appState.get().currentTrack;
+    if (!cur && state.queue.length === 0) return;
+    const allTracks = await getAllTracks();
+    if (!Array.isArray(allTracks) || allTracks.length === 0) return;
+    const trackMap = new Map(allTracks.map((t) => [t.id, t]));
+
+    for (let i = 0; i < state.queue.length; i++) {
+      const fresh = trackMap.get(state.queue[i]?.id);
+      if (fresh) state.queue[i] = { ...state.queue[i], ...fresh };
+    }
+    if (Array.isArray(state.origQueue)) {
+      for (let i = 0; i < state.origQueue.length; i++) {
+        const fresh = trackMap.get(state.origQueue[i]?.id);
+        if (fresh) state.origQueue[i] = { ...state.origQueue[i], ...fresh };
+      }
+    }
+    if (cur && trackMap.has(cur.id)) {
+      applyUpdatedTrackToPlayer(trackMap.get(cur.id));
+    }
+  } catch (e) {
+    console.warn("[audio-engine] refreshPlayerMetadataFromDb 失敗", e);
+  }
 }
 
 /**
@@ -369,30 +489,58 @@ export function getEffectivePlaybackRate() {
   return Math.max(0.25, Math.min(4, Number(pub.playbackRate) || 1.0));
 }
 
-const SILENT_AUDIO_URI = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
+/**
+ * iOS Safari / WebKit の CoreAudio が確実に有効な音声ストリームとして認識・再生維持できる
+ * 100ms (8000Hz, 8bit Mono, 800サンプル) の無音 PCM WAV Data URI を生成する。
+ * (0サンプルの空WAVヘッダでは iOS で即座に終了・エラーとなり User Gesture 保持に失敗するため)
+ */
+function createSilentWavDataUri() {
+  const numSamples = 800;
+  const buf = new Uint8Array(44 + numSamples);
+  const view = new DataView(buf.buffer);
+  buf.set([0x52, 0x49, 0x46, 0x46], 0); // "RIFF"
+  view.setUint32(4, 36 + numSamples, true);
+  buf.set([0x57, 0x41, 0x56, 0x45, 0x66, 0x6d, 0x74, 0x20], 8); // "WAVEfmt "
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, 8000, true);
+  view.setUint32(28, 8000, true);
+  view.setUint16(32, 1, true);
+  view.setUint16(34, 8, true);
+  buf.set([0x64, 0x61, 0x74, 0x61], 36); // "data"
+  view.setUint32(40, numSamples, true);
+  buf.fill(0x80, 44);
+  let bin = "";
+  for (let i = 0; i < buf.length; i++) {
+    bin += String.fromCharCode(buf[i]);
+  }
+  const b64 = typeof btoa === "function" ? btoa(bin) : Buffer.from(buf).toString("base64");
+  return "data:audio/wav;base64," + b64;
+}
+
+const SILENT_AUDIO_URI = createSilentWavDataUri();
 
 /**
- * ユーザー操作 (click / tap) の同期コールスタック内で audio 要素を起動する。
+ * ユーザー操作 (click / tap) の同期コールスタック内で audio 要素を即座に起動する。
  *
  * モバイルブラウザ (iOS Safari / WebKit / Android Chrome 等) は、ユーザー操作起点で
  * 直ちに play() を呼ばないと、直後の await (IndexedDB や Drive 通信) で User Gesture
- * トークンが失効し、その後の play() が Autoplay 制限でブロックされて一時停止状態のままになる
- * （「一度タップしてから再生ボタンを押さないと再生されない」現象の根本原因）。
- * 同期スタック内で無音オーディオを再生開始しておくことで、非同期ロード完了後に
- * 本体の音源を即座にワンクリックで鳴らすことができる。
+ * トークンが失効し、その後の play() が Autoplay 制限でブロックされて一時停止状態のままになる。
+ * 同期スタック内で 100ms 無音 WAV ループを再生開始しておくことで、非同期ロード完了後に
+ * 本体の音源を即座にワンタップで鳴らすことができる。
  */
 function primeAudioElement() {
   try {
     setupAudioSession();
     if (audioEl) {
+      state.transitioning = true;
       state.userPausedExplicitly = false;
-      if (audioEl.paused) {
-        audioEl.loop = true;
-        audioEl.src = SILENT_AUDIO_URI;
-        const p = audioEl.play();
-        if (p && typeof p.catch === "function") {
-          p.catch(() => {});
-        }
+      audioEl.loop = true;
+      audioEl.src = SILENT_AUDIO_URI;
+      const p = audioEl.play();
+      if (p && typeof p.catch === "function") {
+        p.catch(() => {});
       }
     }
   } catch (e) {
@@ -434,7 +582,7 @@ export async function setQueueAndPlay(tracks, startIndex = 0) {
   }
 
   // 2. まだメモリにない場合: ユーザー操作コンテキスト内で同期プライミングを行い
-  //    ブラウザの User Gesture 失効を防ぎ、ワンクリックで即座に再生させる
+  //    ブラウザの User Gesture 失効を防ぎ、ワンタップで即座に再生させる
   primeAudioElement();
 
   await loadAndPlay(cur);
@@ -477,6 +625,7 @@ export async function playNext() {
   }
   state.queueIndex = next;
   appState.set({ queueIndex: next });
+  primeAudioElement();
   await loadAndPlay(t);
 }
 
@@ -636,6 +785,7 @@ function playPreloadedSync(index, track, url) {
   }
 
   updateMediaSessionMetadata(track);
+  hydrateTrackMetadata(track?.id);
   const playPromise = audioEl.play();
   // --- play() 発火完了。以降は同期でなくてもよい ---
 
@@ -795,7 +945,10 @@ export async function playPrev() {
   state.queueIndex = prev;
   appState.set({ queueIndex: prev });
   const t = state.queue[prev];
-  if (t) await loadAndPlay(t);
+  if (t) {
+    primeAudioElement();
+    await loadAndPlay(t);
+  }
 }
 
 /**
@@ -807,11 +960,13 @@ export async function playPrev() {
 export async function togglePlay() {
   const curTrack = appState.get().currentTrack;
   if (!curTrack) {
+    primeAudioElement();
     await autoStartFirstTrack();
     return;
   }
   // 起動時のセッション復元直後など、src がまだロードされていない場合
   if (!state.currentObjectUrl || !audioEl.src) {
+    primeAudioElement();
     const startSec = appState.get().currentTime || 0;
     await loadAndPlay(curTrack, { startTime: startSec });
     return;
@@ -1179,6 +1334,8 @@ function isSupersededTransition(myToken, ownUrl) {
 }
 
 async function loadAndPlay(track, { startTime = 0 } = {}) {
+  if (!track) return;
+
   // ★ iOS: 再生開始のたびに(ユーザー操作起点で)audioSession.type="playback" を
   //   再宣言する。init 時の一度きり設定だけだと、コールド起動でメディアプレイヤー
   //   認識がリセットされた状態(特にマナーモード ON 時)では、ロック画面の音声が
@@ -1190,10 +1347,31 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
 
   resetSession(track?.id);
 
-  // 通信/ロード待機中の視覚フィードバック（スピナー表示用）
-  appState.set({ loadingTrackId: track?.id || null });
+  // ★ タップした瞬間（同期フレーム 0ms）に世代トークン・遷移フラグ・UI状態・MediaSession を
+  //   即時確定させる。これにより IndexedDB / Google Drive 取得完了を待たずに
+  //   ミニプレイヤー・リストの再生ハイライト・ロック画面メタデータが即座に切り替わる。
+  const myToken = ++state.transitionToken;
+  state.transitioning = true;
+  state.userPausedExplicitly = false;
 
-  // ★ Phase 0: 音源 URL / Blob の取得（transitioning 開始前）
+  appState.set({
+    currentTrack: track,
+    duration: track.duration || 0,
+    currentTime: startTime || 0,
+    isPlaying: true,
+    loadingTrackId: track?.id || null,
+    scrobbleProgress: 0,
+    nowPlayingSent: false,
+    scrobbledForCurrent: false,
+    scrobbleResult: "none",
+    scrobbleReason: null,
+  });
+
+  updateMediaSessionMetadata(track);
+  updateMediaPositionState({ position: startTime || 0, duration: track.duration });
+  hydrateTrackMetadata(track.id);
+
+  // ★ Phase 0: 音源 URL / Blob の取得
   let targetUrl = null;
   let blobErr = null;
 
@@ -1220,10 +1398,18 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
     }
   }
 
+  // 待機中にユーザーが別の曲をタップしていた場合は、古い遷移を破棄して終了
+  if (isSupersededTransition(myToken, targetUrl)) {
+    return;
+  }
+
   // 音源取得完了または失敗のためローディング解除
-  appState.set({ loadingTrackId: null });
+  if (appState.get().loadingTrackId === track.id) {
+    appState.set({ loadingTrackId: null });
+  }
 
   if (!targetUrl) {
+    state.transitioning = false;
     try {
       audioEl.pause();
       audioEl.loop = false;
@@ -1235,101 +1421,104 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
     return;
   }
 
-  // ★ 遷移中フラグを立てて、pause/timeupdate 経由の setPositionState が
-  //   stale 値で iOS を汚染するのを抑止する。
-  const myToken = ++state.transitionToken;
-  state.transitioning = true;
+  const clearTransitioning = () => {
+    if (myToken === state.transitionToken) state.transitioning = false;
+  };
 
   try {
-    // === Phase 1〜2: 旧トラック停止 + URL 差替 (すべて同期処理) ===
-    try { audioEl.pause(); } catch {}
-    if (audioEl.src) {
-      try { audioEl.currentTime = 0; } catch {}
+    // === Phase 1〜2: URL 差替 & 即座に play() ===
+    // ★ 注意: await getBlob の後に audioEl.pause() を呼んではいけない。
+    //   primeAudioElement() が無音 WAV ループで維持している iOS の再生アクティブ状態を
+    //   非同期コンテキストで pause() すると User Gesture 権限が失われ、直後の play() が
+    //   NotAllowedError でブロックされて「2回タップしないと流れない」原因になる。
+    const oldUrl = state.currentObjectUrl;
+    state.currentObjectUrl = targetUrl;
+    audioEl.src = targetUrl;
+    audioEl.loop = false;
+    audioEl.playbackRate = getEffectivePlaybackRate();
+    applyTrackVolume(audioEl, track);
+
+    if (startTime > 0) {
+      try { audioEl.currentTime = startTime; } catch {}
     }
-    if (state.currentObjectUrl) {
-      try { URL.revokeObjectURL(state.currentObjectUrl); } catch {}
-      state.currentObjectUrl = null;
-    }
-    {
-      state.currentObjectUrl = targetUrl;
-      audioEl.src = targetUrl;
-      audioEl.loop = false;
-      audioEl.playbackRate = getEffectivePlaybackRate();
-      applyTrackVolume(audioEl, track);
 
-      if (startTime > 0) {
-        try { audioEl.currentTime = startTime; } catch {}
-      }
+    // getBlob 中にバックグラウンドメタデータ補完が走った可能性があるため最新 track を取得
+    const latestTrack = state.queue[state.queueIndex]?.id === track.id
+      ? state.queue[state.queueIndex]
+      : (appState.get().currentTrack?.id === track.id ? appState.get().currentTrack : track);
 
-      appState.set({
-        currentTrack: track,
-        duration: track.duration || 0,
-        currentTime: startTime || 0,
-        scrobbleProgress: 0,
-        nowPlayingSent: false,
-        scrobbledForCurrent: false,
-        scrobbleResult: "none",
-        scrobbleReason: null,
-      });
+    appState.set({
+      currentTrack: latestTrack,
+      duration: latestTrack.duration || 0,
+      currentTime: startTime || 0,
+      isPlaying: true,
+    });
 
-      // === play() の前に MediaSession を即座に同期設定 ===
-      updateMediaSessionMetadata(track);
-      updateMediaPositionState({ position: startTime || 0, duration: track.duration });
+    // === play() の前に MediaSession を即座に同期設定 ===
+    updateMediaSessionMetadata(latestTrack);
+    updateMediaPositionState({ position: startTime || 0, duration: latestTrack.duration });
 
-      // EQ context はバックグラウンドで resume (play() の開始を待たせない)
-      resumeEqContext().catch(() => {});
+    // EQ context はバックグラウンドで resume (play() の開始を待たせない)
+    resumeEqContext().catch(() => {});
 
-      state.userPausedExplicitly = false;
-      try {
-        const p = audioEl.play();
-        if (p && typeof p.then === "function") {
-          p.then(() => {
-            state.consecutiveSkips = 0;
-            if (startTime > 0) {
-              try { audioEl.currentTime = startTime; } catch {}
-            }
-            if (myToken === state.transitionToken) state.transitioning = false;
-          }).catch(async (err) => {
-            if (myToken === state.transitionToken) state.transitioning = false;
-            console.warn("[audio-engine] play 失敗", err);
-            if (err?.name === "AbortError" && !state.userPausedExplicitly && state.currentTrackId === track.id) {
-              try {
-                await new Promise((r) => setTimeout(r, 60));
-                if (!state.userPausedExplicitly && state.currentTrackId === track.id) {
-                  await audioEl.play();
-                  state.consecutiveSkips = 0;
-                }
-              } catch (_) {}
-            }
-          });
-        } else {
+    state.userPausedExplicitly = false;
+    try {
+      const p = audioEl.play();
+      if (p && typeof p.then === "function") {
+        p.then(() => {
+          clearTransitioning();
           state.consecutiveSkips = 0;
           if (startTime > 0) {
             try { audioEl.currentTime = startTime; } catch {}
           }
-          if (myToken === state.transitionToken) state.transitioning = false;
+        }).catch(async (err) => {
+          clearTransitioning();
+          console.warn("[audio-engine] play 失敗", err);
+          if (err?.name === "AbortError" && !state.userPausedExplicitly && appState.get().currentTrack?.id === track.id) {
+            try {
+              await new Promise((r) => setTimeout(r, 60));
+              if (!state.userPausedExplicitly && appState.get().currentTrack?.id === track.id) {
+                await audioEl.play();
+                state.consecutiveSkips = 0;
+              }
+            } catch (_) {}
+          } else if (err?.name === "NotAllowedError") {
+            appState.set({ isPlaying: false });
+          }
+        });
+      } else {
+        clearTransitioning();
+        state.consecutiveSkips = 0;
+        if (startTime > 0) {
+          try { audioEl.currentTime = startTime; } catch {}
         }
-      } catch (err) {
-        console.warn("[audio-engine] play 失敗", err);
-        appState.set({ isPlaying: false });
-        if (myToken === state.transitionToken) state.transitioning = false;
       }
-
-      // ★ 再生が開始されたら、直ちに次曲のプリロードを開始 (次の ended で即時同期再生)
-      schedulePreload();
-
-      // バックグラウンドで非同期記録 (再生の進行を一切待たせない)
-      updateTrack(track.id, {
-        playCount: (track.playCount || 0) + 1,
-        lastPlayedAt: Date.now(),
-      }).catch(() => {});
+    } catch (err) {
+      clearTransitioning();
+      console.warn("[audio-engine] play 失敗", err);
+      appState.set({ isPlaying: false });
     }
+
+    // 保険: promise が解決しない異常時でも 1.5 秒後に transitioning を解除
+    setTimeout(clearTransitioning, 1500);
+
+    // 旧 URL は再生が新 URL に確実に移ってから遅延 revoke
+    if (oldUrl && oldUrl !== targetUrl) {
+      setTimeout(() => { try { URL.revokeObjectURL(oldUrl); } catch {} }, 2000);
+    }
+
+    // ★ 再生が開始されたら、直ちに次曲のプリロードを開始 (次の ended で即時同期再生)
+    schedulePreload();
+
+    // バックグラウンドで非同期記録 (再生の進行を一切待たせない)
+    updateTrack(track.id, {
+      playCount: (track.playCount || 0) + 1,
+      lastPlayedAt: Date.now(),
+    }).catch(() => {});
   } finally {
-    appState.set({ loadingTrackId: null });
-    // 遷移完了。ただし自分が最新遷移のときだけ transitioning を解除する。
-    // (並行する別の loadAndPlay / playPreloadedSync が後から始まっていたら、
-    //  そちらが解除を担当する。古い処理が新しい遷移のフラグを倒さない。)
-    if (myToken === state.transitionToken) state.transitioning = false;
+    if (appState.get().loadingTrackId === track.id) {
+      appState.set({ loadingTrackId: null });
+    }
   }
 }
 
@@ -1491,6 +1680,7 @@ function flushSessionPlayed() {
 }
 
 function onTimeUpdate() {
+  if (audioEl.src && audioEl.src.startsWith("data:audio/wav")) return;
   flushSessionPlayed();
   const track = appState.get().currentTrack;
   if (!track) return;
@@ -2019,18 +2209,36 @@ function updateMediaPositionState(opts = {}) {
   }
 }
 
+/**
+ * 曲自身にアートワークが無い場合、現在の再生キュー内の同一アルバム曲から
+ * アートワーク URL をフォールバック解決する。
+ */
+export function resolveTrackArtworkFromQueue(track) {
+  if (!track) return null;
+  const direct = getArtworkUrl(track) || track.artworkUrl || null;
+  if (direct) return direct;
+  if (track.album && Array.isArray(state.queue)) {
+    const albLower = track.album.trim().toLowerCase();
+    for (const q of state.queue) {
+      if (q && q.album && q.album.trim().toLowerCase() === albLower) {
+        const fallbackUrl = getArtworkUrl(q) || q.artworkUrl || null;
+        if (fallbackUrl) return fallbackUrl;
+      }
+    }
+  }
+  return null;
+}
+
 function updateMediaSessionMetadata(track) {
-  if (!("mediaSession" in navigator)) return;
+  if (!track || !("mediaSession" in navigator)) return;
 
   // ★ アートワーク URL は ID 単位でキャッシュした安定 URL を使う。
-  //   キューリピートで「1曲目 → 2曲目 → また1曲目」のような遷移をしたとき、
-  //   毎回 createObjectURL/revokeObjectURL を繰り返すと iOS の
-  //   ロック画面側の非同期フェッチと噛み合わずアートワークが空白になる。
-  //   同じ track.id では同じ URL を返すことで、iOS の画像キャッシュも効く。
+  //   曲自身にまだアートワークが無い場合でも、キュー内の同一アルバム曲にあれば即座に借用する。
   const artwork = [];
-  const artUrl = getArtworkUrl(track);
+  const artUrl = resolveTrackArtworkFromQueue(track);
   if (artUrl) {
-    const mime = (track.artworkBlob && track.artworkBlob.type) || "image/jpeg";
+    const mime = (track.artworkBlob && track.artworkBlob.type)
+      || (artUrl.startsWith("data:image/png") ? "image/png" : "image/jpeg");
     artwork.push({ src: artUrl, sizes: "512x512", type: mime });
   }
   // フォールバック：アプリアイコン（artwork 無しの曲でもロック画面が空にならないように）
@@ -2038,10 +2246,17 @@ function updateMediaSessionMetadata(track) {
     artwork.push({ src: "./icons/icon-512.png", sizes: "512x512", type: "image/png" });
     artwork.push({ src: "./icons/icon-192.png", sizes: "192x192", type: "image/png" });
   }
+
+  const isPlaceholderArtist = !track.artist
+    || track.artist === "(不明)"
+    || track.artist === "(不明アーティスト)"
+    || track.artist === "(Google Drive)";
+  const displayArtist = (!isPlaceholderArtist ? track.artist : (track.albumArtist || track.artist || "不明"));
+
   try {
     navigator.mediaSession.metadata = new MediaMetadata({
       title: track.title || "不明",
-      artist: track.artist || "不明",
+      artist: displayArtist,
       album: track.album || "",
       artwork,
     });

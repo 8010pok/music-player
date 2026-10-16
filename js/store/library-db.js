@@ -119,6 +119,83 @@ function withWriteRetry(run) {
   })();
 }
 
+function notifyTrackUpdated(track, patch = null) {
+  if (!track || !track.id) return;
+  try {
+    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function" && typeof CustomEvent === "function") {
+      window.dispatchEvent(new CustomEvent("music-player:track-updated", {
+        detail: { id: track.id, track, patch },
+      }));
+    }
+  } catch (_) {}
+}
+
+/**
+ * 音源 Blob から不足しているメタデータ・アートワーク・再生時間をバックグラウンドで補完し、
+ * 更新があれば updateTrack 経由でミニプレイヤー・フルプレイヤー・ロック画面へ即時反映する。
+ * @param {string} id
+ * @param {Blob} blob
+ * @param {object} [extraPatch]
+ */
+function ensureTrackMetadataInBackground(id, blob, extraPatch = null) {
+  if (!id || !blob) return;
+  (async () => {
+    try {
+      const track = await getTrack(id);
+      if (!track) return;
+      const missingArt = !track.artworkBlob && !track.artworkDataUrl && !track._noEmbeddedArt;
+      const missingDuration = !track.duration || track.duration <= 0;
+      const isPlaceholderArtist = !track.artist || track.artist === "(不明)" || track.artist === "(不明アーティスト)" || track.artist === "(Google Drive)";
+      const isPlaceholderAlbum = !track.album || track.album === "Google Drive";
+      const needsParse = missingDuration || missingArt || !track.userEdited || isPlaceholderArtist || isPlaceholderAlbum;
+
+      const patch = extraPatch ? { ...extraPatch } : {};
+      if (needsParse) {
+        const { extractMetadata, readDurationViaAudio } = await import("../metadata/index.js");
+        const meta = await extractMetadata(blob, track.originalName || track.title || "");
+        let duration = meta.duration;
+        if ((!duration || duration <= 0) && missingDuration && typeof document !== "undefined") {
+          duration = await readDurationViaAudio(blob);
+        }
+        const isNumeric = (s) => typeof s === "string" && /^\d+$/.test(s.trim());
+        const validArtist = meta.artist && meta.artist !== "(不明アーティスト)" && meta.artist !== "(Google Drive)" && !isNumeric(meta.artist);
+        const validAlbum = meta.album && meta.album !== "Google Drive";
+
+        if (!track.userEdited) {
+          if (meta.title && meta.title !== "(無題)") patch.title = meta.title;
+          if (validArtist) patch.artist = meta.artist;
+          if (validAlbum) patch.album = meta.album;
+          if (meta.albumArtist) patch.albumArtist = meta.albumArtist;
+          if (meta.trackNo) patch.trackNo = meta.trackNo;
+          if (meta.discNo) patch.discNo = meta.discNo;
+          if (meta.year) patch.year = meta.year;
+          if (meta.genre) patch.genre = meta.genre;
+        } else {
+          if (isPlaceholderArtist && validArtist) patch.artist = meta.artist;
+          if (isPlaceholderAlbum && validAlbum) patch.album = meta.album;
+        }
+
+        // アートワークは userEdited (他端末からの同期後など) であっても未保持なら音源から補完する
+        if (meta.artworkBlob && !track.artworkBlob) patch.artworkBlob = meta.artworkBlob;
+        if (meta.artworkDataUrl && !track.artworkDataUrl) patch.artworkDataUrl = meta.artworkDataUrl;
+        if (!track.artworkBlob && !track.artworkDataUrl && !meta.artworkBlob && !meta.artworkDataUrl) {
+          patch._noEmbeddedArt = true;
+        }
+
+        if (duration && duration > 0 && (!track.duration || track.duration <= 0)) {
+          patch.duration = duration;
+        }
+      }
+
+      if (Object.keys(patch).length > 0) {
+        await updateTrack(id, patch);
+      }
+    } catch (e) {
+      console.warn("[library-db] メタデータ自動補完スキップ:", e);
+    }
+  })();
+}
+
 /**
  * トラックを追加（重複は upsert）
  * @param {object} track
@@ -133,7 +210,10 @@ export function putTrack(track, blob) {
       tx.objectStore("blobs").put({ id: track.id, blob });
     }
     return new Promise((resolve, reject) => {
-      tx.oncomplete = () => resolve();
+      tx.oncomplete = () => {
+        if (track) notifyTrackUpdated(track, track);
+        resolve();
+      };
       tx.onerror = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
       tx.onabort = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
     });
@@ -166,7 +246,10 @@ export async function getBlob(id) {
       console.warn("[library-db] getBlob リトライも失敗:", retryErr);
     }
   }
-  if (row && row.blob) return row.blob;
+  if (row && row.blob) {
+    ensureTrackMetadataInBackground(id, row.blob);
+    return row.blob;
+  }
 
   // Google Drive 音源でローカル未キャッシュの場合、Google Drive から取得してキャッシュ
   if (typeof id === "string" && id.startsWith("gd-")) {
@@ -196,40 +279,7 @@ export async function getBlob(id) {
         }
 
         // バックグラウンドでメタデータとアートワーク、再生時間を補完（再生開始をブロックしない）
-        (async () => {
-          try {
-            const track = await getTrack(id);
-            if (track && (!track.duration || !track.userEdited)) {
-              const { extractMetadata, readDurationViaAudio } = await import("../metadata/index.js");
-              const meta = await extractMetadata(blob, track.originalName);
-              let duration = meta.duration;
-              if ((!duration || duration <= 0) && typeof document !== "undefined") {
-                duration = await readDurationViaAudio(blob);
-              }
-              const patch = {};
-              const isNumeric = (s) => typeof s === "string" && /^\d+$/.test(s.trim());
-              if (!track.userEdited) {
-                if (meta.title && meta.title !== "(無題)") patch.title = meta.title;
-                if (meta.artist && meta.artist !== "(不明アーティスト)" && meta.artist !== "(Google Drive)" && !isNumeric(meta.artist)) patch.artist = meta.artist;
-                if (meta.album && meta.album !== "Google Drive") patch.album = meta.album;
-                if (meta.albumArtist) patch.albumArtist = meta.albumArtist;
-                if (meta.trackNo) patch.trackNo = meta.trackNo;
-                if (meta.discNo) patch.discNo = meta.discNo;
-                if (meta.year) patch.year = meta.year;
-                if (meta.genre) patch.genre = meta.genre;
-                if (meta.artworkBlob && !track.artworkBlob) patch.artworkBlob = meta.artworkBlob;
-                if (meta.artworkDataUrl && !track.artworkDataUrl) patch.artworkDataUrl = meta.artworkDataUrl;
-              }
-              if (duration && duration > 0) patch.duration = duration;
-              patch.cached = shouldCache;
-              if (Object.keys(patch).length > 0) {
-                await updateTrack(id, patch);
-              }
-            }
-          } catch (e) {
-            console.warn("[library-db] Google Drive メタデータ自動補完スキップ:", e);
-          }
-        })();
+        ensureTrackMetadataInBackground(id, blob, { cached: shouldCache });
 
         return blob;
       }
@@ -297,14 +347,19 @@ export function updateTrack(id, patch) {
     const tx = db.transaction("tracks", "readwrite");
     const store = tx.objectStore("tracks");
     const req = store.get(id);
+    let updated = null;
     req.onsuccess = () => {
       const cur = req.result;
       if (!cur) { resolve(undefined); return; }
       Object.assign(cur, patch);
+      updated = cur;
       store.put(cur);
     };
     req.onerror = () => reject(req.error);
-    tx.oncomplete = () => resolve();
+    tx.oncomplete = () => {
+      if (updated) notifyTrackUpdated(updated, patch);
+      resolve(updated);
+    };
     tx.onerror  = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
     tx.onabort  = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
   })));

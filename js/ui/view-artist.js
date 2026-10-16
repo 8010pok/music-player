@@ -88,7 +88,7 @@ export async function mount(root) {
   refs.trackList.addEventListener("pointerdown", (e) => {
     const row = e.target.closest(".artist-track-item");
     if (row && row.dataset.id) {
-      prewarmTrack(row.dataset.id);
+      prewarmTrack(row.dataset.id, { onlyIfCached: true });
     }
   }, { passive: true });
 
@@ -245,11 +245,11 @@ async function playArtist(shuffle = false) {
     return;
   }
   if (shuffle) {
-    await setShuffleMode(true);
+    setShuffleMode(true);
     const startIdx = Math.floor(Math.random() * playable.length);
     await setQueueAndPlay(playable, startIdx);
   } else {
-    await setShuffleMode(false);
+    setShuffleMode(false);
     await setQueueAndPlay(playable, 0);
   }
 }

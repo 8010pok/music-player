@@ -94,7 +94,7 @@ export async function mount(root) {
   refs.list.addEventListener("pointerdown", (e) => {
     const row = e.target.closest(".track-row");
     if (row && row.dataset.id) {
-      prewarmTrack(row.dataset.id);
+      prewarmTrack(row.dataset.id, { onlyIfCached: true });
     }
   }, { passive: true });
   const cleanupReorder = installReorder(refs);

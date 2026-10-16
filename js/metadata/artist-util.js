@@ -67,7 +67,7 @@ export function groupTracksIntoArtists(tracks) {
 
     // アートワークを持つ先頭トラック（アルバムのアートワーク優先、なければ曲から）
     const albumWithArt = artist.albums.find((a) => a.artworkTrack);
-    artist.artworkTrack = albumWithArt ? albumWithArt.artworkTrack : (artist.tracks.find((t) => t && (t.artworkBlob || t.artworkUrl)) || null);
+    artist.artworkTrack = albumWithArt ? albumWithArt.artworkTrack : (artist.tracks.find((t) => t && (t.artworkBlob || t.artworkDataUrl || t.artworkUrl)) || null);
 
     result.push(artist);
   }

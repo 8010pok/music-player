@@ -7,11 +7,12 @@
  */
 
 import { appState } from "../state.js";
-import { togglePlay, playNext, playPrev } from "../player/audio-engine.js";
+import { togglePlay, playNext, playPrev, resolveTrackArtworkFromQueue } from "../player/audio-engine.js";
 import { go } from "../router.js";
-import { getArtworkUrl, markArtworkBroken } from "./artwork-cache.js";
+import { getArtworkUrl } from "./artwork-cache.js";
 import { escapeHtml } from "./components.js";
 
+const FALLBACK_ART_SRC = "./icons/icon-192.png";
 let initialized = false;
 
 export function initMiniPlayer() {
@@ -30,10 +31,13 @@ export function initMiniPlayer() {
 
   if (artEl) {
     artEl.addEventListener("error", () => {
-      const cur = appState.get().currentTrack;
-      if (cur && cur.id) markArtworkBroken(cur.id);
-      artEl.removeAttribute("src");
-      artEl.style.visibility = "hidden";
+      if (artEl.getAttribute("src") !== FALLBACK_ART_SRC) {
+        artEl.src = FALLBACK_ART_SRC;
+        artEl.style.visibility = "visible";
+      } else {
+        artEl.removeAttribute("src");
+        artEl.style.visibility = "hidden";
+      }
     });
     artEl.addEventListener("load", () => {
       artEl.style.visibility = "visible";
@@ -68,36 +72,44 @@ export function initMiniPlayer() {
     } else {
       titleEl.textContent = track.title || "(無題)";
     }
+
+    const isPlaceholderArtist = !track.artist
+      || track.artist === "(不明)"
+      || track.artist === "(不明アーティスト)"
+      || track.artist === "(Google Drive)";
+    const displayArtist = (!isPlaceholderArtist ? track.artist : (track.albumArtist || track.artist || "(不明)"));
+    const displayAlbum = (track.album && track.album !== "(不明アルバム)") ? track.album : "";
+    const subText = [displayArtist, displayAlbum].filter(Boolean).join(" — ");
+
     const isLoading = !!(s.loadingTrackId && (!track || s.loadingTrackId === track.id));
     playBtn.classList.toggle("is-loading", isLoading);
     if (isLoading) {
-      artistEl.innerHTML = `<span class="track-spinner"></span> 読み込み中...`;
+      artistEl.innerHTML = `<span class="track-spinner"></span> ${escapeHtml(subText)}`;
     } else {
-      artistEl.textContent = track.artist || "(不明)";
+      artistEl.textContent = subText;
     }
     playBtn.classList.toggle("is-playing", !!s.isPlaying && !isLoading);
     playBtn.setAttribute("aria-label", isLoading ? "読み込み中" : s.isPlaying ? "一時停止" : "再生");
 
-    const dur = s.duration || 0;
+    const dur = s.duration || track.duration || 0;
     const cur = s.currentTime || 0;
     if (progressFill) {
       progressFill.style.width = dur > 0 ? `${Math.min(100, (cur / dur) * 100)}%` : "0%";
     }
 
-    // アートワーク（ID キャッシュ経由で URL の再生成を避ける）
-    const artUrl = getArtworkUrl(track) || track.artworkUrl || null;
-    if (artUrl) {
+    // アートワーク（曲自身 ➔ キュー内の同一アルバム曲 ➔ デフォルトアイコンの順で解決）
+    const artUrl = getArtworkUrl(track) || resolveTrackArtworkFromQueue(track) || FALLBACK_ART_SRC;
+    if (artEl) {
       if (artEl.getAttribute("src") !== artUrl) {
         artEl.style.visibility = "visible";
         artEl.src = artUrl;
       }
-    } else {
-      artEl.removeAttribute("src");
-      artEl.style.visibility = "hidden";
     }
   };
 
   appState.subscribe(["currentTrack", "isPlaying", "currentTime", "duration", "loadingTrackId"], updateVisibility);
+  window.addEventListener("music-player:track-updated", updateVisibility);
+  window.addEventListener("music-player:library-synced", updateVisibility);
   // ルート変更および画面復帰時にも追従
   window.addEventListener("hashchange", updateVisibility);
   window.addEventListener("pageshow", updateVisibility);

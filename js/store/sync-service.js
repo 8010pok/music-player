@@ -183,9 +183,14 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
         merged.userEditedAt = Math.max(existing.userEditedAt || 0, incoming.userEditedAt || 0);
       }
 
-      // artworkBlob は既存のものがあれば維持
+      // artworkBlob は既存のものがあれば維持し、artworkDataUrl は送信元にあれば反映
       if (existing.artworkBlob instanceof Blob) {
         merged.artworkBlob = existing.artworkBlob;
+      }
+      if (incoming.artworkDataUrl !== undefined) {
+        merged.artworkDataUrl = incoming.artworkDataUrl;
+      } else if (existing.artworkDataUrl) {
+        merged.artworkDataUrl = existing.artworkDataUrl;
       }
 
       // Google Drive 関連プロパティ
@@ -233,6 +238,14 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
     if (data.settings.customInvidiousUrl) patch.customInvidiousUrl = data.settings.customInvidiousUrl;
     setPublic(patch);
   }
+
+  try {
+    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function" && typeof CustomEvent === "function") {
+      window.dispatchEvent(new CustomEvent("music-player:library-synced", {
+        detail: { updatedCount, addedCount, deletedCount },
+      }));
+    }
+  } catch (_) {}
 
   return {
     tracksCount: data.tracks.length,

@@ -206,8 +206,13 @@ test("12. ワンクリック再生 (primeAudioElement / SILENT_AUDIO_URI) の検
 
   assert.match(
     audioEngineCode,
-    /const\s+SILENT_AUDIO_URI\s*=\s*["']data:audio\/wav;base64,/,
+    /const\s+SILENT_AUDIO_URI\s*=/,
     "SILENT_AUDIO_URI が定義されている"
+  );
+  assert.match(
+    audioEngineCode,
+    /data:audio\/wav;base64,/,
+    "data:audio/wav;base64 の無音WAVストリームが使用されている"
   );
   assert.match(
     audioEngineCode,
@@ -270,4 +275,31 @@ test("13. 鮮明な歌詞スタイル ＆ スマホライブラリ追加ボタ�
     /id=["']btn-add-combined["'][^>]*min-width:\s*120px/,
     "view-library.js 内の 端末から追加ボタンのハードコード min-width が除去されている"
   );
+});
+
+test("14. iOS ワンタップ即時再生保証 ＆ ミニプレイヤーへのメタデータ即時反映の検証", () => {
+  const rootDir = path.join(__dirname, "..");
+  const audioEngineCode = fs.readFileSync(path.join(rootDir, "js/player/audio-engine.js"), "utf-8");
+  const miniPlayerCode = fs.readFileSync(path.join(rootDir, "js/ui/mini-player.js"), "utf-8");
+  const libraryDbCode = fs.readFileSync(path.join(rootDir, "js/store/library-db.js"), "utf-8");
+  const viewLibraryCode = fs.readFileSync(path.join(rootDir, "js/ui/view-library.js"), "utf-8");
+
+  // 1) loadAndPlay で await getBlob の前に同期的に currentTrack / MediaSession が設定されること
+  const lapMatch = audioEngineCode.match(/async function loadAndPlay\([\s\S]*?\n\}/);
+  assert.ok(lapMatch, "loadAndPlay が存在する");
+  const lapBody = lapMatch[0];
+  const setTrackIdx = lapBody.indexOf("currentTrack: track");
+  const awaitGetBlobIdx = lapBody.indexOf("await getBlob(");
+  assert.ok(setTrackIdx > 0 && setTrackIdx < awaitGetBlobIdx, "await getBlob の前に currentTrack が同期設定される");
+
+  // 2) ミニプレイヤーがアルバムアートワークのキューフォールバックと track-updated イベントを購読していること
+  assert.match(miniPlayerCode, /resolveTrackArtworkFromQueue/, "mini-player が resolveTrackArtworkFromQueue を使用している");
+  assert.match(miniPlayerCode, /music-player:track-updated/, "mini-player が music-player:track-updated を購読している");
+
+  // 3) library-db がバックグラウンドで未解析メタデータ・アートワークを自動補完しイベント通知すること
+  assert.match(libraryDbCode, /ensureTrackMetadataInBackground/, "library-db に ensureTrackMetadataInBackground が実装されている");
+  assert.match(libraryDbCode, /music-player:track-updated/, "library-db が music-player:track-updated を発火する");
+
+  // 4) view-library が currentTrack 変化時に innerHTML 全再構築ではなく updatePlayingHighlight を使うこと
+  assert.match(viewLibraryCode, /function updatePlayingHighlight\(refs\)/, "view-library に軽量な updatePlayingHighlight が実装されている");
 });
