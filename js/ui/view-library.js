@@ -13,7 +13,7 @@ import { extractMetadata, readDurationViaAudio } from "../metadata/index.js";
 import { mimeFromName, formatFromName } from "../metadata/util.js";
 import { putTrack, getTrack, getAllTracks, updateTrack, setTracksOrder, deleteTrack, getStorageEstimate, getBlob, removeTrackFromAllPlaylists, getAllPlaylists, savePlaylist, addTracksToPlaylist } from "../store/library-db.js";
 import { setQueueAndPlay, stopPlayback, prewarmTrack, prewarmTracks, playNextTrack, addToQueueEnd } from "../player/audio-engine.js";
-import { toast, confirm, openModal, dismissActiveModal, promptForm, escapeHtml, escapeAttr } from "./components.js";
+import { toast, confirm, openModal, dismissActiveModal, closeActiveModalSync, promptForm, escapeHtml, escapeAttr } from "./components.js";
 import { appState } from "../state.js";
 import { go, getLastView, saveLastView } from "../router.js";
 import { getArtworkUrl, releaseArtwork, markArtworkBroken } from "./artwork-cache.js";
@@ -1192,42 +1192,46 @@ function openLibraryTrackActionsModal(track, refs) {
     ],
   });
 
-  wrap.addEventListener("click", async (e) => {
-    const btn = e.target.closest("button[data-act]");
-    if (!btn) return;
-    const act = btn.dataset.act;
-
-    // モーダルを確実に閉じる（リスナ解除・Promise完了を伴う正規ルート）
-    dismissActiveModal();
+  const closeMenu = () => {
+    closeActiveModalSync();
     const modalRoot = document.getElementById("modal-root");
     if (modalRoot) {
       modalRoot.hidden = true;
       modalRoot.innerHTML = "";
     }
+  };
+
+  wrap.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-act]");
+    if (!btn) return;
+    const act = btn.dataset.act;
 
     if (act === "play-next") {
+      closeMenu();
       playNextTrack(track);
       toast("次に再生に追加しました", "info");
       return;
     }
     if (act === "add-queue") {
+      closeMenu();
       addToQueueEnd(track);
       toast("再生キューの末尾に追加しました", "info");
       return;
     }
     if (act === "playlist") {
-      setTimeout(() => openAddToPlaylistModal(track), 20);
+      // モーダル切り替え（openModal で旧リスナ解放・DOM安全更新）
+      openAddToPlaylistModal(track);
       return;
     }
     if (act === "edit") {
-      setTimeout(() => {
-        editTrackMetadata(track, () => {
-          renderList(refs);
-        });
-      }, 20);
+      // モーダル切り替え（編集モーダルを即座に安全オープン）
+      editTrackMetadata(track, () => {
+        renderList(refs);
+      });
       return;
     }
     if (act === "love") {
+      closeMenu();
       const nextLoved = !track.loved;
       track.loved = nextLoved;
       updateTrack(track.id, { loved: nextLoved }).catch((err) => {
@@ -1238,13 +1242,15 @@ function openLibraryTrackActionsModal(track, refs) {
       return;
     }
     if (act === "toggle") {
+      closeMenu();
       toggleTrackEnabled(track, refs);
       const isNowEnabled = track.enabled !== false;
       toast(isNowEnabled ? "曲を有効にしました" : "曲を一時的に無効にしました", "info");
       return;
     }
     if (act === "delete") {
-      setTimeout(() => deleteTrackWithConfirm(track, refs), 20);
+      closeMenu();
+      deleteTrackWithConfirm(track, refs);
       return;
     }
   });
@@ -1300,7 +1306,6 @@ async function openAddToPlaylistModal(track) {
   const createBtn = wrap.querySelector("#btn-create-playlist-for-lib-track");
   if (createBtn) {
     createBtn.addEventListener("click", async () => {
-      dismissActiveModal();
       const res = await promptForm("新規プレイリスト", [
         { name: "name", label: "プレイリスト名", value: "", placeholder: "例: マイベスト" },
       ], { okLabel: "作成して追加" });
@@ -1323,7 +1328,7 @@ async function openAddToPlaylistModal(track) {
   items.forEach((item) => {
     item.addEventListener("click", async () => {
       const plId = item.dataset.plId;
-      dismissActiveModal();
+      closeActiveModalSync();
       try {
         await addTracksToPlaylist(plId, [track.id]);
         toast("プレイリストに追加しました", "ok");

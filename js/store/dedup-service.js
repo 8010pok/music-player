@@ -86,6 +86,19 @@ export function areTracksDuplicate(trackA, trackB) {
     return true;
   }
 
+  // 動画抽出元と未変換動画の重複判定（例: video__123.mp4 と video__123.mp3、またはベースファイル名一致）
+  if (trackA.originalName && trackB.originalName) {
+    const baseA = trackA.originalName.replace(/\.[^.]+$/, "").toLowerCase();
+    const baseB = trackB.originalName.replace(/\.[^.]+$/, "").toLowerCase();
+    if (baseA && baseA === baseB) {
+      const isVideoA = /^(mp4|mov|webm|avi|mkv)$/i.test(trackA.format || "") || /\.(mp4|mov|webm|avi|mkv)$/i.test(trackA.originalName || "");
+      const isVideoB = /^(mp4|mov|webm|avi|mkv)$/i.test(trackB.format || "") || /\.(mp4|mov|webm|avi|mkv)$/i.test(trackB.originalName || "");
+      if (isVideoA || isVideoB) {
+        return true;
+      }
+    }
+  }
+
   const titleA = normalizeTrackString(trackA.title);
   const titleB = normalizeTrackString(trackB.title);
   if (!titleA || !titleB || titleA !== titleB) return false;
@@ -137,6 +150,16 @@ export function findDuplicateInList(target, list) {
  */
 export function scoreTrackQuality(track) {
   let score = 0;
+
+  // 0. 未変換動画ファイル（mp4, mov, webm など）は音楽トラックとして劣るためスコアを大幅減点
+  const isVideo = /^(mp4|mov|webm|avi|mkv)$/i.test(track.format || "") ||
+                  (track.mime && track.mime.startsWith("video/")) ||
+                  /\.(mp4|mov|webm|avi|mkv)$/i.test(track.originalName || "") ||
+                  /\.(mp4|mov|webm|avi|mkv)$/i.test(track.title || "");
+  if (isVideo) {
+    score -= 150;
+  }
+
   // 1. ローカル音源（IndexedDBに本体Blobがある、オフライン再生可能）
   if (track.source !== "gdrive" && !String(track.id).startsWith("gd-")) {
     score += 100;

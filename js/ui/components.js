@@ -23,6 +23,9 @@ export function toast(msg, kind = "info", ms = 2500) {
   }, ms);
 }
 
+// 現在アクティブなモーダルのインスタンス管理（二重オープン時の自動解放＆安全な連動）
+let currentModalInstance = null;
+
 /**
  * モーダルを開く
  * @param {object} opts
@@ -36,6 +39,12 @@ export function openModal({ title, body, actions = [] }) {
   return new Promise((resolve) => {
     const root = document.getElementById("modal-root");
     if (!root) { resolve(); return; }
+
+    // 既に開いているモーダルがあれば、そのリスナー等を確実に解放し、直前の Promise を解決
+    if (currentModalInstance && typeof currentModalInstance.cleanup === "function") {
+      currentModalInstance.cleanup({ keepVisible: true });
+    }
+
     root.innerHTML = "";
     root.hidden = false;
 
@@ -96,13 +105,29 @@ export function openModal({ title, body, actions = [] }) {
     };
     root.addEventListener("click", onRootClick);
 
-    const close = () => {
+    let isCleanedUp = false;
+    const cleanup = ({ keepVisible = false } = {}) => {
+      if (isCleanedUp) return;
+      isCleanedUp = true;
       document.removeEventListener("keydown", onKeydown);
       document.removeEventListener("compositionend", onCompositionEnd);
       root.removeEventListener("click", onRootClick);
-      root.hidden = true;
-      root.innerHTML = "";
+      if (!keepVisible) {
+        // 次のモーダルが開かれていない場合のみ root を非表示・クリア
+        if (currentModalInstance === instance) {
+          root.hidden = true;
+          root.innerHTML = "";
+          currentModalInstance = null;
+        }
+      }
       resolve();
+    };
+
+    const instance = { modal, cleanup };
+    currentModalInstance = instance;
+
+    const close = () => {
+      cleanup({ keepVisible: false });
     };
 
     if (actions.length === 0) {
@@ -137,6 +162,21 @@ export function openModal({ title, body, actions = [] }) {
 }
 
 /**
+ * 現在開いている共通モーダルを直接・同期的に閉じる（リスナー解除・DOMクリア・Promise解決）
+ */
+export function closeActiveModalSync() {
+  if (currentModalInstance && typeof currentModalInstance.cleanup === "function") {
+    currentModalInstance.cleanup({ keepVisible: false });
+  } else {
+    const root = document.getElementById("modal-root");
+    if (root) {
+      root.hidden = true;
+      root.innerHTML = "";
+    }
+  }
+}
+
+/**
  * 現在開いている共通モーダル(openModal / confirm / promptForm 由来)を「キャンセル」で閉じる。
  *   #modal-root は全画面共有のため、モーダルを開いたまま画面遷移(Android のハードウェア戻る/
  *   ブラウザ戻る/プログラム遷移)すると、半透明 backdrop(全画面 inset:0)が遷移後の画面に残り
@@ -153,8 +193,7 @@ export function dismissActiveModal() {
     firstBtn.click();
   } else {
     // 共通モーダル以外(独自構造のモーダル)が開いている場合のフォールバック: 直接閉じる。
-    root.hidden = true;
-    root.innerHTML = "";
+    closeActiveModalSync();
   }
 }
 

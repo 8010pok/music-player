@@ -12,7 +12,7 @@ import { setQueueAndPlay, setShuffleMode, stopPlayback, prewarmTrack, prewarmTra
 import { appState } from "../state.js";
 import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
 import { go } from "../router.js";
-import { escapeHtml, escapeAttr, toast, confirm, openModal, dismissActiveModal, promptForm } from "./components.js";
+import { escapeHtml, escapeAttr, toast, confirm, openModal, dismissActiveModal, closeActiveModalSync, promptForm } from "./components.js";
 import { editTrackMetadata, editAlbumMetadata } from "./metadata-editor.js";
 
 let album = null;
@@ -470,61 +470,66 @@ function openTrackActionsModal(track, root) {
     ],
   });
 
-  wrap.addEventListener("click", async (e) => {
-    const btn = e.target.closest("button[data-act]");
-    if (!btn) return;
-    const act = btn.dataset.act;
-
-    // モーダルを確実に閉じる（リスナ解除・Promise完了を伴う正規ルート）
-    dismissActiveModal();
+  const closeMenu = () => {
+    closeActiveModalSync();
     const modalRoot = document.getElementById("modal-root");
     if (modalRoot) {
       modalRoot.hidden = true;
       modalRoot.innerHTML = "";
     }
+  };
+
+  wrap.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-act]");
+    if (!btn) return;
+    const act = btn.dataset.act;
 
     if (act === "play-next") {
+      closeMenu();
       playNextTrack(track);
       toast("次に再生に追加しました", "info");
     } else if (act === "add-queue") {
+      closeMenu();
       addToQueueEnd(track);
       toast("再生キューに追加しました", "info");
     } else if (act === "playlist") {
-      setTimeout(() => openAddToPlaylistModal(track), 20);
+      // モーダルを切り替え（openModal で旧リスナ解放・DOM安全更新）
+      openAddToPlaylistModal(track);
     } else if (act === "edit") {
-      setTimeout(() => editTrackMetadata(track, () => mount(root)), 20);
+      // モーダルを切り替え（編集モーダルを即座に安全オープン）
+      editTrackMetadata(track, () => mount(root));
     } else if (act === "love") {
+      closeMenu();
       const nextLoved = !isLoved;
       await updateTrack(track.id, { loved: nextLoved });
       track.loved = nextLoved;
       toast(nextLoved ? "お気に入りに追加しました" : "お気に入りを解除しました", "ok");
       mount(root);
     } else if (act === "delete") {
-      setTimeout(async () => {
-        const yes = await confirm(`「${track.title || "(無題)"}」を削除しますか？\n（曲データは完全に削除されます）`, { danger: true, okLabel: "削除" });
-        if (yes) {
-          if (appState.get().currentTrack?.id === track.id) {
-            stopPlayback();
-          }
-          try {
-            await deleteTrack(track.id);
-          } catch (err) {
-            console.warn("曲削除に失敗", err);
-            toast("削除に失敗しました", "err");
-            return;
-          }
-          await removeTrackFromAllPlaylists(track.id).catch(() => {});
-          releaseArtwork(track.id);
-          album.tracks = album.tracks.filter((x) => x.id !== track.id);
-          if (album.tracks.length === 0) {
-            toast("アルバムの全曲が削除されました", "ok");
-            go("albums");
-          } else {
-            toast("削除しました", "ok");
-            mount(root);
-          }
+      closeMenu();
+      const yes = await confirm(`「${track.title || "(無題)"}」を削除しますか？\n（曲データは完全に削除されます）`, { danger: true, okLabel: "削除" });
+      if (yes) {
+        if (appState.get().currentTrack?.id === track.id) {
+          stopPlayback();
         }
-      }, 20);
+        try {
+          await deleteTrack(track.id);
+        } catch (err) {
+          console.warn("曲削除に失敗", err);
+          toast("削除に失敗しました", "err");
+          return;
+        }
+        await removeTrackFromAllPlaylists(track.id).catch(() => {});
+        releaseArtwork(track.id);
+        album.tracks = album.tracks.filter((x) => x.id !== track.id);
+        if (album.tracks.length === 0) {
+          toast("アルバムの全曲が削除されました", "ok");
+          go("albums");
+        } else {
+          toast("削除しました", "ok");
+          mount(root);
+        }
+      }
     }
   });
 }
@@ -579,7 +584,6 @@ async function openAddToPlaylistModal(track) {
   const createBtn = wrap.querySelector("#btn-create-playlist-for-track");
   if (createBtn) {
     createBtn.addEventListener("click", async () => {
-      dismissActiveModal();
       const res = await promptForm("新規プレイリスト", [
         { name: "name", label: "プレイリスト名", value: "", placeholder: "例: マイベスト" },
       ], { okLabel: "作成して追加" });
@@ -602,7 +606,7 @@ async function openAddToPlaylistModal(track) {
       const plId = btn.dataset.plId;
       const targetPl = playlists.find((p) => p.id === plId);
       if (!targetPl) return;
-      dismissActiveModal();
+      closeActiveModalSync();
       await addTracksToPlaylist(plId, [track.id]);
       toast(`「${targetPl.name}」に追加しました`, "ok");
     });

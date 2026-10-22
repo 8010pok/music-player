@@ -442,6 +442,28 @@ test("20. 曲名の邪魔にならないスマートなメモ表示（track-titl
   assert.match(layoutCss, /\.mini-title\s*\{[^}]*display:\s*flex;[^}]*gap:\s*6px;/s, "mini-title が flex で gap 6px を持つ");
 });
 
+test("21. モーダル連動の同期安全化 ＆ アルバム/ライブラリ曲メタデータ編集ボタンの確実動作 ＆ 動画音源整理の検証", () => {
+  const rootDir = path.join(__dirname, "..");
+  const componentsCode = fs.readFileSync(path.join(rootDir, "js/ui/components.js"), "utf-8");
+  const viewAlbumCode = fs.readFileSync(path.join(rootDir, "js/ui/view-album.js"), "utf-8");
+  const viewLibraryCode = fs.readFileSync(path.join(rootDir, "js/ui/view-library.js"), "utf-8");
+  const dedupCode = fs.readFileSync(path.join(rootDir, "js/store/dedup-service.js"), "utf-8");
+
+  // 1) components.js で currentModalInstance の管理と closeActiveModalSync が実装されていること
+  assert.match(componentsCode, /let currentModalInstance\s*=\s*null;/, "currentModalInstance によるアクティブモーダル管理が存在する");
+  assert.match(componentsCode, /export function closeActiveModalSync\(\)/, "closeActiveModalSync がエクスポートされている");
+  assert.match(componentsCode, /currentModalInstance\s*===\s*instance/, "新モーダルへの差し替え時に旧モーダルの遅延closeによるDOM消去を防ぐガードが存在する");
+
+  // 2) view-album.js と view-library.js で edit アクション時に不要な dismissActiveModal 競合を起こさず直接 editTrackMetadata を呼ぶこと
+  assert.match(viewAlbumCode, /act === "edit"[\s\S]*?editTrackMetadata\(track,/, "view-album の edit ハンドラが安全に editTrackMetadata を呼ぶ");
+  assert.match(viewLibraryCode, /act === "edit"[\s\S]*?editTrackMetadata\(track,/, "view-library の edit ハンドラが安全に editTrackMetadata を呼ぶ");
+
+  // 3) dedup-service.js で動画ファイルのスコア減点（音楽トラック優先）と動画抽出ベース名重複判定が実装されていること
+  assert.match(dedupCode, /score\s*-=\s*150;/, "未変換動画のスコア大幅減点が実装されている");
+  assert.match(dedupCode, /baseA\s*===\s*baseB/, "動画抽出元ファイル名と動画トラックの重複判定が実装されている");
+});
+
+
 
 
 

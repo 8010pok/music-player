@@ -15,7 +15,7 @@ import { getPublic, setPublic } from "../store/settings.js";
 import { extractMetadata } from "../metadata/index.js";
 import { initVisualizer, startVisualizer, stopVisualizer, decodePcmForVisualization } from "../player/visualizer.js";
 import { setLoved, retryScrobbleForTrack } from "../lastfm/scrobble.js";
-import { formatTime, toast, escapeHtml, openModal, dismissActiveModal } from "./components.js";
+import { formatTime, toast, escapeHtml, openModal, dismissActiveModal, closeActiveModalSync } from "./components.js";
 import { getBlob, updateTrack } from "../store/library-db.js";
 import { getArtworkUrl, markArtworkBroken } from "./artwork-cache.js";
 import { editTrackMetadata } from "./metadata-editor.js";
@@ -385,7 +385,7 @@ export async function mount(root) {
             await updateTrack(cur.id, { lyrics: newLyr }).catch(() => {});
             setLyricsCache(cur.title, cur.artist, newLyr);
             toast(`「${c.title} - ${c.artist}」の歌詞を反映しました`, "ok");
-            dismissActiveModal();
+            closeActiveModalSync();
           });
 
           listEl.appendChild(item);
@@ -456,7 +456,6 @@ export async function mount(root) {
             await updateTrack(cur.id, { lyrics: newLyrics }).catch(() => {});
             setLyricsCache(cur.title, cur.artist, newLyrics);
             toast("歌詞を登録・更新しました", "ok");
-            dismissActiveModal();
             return true;
           },
         },
