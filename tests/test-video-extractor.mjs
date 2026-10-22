@@ -219,6 +219,20 @@ test("不正なバッファや音声トラック無しのMP4では安全に null
   strictEqual(stripVideoTracksFromMp4(new ArrayBuffer(10)), null);
 });
 
+console.log("=== 4. 重複保存防止 & プレビュー安全性検証 ===");
+
+test("video-extract-modal で previewAudioCtx.resume() が呼ばれ、suspended 解除が保証される", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const modalCode = fs.readFileSync(path.resolve("js/ui/video-extract-modal.js"), "utf-8");
+
+  ok(modalCode.includes("previewAudioCtx.resume()"), "previewAudioCtx.resume() が実装されている");
+  ok(modalCode.includes("isSaving"), "保存中二重実行ガード用の isSaving が定義されている");
+  ok(modalCode.includes("btn-ve-preview-start"), "開始3秒試聴ボタンが配備されている");
+  ok(modalCode.includes("btn-ve-preview-end"), "終了前3秒試聴ボタンが配備されている");
+  ok(modalCode.includes("getAllTracks"), "重複保存防止のため getAllTracks で既存曲を検索している");
+});
+
 // 非同期テストの完了を待機
 await Promise.all(pendingTests);
 

@@ -15,7 +15,7 @@ import {
   inferMetadataFromFilename,
   encodeVideoAudioTrack,
 } from "../audio/video-audio-extractor.js";
-import { putTrack } from "../store/library-db.js";
+import { putTrack, getAllTracks } from "../store/library-db.js";
 import { getPublic } from "../store/settings.js";
 import { isDriveConnected, uploadFileToDrive } from "../gdrive/drive-service.js";
 
@@ -103,7 +103,10 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
         <div class="ve-card">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
             <div style="font-weight: 700; font-size: 13px;">✂ カット編集 (トリミング)</div>
-            <span class="ve-badge" id="ve-cut-duration-badge">00:00 - 00:00</span>
+            <div style="display: flex; gap: 6px; align-items: center;">
+              <span class="ve-badge accent" id="ve-preview-time-badge" style="display: none;">▶ 00:00</span>
+              <span class="ve-badge" id="ve-cut-duration-badge">00:00 - 00:00</span>
+            </div>
           </div>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
             <div style="background: var(--bg-elev-2); padding: 8px 10px; border-radius: 8px;">
@@ -115,13 +118,21 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
               <input type="number" id="ve-end-time-input" min="0" step="0.5" value="0" class="ve-input" style="width: 100%; height: 32px; box-sizing: border-box;" />
             </div>
           </div>
-          <div style="display: flex; justify-content: space-between; align-items: center;">
+          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
             <div style="font-size: 11px; color: var(--fg-muted);">
               前後の余白や不要なイントロをカット可能
             </div>
-            <button type="button" class="btn" id="btn-ve-preview-toggle" style="font-size: 12px; font-weight: 600; padding: 4px 12px;">
-              ▶ 試聴プレビュー
-            </button>
+            <div style="display: flex; gap: 6px; align-items: center;">
+              <button type="button" class="btn" id="btn-ve-preview-start" style="font-size: 11px; padding: 4px 8px;" title="開始位置から3秒試聴">
+                ⏮ 開始3秒
+              </button>
+              <button type="button" class="btn" id="btn-ve-preview-end" style="font-size: 11px; padding: 4px 8px;" title="終了直前3秒を試聴">
+                ⏭ 終了前3秒
+              </button>
+              <button type="button" class="btn primary" id="btn-ve-preview-toggle" style="font-size: 12px; font-weight: 600; padding: 5px 12px;">
+                ▶ 試聴プレビュー
+              </button>
+            </div>
           </div>
         </div>
 
@@ -171,12 +182,16 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
         </div>
 
         <!-- 保存進行状況プログレスバー -->
-        <div id="ve-progress-wrap" style="display: none; margin-top: 12px;">
-          <div id="ve-progress-status" style="font-size: 12px; font-weight: 600; color: var(--accent); margin-bottom: 4px;">
+        <div id="ve-progress-wrap" style="display: none; margin-top: 12px; background: var(--bg-elev-1); border-radius: 12px; padding: 16px; border: 1px solid var(--border); text-align: center;">
+          <div style="font-size: 26px; margin-bottom: 6px;">⚙️</div>
+          <div id="ve-progress-status" style="font-size: 13px; font-weight: 700; color: var(--accent); margin-bottom: 8px;">
             MP3 に変換中…
           </div>
           <div class="ve-progress-bar-wrap">
             <div class="ve-progress-bar-fill" id="ve-progress-bar"></div>
+          </div>
+          <div style="font-size: 11px; color: var(--fg-muted); margin-top: 8px;">
+            ⚠️ 変換および保存処理中です。完了するまで画面を閉じずにお待ちください
           </div>
         </div>
       </div>
@@ -188,6 +203,11 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
   let previewSourceNode = null;
   let previewAudioCtx = null;
   let isPreviewPlaying = false;
+  let animFrameId = null;
+  let previewStartedAt = 0;
+  let previewOffset = 0;
+  let previewDuration = 0;
+  let isSaving = false;
 
   // モーダルを表示
   const modalClose = openModal({
@@ -197,7 +217,12 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
       {
         label: "キャンセル",
         onClick: () => {
-          stopPreview();
+          if (isSaving) {
+            toast("現在保存・エンコード処理中です。完了までお待ちください", "info");
+            return false;
+          }
+          cleanupAudioContext();
+          return true;
         },
       },
       {
@@ -224,9 +249,12 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
   const artistInput = container.querySelector("#ve-artist-input");
   const albumInput = container.querySelector("#ve-album-input");
   const cutDurationBadge = container.querySelector("#ve-cut-duration-badge");
+  const previewTimeBadge = container.querySelector("#ve-preview-time-badge");
   const startTimeInput = container.querySelector("#ve-start-time-input");
   const endTimeInput = container.querySelector("#ve-end-time-input");
   const previewToggleBtn = container.querySelector("#btn-ve-preview-toggle");
+  const previewStartBtn = container.querySelector("#btn-ve-preview-start");
+  const previewEndBtn = container.querySelector("#btn-ve-preview-end");
   const normSelect = container.querySelector("#ve-norm-select");
   const driveSaveCb = container.querySelector("#ve-drive-save-cb");
   const downloadFileCb = container.querySelector("#ve-download-file-cb");
@@ -252,8 +280,10 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
   function updateCutDisplay() {
     if (!decodedAudioBuffer) return;
     const dur = decodedAudioBuffer.duration;
-    let st = parseFloat(startTimeInput.value) || 0;
-    let et = parseFloat(endTimeInput.value) || dur;
+    let st = parseFloat(startTimeInput.value);
+    if (isNaN(st)) st = 0;
+    let et = parseFloat(endTimeInput.value);
+    if (isNaN(et)) et = dur;
 
     st = Math.max(0, Math.min(st, dur));
     et = Math.max(st, Math.min(et, dur));
@@ -261,53 +291,115 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
     cutDurationBadge.textContent = `${formatTime(st)} - ${formatTime(et)} (${formatTime(et - st)})`;
   }
 
-  function stopPreview() {
-    if (previewSourceNode) {
-      try { previewSourceNode.stop(); } catch (_) {}
-      previewSourceNode = null;
-    }
+  function cleanupAudioContext() {
+    stopPreview();
     if (previewAudioCtx) {
       try { previewAudioCtx.close(); } catch (_) {}
       previewAudioCtx = null;
     }
-    isPreviewPlaying = false;
-    if (previewToggleBtn) previewToggleBtn.textContent = "▶ 試聴プレビュー";
   }
 
-  function togglePreview() {
-    if (!decodedAudioBuffer) return;
-
-    if (isPreviewPlaying) {
-      stopPreview();
-      return;
+  function stopPreview() {
+    if (animFrameId) {
+      cancelAnimationFrame(animFrameId);
+      animFrameId = null;
     }
+    if (previewSourceNode) {
+      try {
+        previewSourceNode.onended = null;
+        previewSourceNode.stop();
+      } catch (_) {}
+      previewSourceNode = null;
+    }
+    isPreviewPlaying = false;
+    if (previewToggleBtn) {
+      previewToggleBtn.textContent = "▶ 試聴プレビュー";
+    }
+    if (previewTimeBadge) {
+      previewTimeBadge.style.display = "none";
+      previewTimeBadge.textContent = "▶ 00:00";
+    }
+  }
+
+  async function startPreviewAt(offset = null, duration = null) {
+    if (!decodedAudioBuffer) return;
+    stopPreview();
 
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return;
-      previewAudioCtx = new AC();
+      if (!AC) {
+        toast("Web Audio API が利用できません", "err");
+        return;
+      }
+      if (!previewAudioCtx || previewAudioCtx.state === "closed") {
+        previewAudioCtx = new AC();
+      }
+      if (previewAudioCtx.state === "suspended") {
+        await previewAudioCtx.resume();
+      }
 
       const dur = decodedAudioBuffer.duration;
-      let st = parseFloat(startTimeInput.value) || 0;
-      let et = parseFloat(endTimeInput.value) || dur;
+      let st = parseFloat(startTimeInput.value);
+      if (isNaN(st)) st = 0;
+      let et = parseFloat(endTimeInput.value);
+      if (isNaN(et)) et = dur;
       st = Math.max(0, Math.min(st, dur));
       et = Math.max(st, Math.min(et, dur));
 
+      const actualOffset = typeof offset === "number" ? Math.max(0, Math.min(offset, dur)) : st;
+      const maxLen = Math.max(0.1, et - actualOffset);
+      const playLength = duration !== null ? Math.min(duration, maxLen) : maxLen;
+
       previewSourceNode = previewAudioCtx.createBufferSource();
       previewSourceNode.buffer = decodedAudioBuffer;
-      previewSourceNode.connect(previewAudioCtx.destination);
+
+      const gainNode = previewAudioCtx.createGain();
+      gainNode.gain.value = 1.0;
+      previewSourceNode.connect(gainNode);
+      gainNode.connect(previewAudioCtx.destination);
+
+      previewStartedAt = previewAudioCtx.currentTime;
+      previewOffset = actualOffset;
+      previewDuration = playLength;
 
       previewSourceNode.onended = () => {
         stopPreview();
       };
 
-      const playLength = Math.max(0.1, et - st);
-      previewSourceNode.start(0, st, playLength);
+      previewSourceNode.start(0, actualOffset, playLength);
       isPreviewPlaying = true;
       if (previewToggleBtn) previewToggleBtn.textContent = "⏹ 停止";
+
+      if (previewTimeBadge) {
+        previewTimeBadge.style.display = "inline-block";
+        previewTimeBadge.textContent = `▶ ${formatTime(actualOffset)}`;
+      }
+
+      const tick = () => {
+        if (!isPreviewPlaying || !previewAudioCtx) return;
+        const elapsed = previewAudioCtx.currentTime - previewStartedAt;
+        const cur = previewOffset + elapsed;
+        if (previewTimeBadge) {
+          previewTimeBadge.textContent = `▶ ${formatTime(cur)} / ${formatTime(previewOffset + previewDuration)}`;
+        }
+        if (elapsed < previewDuration) {
+          animFrameId = requestAnimationFrame(tick);
+        } else {
+          stopPreview();
+        }
+      };
+      animFrameId = requestAnimationFrame(tick);
     } catch (e) {
       console.warn("[video-extract-modal] 試聴エラー:", e);
       stopPreview();
+    }
+  }
+
+  function togglePreview() {
+    if (isPreviewPlaying) {
+      stopPreview();
+    } else {
+      startPreviewAt();
     }
   }
 
@@ -326,34 +418,76 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
     }
   });
 
-  startTimeInput.addEventListener("input", updateCutDisplay);
-  endTimeInput.addEventListener("input", updateCutDisplay);
+  startTimeInput.addEventListener("input", () => {
+    updateCutDisplay();
+    if (isPreviewPlaying) stopPreview();
+  });
+  endTimeInput.addEventListener("input", () => {
+    updateCutDisplay();
+    if (isPreviewPlaying) stopPreview();
+  });
+
   previewToggleBtn.addEventListener("click", togglePreview);
+
+  if (previewStartBtn) {
+    previewStartBtn.addEventListener("click", () => {
+      let st = parseFloat(startTimeInput.value);
+      if (isNaN(st)) st = 0;
+      startPreviewAt(st, 3.0);
+    });
+  }
+
+  if (previewEndBtn) {
+    previewEndBtn.addEventListener("click", () => {
+      const dur = decodedAudioBuffer ? decodedAudioBuffer.duration : 0;
+      let et = parseFloat(endTimeInput.value);
+      if (isNaN(et)) et = dur;
+      const startAt = Math.max(0, et - 3.0);
+      startPreviewAt(startAt, 3.0);
+    });
+  }
 
   // 保存処理
   async function executeSave() {
+    if (isSaving) return false; // 重複連打ガード
+
     if (!decodedAudioBuffer) {
       toast("動画の音声データが準備できていません", "err");
       return false;
     }
 
+    isSaving = true;
     stopPreview();
 
     const title = titleInput.value.trim() || initialTitle || "無題の楽曲";
     const artist = artistInput.value.trim() || initialArtist || "不明なアーティスト";
     const album = albumInput.value.trim() || "動画から抽出";
-    const startTime = parseFloat(startTimeInput.value) || 0;
-    const endTime = parseFloat(endTimeInput.value) || decodedAudioBuffer.duration;
+    const dur = decodedAudioBuffer.duration;
+    let startTime = parseFloat(startTimeInput.value);
+    if (isNaN(startTime)) startTime = 0;
+    let endTime = parseFloat(endTimeInput.value);
+    if (isNaN(endTime)) endTime = dur;
+    startTime = Math.max(0, Math.min(startTime, dur));
+    endTime = Math.max(startTime, Math.min(endTime, dur));
+
     const normMode = normSelect.value;
     const saveToDrive = driveSaveCb && driveSaveCb.checked && !driveSaveCb.disabled;
     const downloadFile = downloadFileCb && downloadFileCb.checked;
 
+    // UIを保存進行状態に切り替え、誤操作・二重送信を防止
     mainWrap.style.display = "none";
     loadingWrap.style.display = "none";
     progressWrap.style.display = "block";
 
+    const modalRoot = document.getElementById("modal-root");
+    const modalButtons = modalRoot ? modalRoot.querySelectorAll(".modal-actions .btn") : [];
+    modalButtons.forEach((b) => {
+      b.disabled = true;
+      b.style.pointerEvents = "none";
+    });
+
     const saveBtn = document.querySelector("#btn-ve-save");
-    if (saveBtn) saveBtn.disabled = true;
+    if (saveBtn) saveBtn.textContent = "保存処理中…";
 
     try {
       progressStatus.textContent = "MP3 320kbps に高品質エンコード中…";
@@ -384,9 +518,16 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
       progressBar.style.width = "85%";
       progressStatus.textContent = "ライブラリに保存中…";
 
-      // 2. トラックメタデータの構築
-      const trackId = `track-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      // 2. 既存トラックの重複チェック（同名・同アーティストがあればIDを再利用して上書き）
+      const allTracks = await getAllTracks().catch(() => []);
+      const norm = (s) => (s || "").trim().toLowerCase();
+      const existing = allTracks.find((t) =>
+        norm(t.title) === norm(title) && norm(t.artist) === norm(artist)
+      );
+
+      const trackId = existing ? existing.id : `track-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const newTrack = {
+        ...(existing || {}),
         id: trackId,
         title,
         artist,
@@ -395,10 +536,11 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
         format: "mp3",
         mime: "audio/mpeg",
         fileSize: encResult.mp3Blob.size,
-        addedAt: Date.now(),
+        addedAt: existing ? (existing.addedAt || Date.now()) : Date.now(),
+        updatedAt: Date.now(),
         source: "video-extract",
         cached: true,
-        artworkBlob: currentArtworkBlob || null,
+        artworkBlob: currentArtworkBlob || (existing && existing.artworkBlob) || null,
         normalized: normMode !== "none",
         normalizedType: normMode !== "none" ? "reencoded" : undefined,
         normalizedGainDb: 0,
@@ -448,6 +590,9 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
       progressBar.style.width = "100%";
       toast(`✅ 「${title}」の音声を抽出してライブラリに追加しました！`, "ok", 4000);
 
+      cleanupAudioContext();
+      isSaving = false;
+
       if (typeof onSaved === "function") {
         onSaved(newTrack);
       }
@@ -456,9 +601,17 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
     } catch (err) {
       console.error("[video-extract-modal] 保存エラー:", err);
       toast(`保存に失敗しました: ${err.message}`, "err");
+      isSaving = false;
       progressWrap.style.display = "none";
       mainWrap.style.display = "block";
-      if (saveBtn) saveBtn.disabled = false;
+      modalButtons.forEach((b) => {
+        b.disabled = false;
+        b.style.pointerEvents = "auto";
+      });
+      if (saveBtn) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "💾 ライブラリに追加";
+      }
       return false;
     }
   }
