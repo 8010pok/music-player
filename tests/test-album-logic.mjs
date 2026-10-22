@@ -7,6 +7,7 @@
 import {
   normalizeAlbumText,
   parseTrackIndex,
+  isInvalidAlbumValue,
   getAlbumArtist,
   getAlbumTitle,
   getAlbumKey,
@@ -96,6 +97,22 @@ describe("getAlbumArtist & getAlbumTitle", () => {
   assert(
     getAlbumTitle({}) === "不明なアルバム",
     "album 未定義なら「不明なアルバム」"
+  );
+  assert(
+    getAlbumTitle({ album: true }) === "不明なアルバム",
+    "album が boolean true なら「不明なアルバム」としてサニタイズ"
+  );
+  assert(
+    getAlbumTitle({ album: "true" }) === "不明なアルバム",
+    "album が文字列 'true' なら「不明なアルバム」としてサニタイズ"
+  );
+  assert(
+    getAlbumArtist({ albumArtist: true, artist: "YOASOBI" }) === "YOASOBI",
+    "albumArtist が boolean true でも無視して artist にフォールバック"
+  );
+  assert(
+    isInvalidAlbumValue(true) === true && isInvalidAlbumValue("true") === true && isInvalidAlbumValue("THE BOOK") === false,
+    "isInvalidAlbumValue が boolean / 'true' を正しく弾く"
   );
 });
 

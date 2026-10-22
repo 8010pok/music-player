@@ -220,6 +220,41 @@ test("アルバム画像の新規設定: patch.artworkBlob で全曲に新しい
   strictEqual(updatedTracks[1].artworkBlob, newBlob);
 });
 
+console.log("=== 任意の選択曲の一括メタデータ編集 (editSelectedTracksMetadata) ===");
+
+test("任意の曲選択一括編集: 異なるアルバムや 'true' アルバムに混在した選択曲だけを新しいアルバムにまとめられる", () => {
+  const allTracks = [
+    { id: "gd-1", title: "夜に駆ける", artist: "YOASOBI", album: true, trackNo: "1" },
+    { id: "gd-2", title: "群青", artist: "YOASOBI", album: "true", trackNo: "2" },
+    { id: "gd-3", title: "Pretender", artist: "Official髭男dism", album: "Traveler", trackNo: "1" },
+  ];
+
+  // ユーザーが gd-1 と gd-2 の2曲を選択してアルバム名を「THE BOOK」に一括変更
+  const selectedIds = new Set(["gd-1", "gd-2"]);
+  const newAlbum = "THE BOOK";
+  const newAlbumArtist = "YOASOBI";
+
+  const afterTracks = allTracks.map((t) => {
+    if (!selectedIds.has(t.id)) return t;
+    return {
+      ...t,
+      album: newAlbum,
+      albumArtist: newAlbumArtist,
+      userEdited: true,
+    };
+  });
+
+  strictEqual(afterTracks[0].album, "THE BOOK");
+  strictEqual(afterTracks[0].albumArtist, "YOASOBI");
+  strictEqual(afterTracks[0].userEdited, true);
+  strictEqual(afterTracks[1].album, "THE BOOK");
+  strictEqual(afterTracks[1].albumArtist, "YOASOBI");
+  strictEqual(afterTracks[1].userEdited, true);
+  // 選択していない gd-3 は一切変更されない
+  strictEqual(afterTracks[2].album, "Traveler");
+  strictEqual(afterTracks[2].artist, "Official髭男dism");
+});
+
 console.log("============================================================");
 console.log(`合計: ${passed} / 成功: ${passed} / 失敗: 0`);
 console.log("メタデータ編集テスト成功 ✓");

@@ -35,6 +35,24 @@ export function parseTrackIndex(value, fallback = 0) {
 }
 
 /**
+ * 不正または無意味なアルバム/アーティスト文字列（boolean true/false の文字列化等）かどうかを判定
+ * @param {unknown} val
+ * @returns {boolean}
+ */
+export function isInvalidAlbumValue(val) {
+  if (val == null || typeof val === "boolean") return true;
+  const s = String(val).trim();
+  if (!s) return true;
+  const lower = s.toLowerCase();
+  return (
+    lower === "true" ||
+    lower === "false" ||
+    lower === "null" ||
+    lower === "undefined"
+  );
+}
+
+/**
  * トラックからアルバムアーティスト名を取得する（表示用）
  * - albumArtist || artist || "不明なアーティスト"
  * - タグの元の表記（大文字小文字など）を維持
@@ -43,9 +61,9 @@ export function parseTrackIndex(value, fallback = 0) {
  */
 export function getAlbumArtist(track) {
   if (!track) return "不明なアーティスト";
-  const aa = String(track.albumArtist || "").trim();
+  const aa = !isInvalidAlbumValue(track.albumArtist) ? String(track.albumArtist || "").trim() : "";
   if (aa) return aa;
-  const a = String(track.artist || "").trim();
+  const a = !isInvalidAlbumValue(track.artist) ? String(track.artist || "").trim() : "";
   if (a) return a;
   return "不明なアーティスト";
 }
@@ -58,7 +76,7 @@ export function getAlbumArtist(track) {
  * @returns {string}
  */
 export function getAlbumTitle(track) {
-  if (!track) return "不明なアルバム";
+  if (!track || isInvalidAlbumValue(track.album)) return "不明なアルバム";
   const alb = String(track.album || "").trim();
   return alb || "不明なアルバム";
 }

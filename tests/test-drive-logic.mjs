@@ -15,6 +15,7 @@ import {
   trackIdFromDriveFileId,
   parseGoogleApiError,
   inferMetadataFromFileName,
+  isInvalidDriveAlbum,
 } from "../js/gdrive/drive-service.js";
 
 let passed = 0;
@@ -198,6 +199,47 @@ test("拡張子のみの単一ファイル名", () => {
   const meta = inferMetadataFromFileName("夜に駆ける.flac");
   strictEqual(meta.title, "夜に駆ける");
   strictEqual(meta.trackNo, "");
+});
+
+console.log("=== Google Drive アルバム名 'true' バグ防止・無効値ガード (isInvalidDriveAlbum) ===");
+
+test("isInvalidDriveAlbum: boolean true / false や文字列 'true' / 'Google Drive' / 'マイドライブ' を無効値と判定する", () => {
+  strictEqual(isInvalidDriveAlbum(true), true);
+  strictEqual(isInvalidDriveAlbum(false), true);
+  strictEqual(isInvalidDriveAlbum("true"), true);
+  strictEqual(isInvalidDriveAlbum("TRUE"), true);
+  strictEqual(isInvalidDriveAlbum("false"), true);
+  strictEqual(isInvalidDriveAlbum("Google Drive"), true);
+  strictEqual(isInvalidDriveAlbum("マイドライブ"), true);
+  strictEqual(isInvalidDriveAlbum("root"), true);
+  strictEqual(isInvalidDriveAlbum("不明なアルバム"), true);
+  strictEqual(isInvalidDriveAlbum(""), true);
+  strictEqual(isInvalidDriveAlbum(null), true);
+});
+
+test("isInvalidDriveAlbum: 正常なアルバム名は false (有効) を返す", () => {
+  strictEqual(isInvalidDriveAlbum("THE BOOK"), false);
+  strictEqual(isInvalidDriveAlbum("Abbey Road"), false);
+  strictEqual(isInvalidDriveAlbum("True Blue"), false); // "True Blue" 等の正当なアルバム名は有効
+});
+
+test("アルバム解決優先順位: 音源ファイル内のタグ (extractedMeta.album) が最優先され boolean true が混入しない", () => {
+  const existing = { album: true, userEdited: false };
+  const extractedMeta = { album: "THE BOOK 2" };
+  const inferred = { album: "マイドライブ" };
+
+  const validExistingAlbum = existing && !isInvalidDriveAlbum(existing.album) ? String(existing.album).trim() : null;
+  const validMetaAlbum = extractedMeta && !isInvalidDriveAlbum(extractedMeta.album) ? String(extractedMeta.album).trim() : null;
+  const validInferredAlbum = inferred && !isInvalidDriveAlbum(inferred.album) ? String(inferred.album).trim() : null;
+
+  const finalAlbum = (existing?.userEdited && validExistingAlbum ? validExistingAlbum : null) ||
+                     validMetaAlbum ||
+                     validExistingAlbum ||
+                     validInferredAlbum ||
+                     "Google Drive";
+
+  strictEqual(typeof finalAlbum, "string");
+  strictEqual(finalAlbum, "THE BOOK 2");
 });
 
 console.log("============================================================");

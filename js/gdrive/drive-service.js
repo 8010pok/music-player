@@ -601,6 +601,31 @@ export async function fetchDriveAudioHeader(fileId, maxBytes = 1572864) {
 }
 
 /**
+ * Google Drive のアルバム名として無効（プレースホルダーまたは boolean 変換ゴミ）か判定
+ * @param {unknown} val
+ * @returns {boolean}
+ */
+export function isInvalidDriveAlbum(val) {
+  if (!val || typeof val !== "string") return true;
+  const s = val.trim();
+  if (!s) return true;
+  const lower = s.toLowerCase();
+  return (
+    lower === "true" ||
+    lower === "false" ||
+    lower === "null" ||
+    lower === "undefined" ||
+    lower === "google drive" ||
+    lower === "gdrive" ||
+    lower === "root" ||
+    lower === "music-player" ||
+    s === "マイドライブ" ||
+    s === "不明なアルバム" ||
+    s === "不明アルバム"
+  );
+}
+
+/**
  * 音源ファイル名および配置フォルダ名からメタデータを推測
  * 例:
  *  "01. YOASOBI - 夜に駆ける.flac" -> trackNo: "1", artist: "YOASOBI", title: "夜に駆ける"
@@ -616,7 +641,7 @@ export function inferMetadataFromFileName(filename, folderName = "") {
   let trackNo = "";
   let artist = "";
   let title = base;
-  const album = folderName && folderName !== "root" ? folderName : "";
+  const album = folderName && !isInvalidDriveAlbum(folderName) ? folderName.trim() : "";
 
   // 1. 先頭のトラック番号（例: "01. ", "01 - ", "10-", "01 ", "01_"）を抽出・分離
   let work = base;
@@ -753,22 +778,27 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
 
         const isNumeric = (s) => typeof s === "string" && /^\d+$/.test(s.trim());
         const title = meta.title || inferred.title || stripExt(file.name) || "(無題)";
-        const candidateMetaArtist = meta.artist && meta.artist !== "(不明アーティスト)" && !isNumeric(meta.artist) ? meta.artist : null;
-        const candidateInferredArtist = inferred.artist && !isNumeric(inferred.artist) ? inferred.artist : null;
-        const artist = (existing && existing.artist && !isNumeric(existing.artist)) || candidateMetaArtist || candidateInferredArtist || "(不明アーティスト)";
-        const album = (meta.album && meta.album !== "Google Drive") ? meta.album : (inferred.album || "Google Drive");
+        const candidateMetaArtist = meta.artist && !isPlaceholderArtist(meta.artist) && !isNumeric(meta.artist) ? meta.artist : null;
+        const candidateInferredArtist = inferred.artist && !isPlaceholderArtist(inferred.artist) && !isNumeric(inferred.artist) ? inferred.artist : null;
+        const validExistingArtist = existing && typeof existing.artist === "string" && !isPlaceholderArtist(existing.artist) && !isNumeric(existing.artist) ? existing.artist : null;
+        const artist = (existing && existing.userEdited && validExistingArtist ? validExistingArtist : null) || candidateMetaArtist || validExistingArtist || candidateInferredArtist || "(不明アーティスト)";
+
+        const validMetaAlbum = meta.album && !isInvalidDriveAlbum(meta.album) ? meta.album : null;
+        const validExistingAlbum = existing && typeof existing.album === "string" && !isInvalidDriveAlbum(existing.album) ? existing.album : null;
+        const validInferredAlbum = inferred.album && !isInvalidDriveAlbum(inferred.album) ? inferred.album : null;
+        const album = (existing && existing.userEdited && validExistingAlbum ? validExistingAlbum : null) || validMetaAlbum || validExistingAlbum || validInferredAlbum || "Google Drive";
 
         const track = {
           id: trackId,
           title,
           artist,
           album,
-          albumArtist: meta.albumArtist || "",
-          year: meta.year || "",
-          genre: meta.genre || "",
-          trackNo: meta.trackNo || inferred.trackNo || "",
-          discNo: meta.discNo || "",
-          duration: duration || 0,
+          albumArtist: meta.albumArtist || (existing && typeof existing.albumArtist === "string" ? existing.albumArtist : "") || "",
+          year: meta.year || (existing && existing.year) || "",
+          genre: meta.genre || (existing && existing.genre) || "",
+          trackNo: meta.trackNo || inferred.trackNo || (existing && existing.trackNo) || "",
+          discNo: meta.discNo || (existing && existing.discNo) || "",
+          duration: duration || (existing && existing.duration) || 0,
           mime: normResult ? "audio/mp3" : (meta.mime || file.mimeType || mimeFromName(file.name)),
           format: normResult ? "mp3" : (meta.format || formatFromName(file.name) || "unknown"),
           addedAt: existing ? (existing.addedAt || Date.now()) : Date.now(),
@@ -796,10 +826,10 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
         if (existing && typeof existing.order === "number") track.order = existing.order;
         if (existing && existing.userEdited) {
           track.userEdited = true;
-          track.title = existing.title || track.title;
-          track.artist = existing.artist || track.artist;
-          track.album = existing.album || track.album;
-          track.albumArtist = existing.albumArtist || track.albumArtist;
+          if (existing.title) track.title = existing.title;
+          if (validExistingArtist) track.artist = validExistingArtist;
+          if (validExistingAlbum) track.album = validExistingAlbum;
+          if (existing.albumArtist && typeof existing.albumArtist === "string") track.albumArtist = existing.albumArtist;
         }
 
         await putTrack(track, blob);
@@ -820,39 +850,55 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           console.warn("[drive-service] 先頭ヘッダメタデータ抽出失敗、推測へフォールバック:", file.name, e);
         }
 
+        const validMetaTitle = extractedMeta && extractedMeta.title && extractedMeta.title !== "(無題)" && extractedMeta.title !== stripExt(file.name) ? extractedMeta.title : null;
+        const validExistingTitle = existing && typeof existing.title === "string" && existing.title !== "(無題)" && existing.title !== "true" ? existing.title : null;
+
         const title =
-          (existing && existing.title) ||
-          (extractedMeta && extractedMeta.title && extractedMeta.title !== "(無題)" && extractedMeta.title !== stripExt(file.name) ? extractedMeta.title : null) ||
+          (existing && existing.userEdited && validExistingTitle ? validExistingTitle : null) ||
+          validMetaTitle ||
+          validExistingTitle ||
           inferred.title ||
           (extractedMeta && extractedMeta.title) ||
           stripExt(file.name) ||
           "(無題)";
 
         const isNumeric = (s) => typeof s === "string" && /^\d+$/.test(s.trim());
-        const validExistingArtist = existing && existing.artist && !isPlaceholderArtist(existing.artist) && !isNumeric(existing.artist) ? existing.artist : null;
-        const validMetaArtist = extractedMeta && extractedMeta.artist && !isPlaceholderArtist(extractedMeta.artist) && !isNumeric(extractedMeta.artist) ? extractedMeta.artist : null;
+        const validExistingArtist = existing && typeof existing.artist === "string" && !isPlaceholderArtist(existing.artist) && !isNumeric(existing.artist) ? existing.artist : null;
+        const validMetaArtist = extractedMeta && typeof extractedMeta.artist === "string" && !isPlaceholderArtist(extractedMeta.artist) && !isNumeric(extractedMeta.artist) ? extractedMeta.artist : null;
         const validInferredArtist = inferred && inferred.artist && !isPlaceholderArtist(inferred.artist) && !isNumeric(inferred.artist) ? inferred.artist : null;
         const fallbackParsed = parseArtistAndTitle(file.name);
         const validParsedArtist = fallbackParsed && fallbackParsed.artist && !isPlaceholderArtist(fallbackParsed.artist) && !isNumeric(fallbackParsed.artist) ? fallbackParsed.artist : null;
 
-        const artist = validExistingArtist || validMetaArtist || validInferredArtist || validParsedArtist || "(不明アーティスト)";
+        const artist =
+          (existing && existing.userEdited && validExistingArtist ? validExistingArtist : null) ||
+          validMetaArtist ||
+          validExistingArtist ||
+          validInferredArtist ||
+          validParsedArtist ||
+          "(不明アーティスト)";
+
+        const validExistingAlbum = existing && typeof existing.album === "string" && !isInvalidDriveAlbum(existing.album) ? existing.album : null;
+        const validMetaAlbum = extractedMeta && typeof extractedMeta.album === "string" && !isInvalidDriveAlbum(extractedMeta.album) ? extractedMeta.album : null;
+        const validInferredAlbum = inferred.album && !isInvalidDriveAlbum(inferred.album) ? inferred.album : null;
+        const validFolderAlbum = file.folderName && !isInvalidDriveAlbum(file.folderName) ? file.folderName : null;
+        const validDefaultAlbum = defaultAlbumName && !isInvalidDriveAlbum(defaultAlbumName) ? defaultAlbumName : null;
 
         const album =
-          (existing && existing.album && existing.album !== "Google Drive") ||
-          (extractedMeta && extractedMeta.album && extractedMeta.album !== "Google Drive" ? extractedMeta.album : null) ||
-          inferred.album ||
-          (file.folderName && file.folderName !== "root" ? file.folderName : null) ||
-          (defaultAlbumName && defaultAlbumName !== "root" ? defaultAlbumName : null) ||
-          (existing && existing.album) ||
+          (existing && existing.userEdited && validExistingAlbum ? validExistingAlbum : null) ||
+          validMetaAlbum ||
+          validExistingAlbum ||
+          validInferredAlbum ||
+          validFolderAlbum ||
+          validDefaultAlbum ||
           "Google Drive";
 
-        const albumArtist = (existing && existing.albumArtist) || (extractedMeta && extractedMeta.albumArtist) || "";
-        const year = (existing && existing.year) || (extractedMeta && extractedMeta.year) || "";
-        const genre = (existing && existing.genre) || (extractedMeta && extractedMeta.genre) || "";
-        const trackNo = (existing && existing.trackNo) || (extractedMeta && extractedMeta.trackNo) || inferred.trackNo || "";
-        const discNo = (existing && existing.discNo) || (extractedMeta && extractedMeta.discNo) || "";
-        const duration = (existing && existing.duration) || (extractedMeta && extractedMeta.duration) || 0;
-        const artworkBlob = (existing && existing.artworkBlob) || (extractedMeta && extractedMeta.artworkBlob) || null;
+        const albumArtist = (extractedMeta && extractedMeta.albumArtist) || (existing && typeof existing.albumArtist === "string" ? existing.albumArtist : "") || "";
+        const year = (extractedMeta && extractedMeta.year) || (existing && existing.year) || "";
+        const genre = (extractedMeta && extractedMeta.genre) || (existing && existing.genre) || "";
+        const trackNo = (extractedMeta && extractedMeta.trackNo) || (existing && existing.trackNo) || inferred.trackNo || "";
+        const discNo = (extractedMeta && extractedMeta.discNo) || (existing && existing.discNo) || "";
+        const duration = (extractedMeta && extractedMeta.duration) || (existing && existing.duration) || 0;
+        const artworkBlob = (extractedMeta && extractedMeta.artworkBlob) || (existing && existing.artworkBlob) || null;
         const artworkDataUrl = (extractedMeta && extractedMeta.artworkDataUrl) || (existing && existing.artworkDataUrl) || "";
 
         const track = {

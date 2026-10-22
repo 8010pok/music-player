@@ -4294,4 +4294,102 @@
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* ===== 任意の複数曲選択・一括操作バー & チェックボックス ===== */
+.bulk-edit-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: rgba(10, 132, 255, 0.12);
+  border: 1px solid var(--accent, #0a84ff);
+  border-radius: 12px;
+}
+
+.bulk-edit-bar[hidden] {
+  display: none !important;
+}
+
+.bulk-edit-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bulk-edit-count {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent, #0a84ff);
+  min-width: 72px;
+}
+
+.bulk-mini-btn {
+  font-size: 11px !important;
+  padding: 4px 8px !important;
+  min-height: 26px !important;
+}
+
+.bulk-edit-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.bulk-action-btn {
+  font-size: 12px !important;
+  padding: 5px 10px !important;
+  font-weight: 600 !important;
+}
+
+.track-row.is-select-mode {
+  grid-template-columns: 28px 40px 1fr auto;
+  cursor: pointer;
+}
+
+.album-track-row.is-select-mode {
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  cursor: pointer;
+}
+
+.track-row.is-selected,
+.album-track-row.is-selected {
+  border-color: var(--accent, #0a84ff);
+  background: rgba(10, 132, 255, 0.12);
+}
+
+.track-select-chk {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 2px solid var(--fg-muted, #8e8e93);
+  background: var(--bg-surface, rgba(255, 255, 255, 0.05));
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+  user-select: none;
+  flex-shrink: 0;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.1s ease;
+}
+
+.track-select-chk.is-checked {
+  background: var(--accent, #0a84ff);
+  border-color: var(--accent, #0a84ff);
+}
+
+#btn-lib-select-mode.is-active,
+#btn-album-select-mode.is-active {
+  border-color: var(--accent, #0a84ff);
+  color: var(--accent, #0a84ff);
+  background: rgba(10, 132, 255, 0.12);
+}
+
+
 

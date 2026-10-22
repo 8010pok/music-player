@@ -147,8 +147,15 @@ function ensureTrackMetadataInBackground(id, blob, extraPatch = null) {
       const missingDataUrl = (track.artworkBlob || !track._noEmbeddedArt) && !track.artworkDataUrl;
       const missingDuration = !track.duration || track.duration <= 0;
       const { isPlaceholderArtist, parseArtistAndTitle } = await import("../lastfm/scrobble-cleaner.js");
-      const isPlaceholderArtistVal = isPlaceholderArtist(track.artist);
-      const isPlaceholderAlbum = !track.album || track.album === "Google Drive" || isPlaceholderArtist(track.album);
+      const isPlaceholderArtistVal = isPlaceholderArtist(track.artist) || typeof track.artist !== "string";
+      const isPlaceholderAlbum =
+        !track.album ||
+        typeof track.album !== "string" ||
+        track.album === "Google Drive" ||
+        track.album === "マイドライブ" ||
+        track.album.toLowerCase() === "true" ||
+        track.album.toLowerCase() === "false" ||
+        isPlaceholderArtist(track.album);
       const needsParse = missingDuration || missingArt || !track.userEdited || isPlaceholderArtistVal || isPlaceholderAlbum;
 
       const patch = extraPatch ? { ...extraPatch } : {};
@@ -244,12 +251,104 @@ export function putTrack(track, blob) {
   });
 }
 
+const _repairedTrackIds = new Set();
+
+function isCorruptedMetaField(val) {
+  if (typeof val === "boolean") return true;
+  if (typeof val === "string") {
+    const lower = val.trim().toLowerCase();
+    return lower === "true" || lower === "false" || lower === "null" || lower === "undefined";
+  }
+  return false;
+}
+
+function sanitizeTrackRecord(t) {
+  if (!t || typeof t !== "object") return false;
+  let wasCorrupted = false;
+  if (isCorruptedMetaField(t.album)) {
+    t.album = "";
+    wasCorrupted = true;
+  }
+  if (isCorruptedMetaField(t.artist)) {
+    t.artist = "(不明アーティスト)";
+    wasCorrupted = true;
+  }
+  if (isCorruptedMetaField(t.albumArtist)) {
+    t.albumArtist = "";
+    wasCorrupted = true;
+  }
+  return wasCorrupted;
+}
+
+function repairCorruptedTracksInBackground(tracks) {
+  if (!Array.isArray(tracks) || tracks.length === 0) return;
+  (async () => {
+    let anyUpdated = false;
+    try {
+      const { extractMetadata } = await import("../metadata/index.js");
+      for (const t of tracks) {
+        if (!t || !t.id) continue;
+        try {
+          const patch = {
+            album: typeof t.album === "string" ? t.album : "",
+            artist: typeof t.artist === "string" ? t.artist : "(不明アーティスト)",
+          };
+          // 1. ローカル Blob があればそこからアルバム名を復元
+          const db = await openDb();
+          const blobRow = await txReq(db.transaction("blobs").objectStore("blobs").get(t.id)).catch(() => null);
+          let targetBlob = blobRow && blobRow.blob ? blobRow.blob : null;
+
+          // 2. ローカル Blob が無く Google Drive 曲であれば先頭ヘッダからアルバム名を復元
+          if (!targetBlob && (t.driveFileId || (typeof t.id === "string" && t.id.startsWith("gd-")))) {
+            const fileId = t.driveFileId || t.id.slice(3);
+            try {
+              const { fetchDriveAudioHeader } = await import("../gdrive/drive-service.js");
+              targetBlob = await fetchDriveAudioHeader(fileId, 1572864);
+            } catch (_) {}
+          }
+
+          if (targetBlob && targetBlob.size > 0) {
+            const meta = await extractMetadata(targetBlob, t.originalName || t.title || "");
+            if (meta) {
+              if (meta.album && !isCorruptedMetaField(meta.album) && meta.album !== "Google Drive") {
+                patch.album = meta.album;
+              }
+              if (meta.albumArtist && !isCorruptedMetaField(meta.albumArtist) && !t.albumArtist) {
+                patch.albumArtist = meta.albumArtist;
+              }
+              if (meta.year && !t.year) patch.year = meta.year;
+              if (meta.trackNo && !t.trackNo) patch.trackNo = meta.trackNo;
+              if (meta.discNo && !t.discNo) patch.discNo = meta.discNo;
+              if (meta.genre && !t.genre) patch.genre = meta.genre;
+            }
+          }
+
+          await updateTrack(t.id, patch);
+          anyUpdated = true;
+        } catch (err) {
+          console.warn("[library-db] 破損メタデータ自動修復スキップ:", t.id, err);
+        }
+      }
+      if (anyUpdated && typeof window !== "undefined" && typeof window.dispatchEvent === "function" && typeof CustomEvent === "function") {
+        window.dispatchEvent(new CustomEvent("music-player:library-synced", { detail: { repaired: true } }));
+      }
+    } catch (e) {
+      console.warn("[library-db] 一括修復エラー:", e);
+    }
+  })();
+}
+
 /**
  * トラック1件取得
  */
 export async function getTrack(id) {
   const db = await openDb();
-  return txReq(db.transaction("tracks").objectStore("tracks").get(id));
+  const t = await txReq(db.transaction("tracks").objectStore("tracks").get(id));
+  if (t && sanitizeTrackRecord(t) && !_repairedTrackIds.has(t.id)) {
+    _repairedTrackIds.add(t.id);
+    repairCorruptedTracksInBackground([t]);
+  }
+  return t;
 }
 
 /**
@@ -341,7 +440,20 @@ export async function hasCachedBlob(id) {
  */
 export async function getAllTracks() {
   const db = await openDb();
-  return txReq(db.transaction("tracks").objectStore("tracks").getAll());
+  const list = await txReq(db.transaction("tracks").objectStore("tracks").getAll());
+  if (Array.isArray(list)) {
+    const toRepair = [];
+    for (const t of list) {
+      if (sanitizeTrackRecord(t) && t.id && !_repairedTrackIds.has(t.id)) {
+        _repairedTrackIds.add(t.id);
+        toRepair.push(t);
+      }
+    }
+    if (toRepair.length > 0) {
+      repairCorruptedTracksInBackground(toRepair);
+    }
+  }
+  return list;
 }
 
 /**

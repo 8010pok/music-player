@@ -17,7 +17,7 @@ import { toast, confirm, openModal, dismissActiveModal, closeActiveModalSync, pr
 import { appState } from "../state.js";
 import { go, getLastView, saveLastView } from "../router.js";
 import { getArtworkUrl, releaseArtwork, markArtworkBroken } from "./artwork-cache.js";
-import { editTrackMetadata } from "./metadata-editor.js";
+import { editTrackMetadata, editSelectedTracksMetadata } from "./metadata-editor.js";
 import { openDriveImportModal, isDriveConnected } from "../gdrive/drive-service.js";
 import { openYouTubeDownloadModal } from "./youtube-modal.js";
 import { openVideoExtractModal } from "./video-extract-modal.js";
@@ -41,6 +41,10 @@ let filterText = "";
 let sortKey = "manual-asc";
 let showDisabled = true;
 let quickFilter = "all";
+
+// 任意の曲選択・一括編集モード状態
+let isSelectMode = false;
+let selectedTrackIds = new Set();
 
 // ライブラリタブ状態: "artists" | "albums" | "tracks" (デフォルト: アーティスト)
 let activeTab = "artists";
@@ -118,6 +122,8 @@ export async function mount(root) {
   sortKey = "manual-asc";
   showDisabled = true;
   quickFilter = "all";
+  isSelectMode = false;
+  selectedTrackIds = new Set();
   // storageInfo も初期化する。これをしないと再マウント時、refreshStorage で
   // 更新される前の最初の描画に前回マウントの古いストレージ文字列が一瞬出る。
   storageInfo = "";
@@ -357,6 +363,56 @@ export async function mount(root) {
     showDisabled = refs.showDisabledChk.checked;
     renderList(refs);
   });
+
+  // 複数選択モード・一括操作バー結線
+  if (refs.selectModeBtn) {
+    refs.selectModeBtn.addEventListener("click", () => {
+      toggleSelectMode(refs);
+    });
+  }
+  if (refs.selectDoneBtn) {
+    refs.selectDoneBtn.addEventListener("click", () => {
+      toggleSelectMode(refs, false);
+    });
+  }
+  if (refs.selectAllBtn) {
+    refs.selectAllBtn.addEventListener("click", () => {
+      visibleTracks.forEach((t) => selectedTrackIds.add(t.id));
+      updateBulkBarUI(refs);
+      renderList(refs);
+    });
+  }
+  if (refs.selectClearBtn) {
+    refs.selectClearBtn.addEventListener("click", () => {
+      selectedTrackIds.clear();
+      updateBulkBarUI(refs);
+      renderList(refs);
+    });
+  }
+  if (refs.bulkEditBtn) {
+    refs.bulkEditBtn.addEventListener("click", () => {
+      const selected = tracksCache.filter((t) => selectedTrackIds.has(t.id));
+      if (selected.length === 0) {
+        toast("曲を選択してください", "info");
+        return;
+      }
+      editSelectedTracksMetadata(selected, async () => {
+        await reloadTracks(refs);
+        await refreshStorage(refs);
+        updateBulkBarUI(refs);
+      });
+    });
+  }
+  if (refs.bulkPlaylistBtn) {
+    refs.bulkPlaylistBtn.addEventListener("click", () => {
+      const selected = tracksCache.filter((t) => selectedTrackIds.has(t.id));
+      if (selected.length === 0) {
+        toast("曲を選択してください", "info");
+        return;
+      }
+      openAddSelectedTracksToPlaylistModal(selected, refs);
+    });
+  }
 
   // クイックフィルタ（Spotify風チップバー）
   if (refs.quickFilterBar) {
@@ -616,6 +672,9 @@ function render() {
             <input type="checkbox" id="show-disabled" checked />
             <span>🔇 一時的な再生無効も表示</span>
           </label>
+          <button type="button" class="btn" id="btn-lib-select-mode" style="font-size: 12px; padding: 5px 10px; font-weight: 600;" title="複数の曲を選んでアルバム名・アーティスト名等を一括編集">
+            ☑️ 曲を選択
+          </button>
         </div>
 
         <!-- Spotify 風 クイックフィルタ・ピル（チップバー） -->
@@ -625,6 +684,20 @@ function render() {
           <button type="button" class="quick-filter-chip" data-filter="gdrive">☁ Google Drive</button>
           <button type="button" class="quick-filter-chip" data-filter="video">🎬 動画抽出</button>
           <button type="button" class="quick-filter-chip" data-filter="unplayed">⚡ 未再生</button>
+        </div>
+
+        <!-- 複数曲選択・一括操作バー -->
+        <div class="bulk-edit-bar" id="lib-bulk-bar" hidden>
+          <div class="bulk-edit-bar-left">
+            <span class="bulk-edit-count" id="lib-bulk-count">0 曲選択中</span>
+            <button type="button" class="btn bulk-mini-btn" id="btn-lib-select-all">表示中を全選択</button>
+            <button type="button" class="btn bulk-mini-btn" id="btn-lib-select-clear">解除</button>
+          </div>
+          <div class="bulk-edit-bar-actions">
+            <button type="button" class="btn primary bulk-action-btn" id="btn-lib-bulk-edit" disabled>✏️ 一括編集 (アルバム変更等)</button>
+            <button type="button" class="btn bulk-action-btn" id="btn-lib-bulk-playlist" disabled>📑 プレイリストへ追加</button>
+            <button type="button" class="btn bulk-action-btn" id="btn-lib-select-done">✕ 完了</button>
+          </div>
         </div>
 
         <div class="library-stats" id="lib-stats"></div>
@@ -657,6 +730,14 @@ function collectRefs(root) {
     search: root.querySelector("#lib-search"),
     sort: root.querySelector("#lib-sort"),
     showDisabledChk: root.querySelector("#show-disabled"),
+    selectModeBtn: root.querySelector("#btn-lib-select-mode"),
+    bulkBar: root.querySelector("#lib-bulk-bar"),
+    bulkCount: root.querySelector("#lib-bulk-count"),
+    selectAllBtn: root.querySelector("#btn-lib-select-all"),
+    selectClearBtn: root.querySelector("#btn-lib-select-clear"),
+    bulkEditBtn: root.querySelector("#btn-lib-bulk-edit"),
+    bulkPlaylistBtn: root.querySelector("#btn-lib-bulk-playlist"),
+    selectDoneBtn: root.querySelector("#btn-lib-select-done"),
     quickFilterBar: root.querySelector("#track-quick-filter-bar"),
     libStats: root.querySelector("#lib-stats"),
     list: root.querySelector("#track-list"),
@@ -879,6 +960,7 @@ function rowHtml(t, cur) {
   const playing = cur && cur.id === t.id;
   const enabled = t.enabled !== false;
   const loved = !!t.loved;
+  const isSelected = isSelectMode && selectedTrackIds.has(t.id);
   const sub = [t.artist || "(不明)", t.album || ""].filter(Boolean).join(" — ");
   // アートワーク URL（無ければ <img> 自体を出さず空の枠を残す）
   const artUrl = getArtworkUrl(t);
@@ -886,11 +968,13 @@ function rowHtml(t, cur) {
     ? `<img class="track-art" src="${escapeAttr(artUrl)}" alt="" loading="lazy" decoding="async" onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement('div'),{className:'track-art'}))" />`
     : `<div class="track-art"></div>`;
   // 手動並び替えモード時のみドラッグハンドル表示（アートワークの左隣に配置）。
-  // ★ ただし検索/「無効非表示」フィルタが効いていると一覧は部分集合になり、
-  //   onDragEnd が可視行だけに order を振り直して全体の手動順を壊してしまう。
-  //   フィルタ中はハンドルを出さず(=is-manual も付けず)並び替えを無効化する。
+  // ★ ただし検索/「無効非表示」フィルタや選択モードが効いていると一覧は部分集合等になるため、
+  //   フィルタ中・選択モード中はハンドルを出さず(=is-manual も付けず)並び替えを無効化する。
   const filterActive = !!filterText || !showDisabled || quickFilter !== "all";
-  const isManual = sortKey === "manual-asc" && !filterActive;
+  const isManual = sortKey === "manual-asc" && !filterActive && !isSelectMode;
+  const selectChk = isSelectMode
+    ? `<span class="track-select-chk ${isSelected ? "is-checked" : ""}" data-act="select-chk" role="checkbox" aria-checked="${isSelected ? "true" : "false"}" title="選択">${isSelected ? "✓" : ""}</span>`
+    : ``;
   const handle = isManual
     ? `<span class="drag-handle" data-act="handle" role="button" tabindex="0" aria-label="並び替えハンドル（ドラッグで上下移動）" title="ドラッグで並び替え">☰</span>`
     : ``;
@@ -916,7 +1000,8 @@ function rowHtml(t, cur) {
   const artContainer = `<div class="track-art-wrap">${artImg}${eqIndicator}</div>`;
 
   return `
-    <li class="track-row ${playing ? "is-playing" : ""} ${loading ? "is-loading" : ""} ${enabled ? "" : "is-disabled"} ${isManual ? "is-manual" : ""}" data-id="${escapeAttr(t.id)}">
+    <li class="track-row ${playing ? "is-playing" : ""} ${loading ? "is-loading" : ""} ${enabled ? "" : "is-disabled"} ${isManual ? "is-manual" : ""} ${isSelectMode ? "is-select-mode" : ""} ${isSelected ? "is-selected" : ""}" data-id="${escapeAttr(t.id)}">
+      ${selectChk}
       ${handle}
       ${artContainer}
       <div class="track-info">
@@ -991,11 +1076,77 @@ function orderOf(t) {
 }
 
 /**
+ * 複数選択モード切替・UI更新
+ */
+function toggleSelectMode(refs, forceState) {
+  isSelectMode = typeof forceState === "boolean" ? forceState : !isSelectMode;
+  if (!isSelectMode) {
+    selectedTrackIds.clear();
+  }
+  updateBulkBarUI(refs);
+  renderList(refs);
+}
+
+function updateBulkBarUI(refs) {
+  if (!refs) return;
+  if (refs.selectModeBtn) {
+    refs.selectModeBtn.classList.toggle("is-active", isSelectMode);
+    refs.selectModeBtn.textContent = isSelectMode ? "✕ 選択を終了" : "☑️ 曲を選択";
+  }
+  if (refs.bulkBar) {
+    refs.bulkBar.hidden = !isSelectMode;
+  }
+  // tracksCache に存在しない ID を掃除
+  const validIds = new Set(tracksCache.map((t) => t.id));
+  for (const id of Array.from(selectedTrackIds)) {
+    if (!validIds.has(id)) selectedTrackIds.delete(id);
+  }
+  const count = selectedTrackIds.size;
+  if (refs.bulkCount) {
+    refs.bulkCount.textContent = `${count} 曲選択中`;
+  }
+  if (refs.bulkEditBtn) {
+    refs.bulkEditBtn.disabled = count === 0;
+  }
+  if (refs.bulkPlaylistBtn) {
+    refs.bulkPlaylistBtn.disabled = count === 0;
+  }
+}
+
+function toggleTrackSelectionInList(id, row, refs) {
+  if (!id) return;
+  if (selectedTrackIds.has(id)) {
+    selectedTrackIds.delete(id);
+  } else {
+    selectedTrackIds.add(id);
+  }
+  const checked = selectedTrackIds.has(id);
+  if (row) {
+    row.classList.toggle("is-selected", checked);
+    const chk = row.querySelector(".track-select-chk");
+    if (chk) {
+      chk.classList.toggle("is-checked", checked);
+      chk.setAttribute("aria-checked", checked ? "true" : "false");
+      chk.textContent = checked ? "✓" : "";
+    }
+  }
+  updateBulkBarUI(refs);
+}
+
+/**
  * クリック委譲
  */
 async function onListClick(e, refs) {
+  // 選択モード中はチェックボックスまたは行全体のクリックで選択トグル（アクションボタン以外）
   const btn = e.target.closest("button[data-act]");
   if (!btn) {
+    if (isSelectMode) {
+      const row = e.target.closest(".track-row");
+      if (row && row.dataset.id) {
+        toggleTrackSelectionInList(row.dataset.id, row, refs);
+      }
+      return;
+    }
     // 行クリックで再生（ハンドル領域は除外）
     if (e.target.closest('[data-act="handle"]')) return;
     const row = e.target.closest(".track-row");
@@ -1169,6 +1320,10 @@ function openLibraryTrackActionsModal(track, refs) {
         <span class="track-menu-btn-icon">✏️</span>
         <span class="track-menu-btn-label">情報編集</span>
       </button>
+      <button type="button" class="track-menu-btn" data-act="multi-select">
+        <span class="track-menu-btn-icon">☑️</span>
+        <span class="track-menu-btn-label">複数選択編集</span>
+      </button>
       <button type="button" class="track-menu-btn" data-act="love">
         <span class="track-menu-btn-icon">${isLoved ? "💔" : "❤️"}</span>
         <span class="track-menu-btn-label">${isLoved ? "お気に入り解除" : "お気に入り"}</span>
@@ -1228,6 +1383,13 @@ function openLibraryTrackActionsModal(track, refs) {
       editTrackMetadata(track, () => {
         renderList(refs);
       });
+      return;
+    }
+    if (act === "multi-select") {
+      closeMenu();
+      selectedTrackIds.add(track.id);
+      toggleSelectMode(refs, true);
+      toast("一括編集する曲を選択して「✏️ 一括編集」を押してください", "info");
       return;
     }
     if (act === "love") {
@@ -1334,6 +1496,90 @@ async function openAddToPlaylistModal(track) {
         toast("プレイリストに追加しました", "ok");
       } catch (err) {
         console.warn("プレイリスト追加失敗", err);
+        toast("プレイリスト追加に失敗しました", "err");
+      }
+    });
+  });
+}
+
+/**
+ * 選択した複数曲をプレイリストに一括追加するモーダル
+ */
+async function openAddSelectedTracksToPlaylistModal(tracks, refs) {
+  if (!Array.isArray(tracks) || tracks.length === 0) return;
+  const trackIds = tracks.map((t) => t.id);
+  const playlists = await getAllPlaylists();
+  const wrap = document.createElement("div");
+  wrap.className = "playlist-picker-modal";
+
+  let listHtml = `
+    <div class="playlist-picker-list">
+      <button type="button" class="playlist-picker-item create-new" id="btn-create-playlist-for-bulk">
+        <span class="pl-picker-icon">➕</span>
+        <div class="pl-picker-text">
+          <div class="pl-picker-title">新規プレイリストを作成して ${tracks.length} 曲を追加</div>
+        </div>
+      </button>
+  `;
+
+  if (playlists.length === 0) {
+    listHtml += `<div class="empty-hint" style="padding: 16px 10px; font-size: 13px; color: var(--fg-muted); text-align: center;">作成済みのプレイリストはありません</div>`;
+  } else {
+    for (const pl of playlists) {
+      const count = Array.isArray(pl.trackIds) ? pl.trackIds.length : 0;
+      listHtml += `
+        <button type="button" class="playlist-picker-item" data-pl-id="${escapeAttr(pl.id)}">
+          <span class="pl-picker-icon">📑</span>
+          <div class="pl-picker-text">
+            <div class="pl-picker-title">${escapeHtml(pl.name || "(無題)")}</div>
+            <div class="pl-picker-sub">${count}曲</div>
+          </div>
+        </button>
+      `;
+    }
+  }
+  listHtml += `</div>`;
+  wrap.innerHTML = listHtml;
+
+  openModal({
+    title: `選択した ${tracks.length} 曲をプレイリストに追加`,
+    body: wrap,
+    actions: [
+      { label: "キャンセル" },
+    ],
+  });
+
+  const createBtn = wrap.querySelector("#btn-create-playlist-for-bulk");
+  if (createBtn) {
+    createBtn.addEventListener("click", async () => {
+      const res = await promptForm("新規プレイリスト", [
+        { name: "name", label: "プレイリスト名", value: "", placeholder: "例: マイベスト" },
+      ], { okLabel: "作成して追加" });
+      if (res && res.name && res.name.trim()) {
+        const newId = "pl-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6);
+        const newPl = {
+          id: newId,
+          name: res.name.trim(),
+          trackIds: trackIds,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        await savePlaylist(newPl);
+        toast(`「${newPl.name}」を作成し ${tracks.length} 曲を追加しました`, "ok");
+      }
+    });
+  }
+
+  const items = wrap.querySelectorAll(".playlist-picker-item[data-pl-id]");
+  items.forEach((item) => {
+    item.addEventListener("click", async () => {
+      const plId = item.dataset.plId;
+      closeActiveModalSync();
+      try {
+        await addTracksToPlaylist(plId, trackIds);
+        toast(`プレイリストに ${tracks.length} 曲を追加しました`, "ok");
+      } catch (err) {
+        console.warn("プレイリスト一括追加失敗", err);
         toast("プレイリスト追加に失敗しました", "err");
       }
     });

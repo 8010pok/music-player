@@ -13,18 +13,25 @@ import { appState } from "../state.js";
 import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
 import { go } from "../router.js";
 import { escapeHtml, escapeAttr, toast, confirm, openModal, dismissActiveModal, closeActiveModalSync, promptForm } from "./components.js";
-import { editTrackMetadata, editAlbumMetadata } from "./metadata-editor.js";
+import { editTrackMetadata, editAlbumMetadata, editSelectedTracksMetadata } from "./metadata-editor.js";
 
 let album = null;
 let unsubState = null;
+let isSelectMode = false;
+let selectedTrackIds = new Set();
 
-export async function mount(root) {
+export async function mount(root, options = {}) {
   const params = parseQuery();
   const key = params.key;
 
   if (!key) {
     go("albums");
     return () => {};
+  }
+
+  if (!options.keepSelection) {
+    isSelectMode = false;
+    selectedTrackIds = new Set();
   }
 
   const allTracks = await getAllTracks();
@@ -42,6 +49,7 @@ export async function mount(root) {
 
   root.innerHTML = render(album);
   const refs = collectRefs(root);
+  updateAlbumBulkBarUI(refs);
 
   // ★ アルバム画面を開いた時点で楽曲を先行プリウォーム（キャッシュ済み曲のみ最大5曲）
   if (album && Array.isArray(album.tracks)) {
@@ -68,6 +76,55 @@ export async function mount(root) {
   };
   if (refs.editAlbumBtn) {
     refs.editAlbumBtn.addEventListener("click", openAlbumEditor);
+  }
+  if (refs.selectModeBtn) {
+    refs.selectModeBtn.addEventListener("click", () => {
+      toggleAlbumSelectMode(refs, root);
+    });
+  }
+  if (refs.selectDoneBtn) {
+    refs.selectDoneBtn.addEventListener("click", () => {
+      toggleAlbumSelectMode(refs, root, false);
+    });
+  }
+  if (refs.selectAllBtn) {
+    refs.selectAllBtn.addEventListener("click", () => {
+      if (album && Array.isArray(album.tracks)) {
+        album.tracks.forEach((t) => selectedTrackIds.add(t.id));
+      }
+      updateAlbumBulkBarUI(refs);
+      if (refs.list && album) refs.list.innerHTML = renderTrackRows(album);
+      updatePlayingHighlight(refs);
+    });
+  }
+  if (refs.selectClearBtn) {
+    refs.selectClearBtn.addEventListener("click", () => {
+      selectedTrackIds.clear();
+      updateAlbumBulkBarUI(refs);
+      if (refs.list && album) refs.list.innerHTML = renderTrackRows(album);
+      updatePlayingHighlight(refs);
+    });
+  }
+  if (refs.bulkEditBtn) {
+    refs.bulkEditBtn.addEventListener("click", () => {
+      if (!album || !Array.isArray(album.tracks)) return;
+      const selected = album.tracks.filter((t) => selectedTrackIds.has(t.id));
+      if (selected.length === 0) {
+        toast("編集する曲を選択してください", "info");
+        return;
+      }
+      editSelectedTracksMetadata(selected, async () => {
+        const latestTracks = await getAllTracks();
+        const latestAlbums = groupTracksIntoAlbums(latestTracks);
+        const curKey = parseQuery().key;
+        const stillExists = latestAlbums.find((a) => a.key === curKey);
+        if (!stillExists) {
+          go("library", { tab: "albums" });
+        } else {
+          mount(root);
+        }
+      });
+    });
   }
   if (refs.deleteAlbumBtn) {
     refs.deleteAlbumBtn.addEventListener("click", async () => {
@@ -212,14 +269,30 @@ function render(alb) {
             </button>`
           : ""
         }
-        <button class="album-action-btn secondary" id="btn-album-edit" title="アルバム情報・収録曲を一括編集">
+        <button class="album-action-btn secondary" id="btn-album-edit" title="アルバム全体の情報・収録曲を一括編集">
           <svg class="ic" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
           <span>一括編集</span>
+        </button>
+        <button class="album-action-btn secondary ${isSelectMode ? "is-active" : ""}" id="btn-album-select-mode" title="アルバム内の任意の曲を選択して一括編集（別アルバムへ分割など）">
+          <span>${isSelectMode ? "✕ 選択終了" : "☑️ 曲を選択"}</span>
         </button>
         <button class="album-action-btn secondary danger" id="btn-album-delete" title="アルバムを削除" style="color: #ff453a;">
           <svg class="ic" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
           <span>削除</span>
         </button>
+      </div>
+
+      <!-- アルバム内複数曲選択・一括操作バー -->
+      <div class="bulk-edit-bar" id="album-bulk-bar" ${isSelectMode ? "" : "hidden"}>
+        <div class="bulk-edit-bar-left">
+          <span class="bulk-edit-count" id="album-bulk-count">${selectedTrackIds.size} 曲選択中</span>
+          <button type="button" class="btn bulk-mini-btn" id="btn-album-select-all">全選択</button>
+          <button type="button" class="btn bulk-mini-btn" id="btn-album-select-clear">解除</button>
+        </div>
+        <div class="bulk-edit-bar-actions">
+          <button type="button" class="btn primary bulk-action-btn" id="btn-album-bulk-edit" ${selectedTrackIds.size === 0 ? "disabled" : ""}>✏️ 選択曲を一括編集 (別アルバムへ移動等)</button>
+          <button type="button" class="btn bulk-action-btn" id="btn-album-select-done">✕ 完了</button>
+        </div>
       </div>
 
       <ul class="album-track-list" id="album-track-list">
@@ -247,6 +320,7 @@ function renderTrackRows(alb) {
 
     const enabled = t.enabled !== false;
     const loved = !!t.loved;
+    const isSelected = isSelectMode && selectedTrackIds.has(t.id);
     const lovedMark = loved
       ? `<span class="track-loved" title="Loved" aria-label="Loved">♥</span>`
       : `<span class="track-loved-spacer" aria-hidden="true"></span>`;
@@ -263,9 +337,13 @@ function renderTrackRows(alb) {
       ? `<span class="source-badge gdrive-badge" title="Google Drive 音源">☁</span>`
       : ``;
 
+    const selectChk = isSelectMode
+      ? `<span class="track-select-chk ${isSelected ? "is-checked" : ""}" data-act="select-chk" role="checkbox" aria-checked="${isSelected ? "true" : "false"}" title="選択">${isSelected ? "✓" : ""}</span>`
+      : `<span class="album-track-num-slot"><span class="album-track-num">${escapeHtml(trackNumDisplay)}</span></span>`;
+
     html += `
-      <li class="track-row album-track-row ${enabled ? "" : "is-disabled"}" data-id="${escapeAttr(t.id)}" data-track-num="${escapeAttr(trackNumDisplay)}">
-        <span class="album-track-num-slot"><span class="album-track-num">${escapeHtml(trackNumDisplay)}</span></span>
+      <li class="track-row album-track-row ${enabled ? "" : "is-disabled"} ${isSelectMode ? "is-select-mode" : ""} ${isSelected ? "is-selected" : ""}" data-id="${escapeAttr(t.id)}" data-track-num="${escapeAttr(trackNumDisplay)}">
+        ${selectChk}
         <div class="track-info">
           <div class="track-title">${gdriveMark}<span class="track-title-text">${escapeHtml(t.title || "(無題)")}</span>${t.memo ? `<span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
           ${artistDisplay ? `<div class="track-sub">${escapeHtml(artistDisplay)}</div>` : ""}
@@ -293,13 +371,71 @@ function collectRefs(root) {
     cacheAllBtn: root.querySelector("#btn-album-cache-all"),
     cacheBtnText: root.querySelector("#album-cache-btn-text"),
     editAlbumBtn: root.querySelector("#btn-album-edit"),
+    selectModeBtn: root.querySelector("#btn-album-select-mode"),
+    bulkBar: root.querySelector("#album-bulk-bar"),
+    bulkCount: root.querySelector("#album-bulk-count"),
+    selectAllBtn: root.querySelector("#btn-album-select-all"),
+    selectClearBtn: root.querySelector("#btn-album-select-clear"),
+    bulkEditBtn: root.querySelector("#btn-album-bulk-edit"),
+    selectDoneBtn: root.querySelector("#btn-album-select-done"),
     deleteAlbumBtn: root.querySelector("#btn-album-delete"),
     list: root.querySelector("#album-track-list"),
   };
 }
 
+function toggleAlbumSelectMode(refs, root, forceState) {
+  isSelectMode = typeof forceState === "boolean" ? forceState : !isSelectMode;
+  if (!isSelectMode) {
+    selectedTrackIds.clear();
+  }
+  updateAlbumBulkBarUI(refs);
+  if (refs.list && album) {
+    refs.list.innerHTML = renderTrackRows(album);
+  }
+  updatePlayingHighlight(refs);
+}
+
+function updateAlbumBulkBarUI(refs) {
+  if (!refs) return;
+  if (refs.selectModeBtn) {
+    refs.selectModeBtn.classList.toggle("is-active", isSelectMode);
+    refs.selectModeBtn.innerHTML = `<span>${isSelectMode ? "✕ 選択終了" : "☑️ 曲を選択"}</span>`;
+  }
+  if (refs.bulkBar) {
+    refs.bulkBar.hidden = !isSelectMode;
+  }
+  const count = selectedTrackIds.size;
+  if (refs.bulkCount) {
+    refs.bulkCount.textContent = `${count} 曲選択中`;
+  }
+  if (refs.bulkEditBtn) {
+    refs.bulkEditBtn.disabled = count === 0;
+  }
+}
+
 async function onListClick(e, root) {
   const btn = e.target.closest("button[data-act]");
+  if (!btn && isSelectMode) {
+    const row = e.target.closest(".track-row");
+    const id = row?.dataset.id;
+    if (id) {
+      if (selectedTrackIds.has(id)) {
+        selectedTrackIds.delete(id);
+      } else {
+        selectedTrackIds.add(id);
+      }
+      const checked = selectedTrackIds.has(id);
+      row.classList.toggle("is-selected", checked);
+      const chk = row.querySelector(".track-select-chk");
+      if (chk) {
+        chk.classList.toggle("is-checked", checked);
+        chk.setAttribute("aria-checked", checked ? "true" : "false");
+        chk.textContent = checked ? "✓" : "";
+      }
+      updateAlbumBulkBarUI(collectRefs(root));
+    }
+    return;
+  }
   if (btn && btn.dataset.act === "more") {
     e.stopPropagation();
     const row = btn.closest(".track-row");
@@ -451,6 +587,10 @@ function openTrackActionsModal(track, root) {
         <span class="track-menu-btn-icon">✏️</span>
         <span class="track-menu-btn-label">情報編集</span>
       </button>
+      <button type="button" class="track-menu-btn" data-act="multi-select">
+        <span class="track-menu-btn-icon">☑️</span>
+        <span class="track-menu-btn-label">複数選択編集</span>
+      </button>
       <button type="button" class="track-menu-btn" data-act="love">
         <span class="track-menu-btn-icon">${isLoved ? "💔" : "❤️"}</span>
         <span class="track-menu-btn-label">${isLoved ? "お気に入り解除" : "お気に入り"}</span>
@@ -498,6 +638,11 @@ function openTrackActionsModal(track, root) {
     } else if (act === "edit") {
       // モーダルを切り替え（編集モーダルを即座に安全オープン）
       editTrackMetadata(track, () => mount(root));
+    } else if (act === "multi-select") {
+      closeMenu();
+      selectedTrackIds.add(track.id);
+      toggleAlbumSelectMode(collectRefs(root), root, true);
+      toast("一括編集する曲を選択して「✏️ 選択曲を一括編集」を押してください", "info");
     } else if (act === "love") {
       closeMenu();
       const nextLoved = !isLoved;

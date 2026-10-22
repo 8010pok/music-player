@@ -899,3 +899,457 @@ export function editAlbumMetadata(album, onUpdated) {
     });
   });
 }
+
+/**
+ * 選択した任意の複数曲の一括メタデータ編集モーダルを表示
+ * （アルバム単位だけでなく、曲一覧やアルバム内から選んだ任意の曲をまとめて別アルバムに変更・統一可能）
+ * @param {Array<object>} tracks
+ * @param {(updatedTracks: Array<object>|null) => void} [onUpdated]
+ * @returns {Promise<Array<object>|null>}
+ */
+export function editSelectedTracksMetadata(tracks, onUpdated) {
+  if (!Array.isArray(tracks) || tracks.length === 0) return Promise.resolve(null);
+
+  return new Promise((resolve) => {
+    let pendingArtworkBlob = undefined;
+    const currentArtTrack = tracks.find((t) => t && (t.artworkBlob || t.artworkDataUrl));
+    const initialArtUrl = currentArtTrack ? getArtworkUrl(currentArtTrack) : null;
+    let localPreviewUrl = null;
+
+    const validAlbums = [...new Set(tracks.map((t) => String(t?.album || "").trim()).filter((a) => a && a !== "true" && a !== "false" && a !== "Google Drive" && a !== "不明なアルバム"))];
+    const commonAlbum = validAlbums.length === 1 ? validAlbums[0] : "";
+
+    const validAlbumArtists = [...new Set(tracks.map((t) => String(t?.albumArtist || "").trim()).filter((a) => a && a !== "true"))];
+    const commonAlbumArtist = validAlbumArtists.length === 1 ? validAlbumArtists[0] : "";
+
+    const validArtists = [...new Set(tracks.map((t) => String(t?.artist || "").trim()).filter((a) => a && a !== "(不明アーティスト)" && a !== "true"))];
+    const commonArtist = validArtists.length === 1 ? validArtists[0] : "";
+
+    const validYears = [...new Set(tracks.map((t) => String(t?.year || "").trim()).filter(Boolean))];
+    const commonYear = validYears.length === 1 ? validYears[0] : "";
+
+    const validGenres = [...new Set(tracks.map((t) => String(t?.genre || "").trim()).filter(Boolean))];
+    const commonGenre = validGenres.length === 1 ? validGenres[0] : "";
+
+    const body = document.createElement("div");
+    body.className = "metadata-form";
+
+    const cleanArtist = cleanQuery(commonArtist || commonAlbumArtist || "");
+    const cleanAlb = cleanQuery(commonAlbum || "");
+    const initialQuery = `${cleanArtist ? cleanArtist + " " : ""}${cleanAlb}`.trim();
+
+    body.innerHTML = `
+      <p style="font-size: 12px; color: var(--fg-muted); margin-bottom: 10px;">
+        選択した <strong>${tracks.length} 曲</strong> の情報（アルバム名・アーティスト・ジャケット・トラック番号等）を一括で更新します。
+      </p>
+
+      <!-- MusicBrainz / iTunes アルバム自動検索ボックス -->
+      <div style="background: var(--bg-surface); padding: 10px; border-radius: 8px; border: 1px solid var(--border-color); margin-bottom: 12px;">
+        <div style="font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 6px;">
+          🌐 アルバム＆曲目を自動検索 (MusicBrainz / iTunes 日本ストア優先)
+        </div>
+        <div style="display: flex; gap: 6px;">
+          <input type="text" id="meta-sel-search-input" value="${escapeAttr(initialQuery)}" placeholder="アルバム名やアーティスト名を入力…" style="flex: 1; font-size: 12px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--fg);" />
+          <button type="button" class="btn primary" id="btn-meta-sel-search" style="padding: 4px 10px; font-size: 12px; white-space: nowrap;">検索</button>
+        </div>
+        <div id="meta-sel-search-results" style="max-height: 180px; overflow-y: auto; margin-top: 8px; display: none;"></div>
+      </div>
+
+      <!-- ジャケット画像プレビュー & 変更 -->
+      <div class="modal-row" style="margin-bottom: 12px; background: var(--bg-surface); padding: 10px; border-radius: 8px; border: 1px solid var(--border-color);">
+        <label style="font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 8px; display: block;">
+          🖼 ジャケット画像（選択した全曲に一括適用）
+        </label>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div id="meta-sel-art-box" style="width: 68px; height: 68px; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: center; overflow: hidden; flex-shrink: 0; box-shadow: 0 2px 6px rgba(0,0,0,0.2);"></div>
+          <div style="display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0;">
+            <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+              <label for="meta-sel-file-input" class="btn" style="padding: 4px 10px; font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; margin: 0;">
+                📁 画像を選択…
+              </label>
+              <input type="file" id="meta-sel-file-input" accept="image/png, image/jpeg, image/webp, image/gif, image/*" style="display: none;" />
+              <button type="button" class="btn danger" id="btn-meta-sel-remove-art" style="padding: 4px 8px; font-size: 11px;">
+                ✕ 削除
+              </button>
+            </div>
+            <div id="meta-sel-art-status" style="font-size: 11px; color: var(--fg-muted); line-height: 1.3;">
+              変更しない場合は各曲の現在の画像を維持します
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-row">
+        <label for="meta-sel-album">アルバム名（入力すると選択した全 ${tracks.length} 曲に適用）</label>
+        <input type="text" id="meta-sel-album" value="${escapeAttr(commonAlbum)}" placeholder="${validAlbums.length > 1 ? "複数のアルバムが選択中（入力すると一括変更）" : "新しいアルバム名を入力"}" />
+      </div>
+      <div class="modal-row">
+        <label for="meta-sel-album-artist">アルバムアーティスト</label>
+        <input type="text" id="meta-sel-album-artist" value="${escapeAttr(commonAlbumArtist || commonArtist)}" placeholder="アルバムアーティスト（入力すると一括適用）" />
+      </div>
+      <div class="modal-row">
+        <label for="meta-sel-track-artist">選択曲のアーティスト名を統一する (任意)</label>
+        <input type="text" id="meta-sel-track-artist" value="${escapeAttr(commonArtist)}" placeholder="${validArtists.length > 1 ? "複数のアーティスト（空欄なら各曲の元のアーティストを維持）" : "全選択曲に適用するアーティスト名"}" />
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+        <div class="modal-row">
+          <label for="meta-sel-year">リリース年</label>
+          <input type="text" id="meta-sel-year" value="${escapeAttr(commonYear)}" placeholder="例: 2024" />
+        </div>
+        <div class="modal-row">
+          <label for="meta-sel-genre">ジャンル</label>
+          <input type="text" id="meta-sel-genre" value="${escapeAttr(commonGenre)}" placeholder="ジャンル" />
+        </div>
+      </div>
+
+      <!-- 選択曲の個別タイトル・トラック番号一括編集リスト -->
+      <div class="modal-row" style="margin-top: 14px; border-top: 1px solid var(--border-color); padding-top: 12px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; gap: 8px; flex-wrap: wrap;">
+          <label style="font-size: 12px; font-weight: 600; color: var(--accent); margin: 0;">
+            🎵 各曲の個別タイトル・トラック番号・メモ (${tracks.length}曲)
+          </label>
+          <button type="button" class="btn" id="btn-meta-sel-auto-num" style="padding: 2px 8px; font-size: 11px;">
+            🔢 1から連番を振る
+          </button>
+        </div>
+        <div class="meta-album-tracklist" id="meta-sel-tracklist" style="display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow-y: auto; padding-right: 4px;">
+          ${tracks.map((t, i) => `
+            <div class="meta-album-track-row" data-track-id="${escapeAttr(t.id)}" style="display: flex; gap: 6px; align-items: center; background: var(--bg-surface); padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border-color);">
+              <input type="text" class="meta-track-no-input" value="${escapeAttr(t.trackNo || String(i + 1))}" placeholder="番号" style="width: 38px; text-align: center; font-size: 11px; padding: 4px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" title="トラック番号" />
+              <input type="text" class="meta-track-title-input" value="${escapeAttr(t.title || "")}" placeholder="曲名" style="flex: 1; min-width: 0; font-size: 11px; padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" title="曲名" />
+              <input type="text" class="meta-track-artist-input" value="${escapeAttr(t.artist || "")}" placeholder="アーティスト" style="width: 85px; font-size: 11px; padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" title="アーティスト" />
+              <input type="text" class="meta-track-memo-input" value="${escapeAttr(t.memo || "")}" placeholder="メモ" style="width: 85px; font-size: 11px; padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" title="メモ" />
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `;
+
+    // 1から連番ボタン
+    body.querySelector("#btn-meta-sel-auto-num")?.addEventListener("click", () => {
+      const noInputs = body.querySelectorAll("#meta-sel-tracklist .meta-track-no-input");
+      noInputs.forEach((inp, idx) => {
+        inp.value = String(idx + 1);
+      });
+      toast(`1〜${noInputs.length} のトラック番号を設定しました`, "info");
+    });
+
+    // アートワークプレビュー描画
+    const renderSelArtPreview = () => {
+      const box = body.querySelector("#meta-sel-art-box");
+      const status = body.querySelector("#meta-sel-art-status");
+      const removeBtn = body.querySelector("#btn-meta-sel-remove-art");
+      if (!box) return;
+
+      if (localPreviewUrl) {
+        try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+        localPreviewUrl = null;
+      }
+
+      let displayUrl = null;
+      if (pendingArtworkBlob instanceof Blob) {
+        localPreviewUrl = URL.createObjectURL(pendingArtworkBlob);
+        displayUrl = localPreviewUrl;
+      } else if (pendingArtworkBlob === null) {
+        displayUrl = null;
+      } else {
+        displayUrl = initialArtUrl;
+      }
+
+      if (displayUrl) {
+        box.innerHTML = `<img src="${escapeAttr(displayUrl)}" style="width: 100%; height: 100%; object-fit: cover; display: block;" />`;
+        if (removeBtn) removeBtn.style.display = "inline-flex";
+      } else {
+        box.innerHTML = `<div style="font-size: 26px;">💿</div>`;
+        if (removeBtn) removeBtn.style.display = "none";
+      }
+
+      if (status) {
+        if (pendingArtworkBlob instanceof Blob) {
+          const sizeKb = Math.round(pendingArtworkBlob.size / 1024);
+          status.innerHTML = `<span style="color: var(--success); font-weight: 600;">✓ 新しい画像を設定中 (${sizeKb} KB、選択曲すべてに反映)</span>`;
+        } else if (pendingArtworkBlob === null) {
+          status.innerHTML = `<span style="color: var(--err); font-weight: 600;">✕ 画像を削除（選択曲から未設定になります）</span>`;
+        } else {
+          status.textContent = "変更しない場合は各曲の現在の画像を維持します";
+        }
+      }
+    };
+
+    renderSelArtPreview();
+
+    const selFileInput = body.querySelector("#meta-sel-file-input");
+    selFileInput?.addEventListener("change", (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      if (!file.type.startsWith("image/")) {
+        toast("画像ファイルを選択してください", "err");
+        return;
+      }
+      pendingArtworkBlob = file;
+      renderSelArtPreview();
+      toast("画像を選択しました。「一括保存」で反映されます", "ok");
+    });
+
+    body.querySelector("#btn-meta-sel-remove-art")?.addEventListener("click", () => {
+      pendingArtworkBlob = null;
+      renderSelArtPreview();
+      toast("画像を削除に設定しました", "info");
+    });
+
+    // アルバム検索ハンドラ
+    const searchInput = body.querySelector("#meta-sel-search-input");
+    const searchBtn = body.querySelector("#btn-meta-sel-search");
+    const resultsContainer = body.querySelector("#meta-sel-search-results");
+
+    const performSearch = async () => {
+      const q = searchInput.value.trim();
+      if (!q) return;
+
+      searchBtn.disabled = true;
+      searchBtn.textContent = "検索中…";
+      resultsContainer.style.display = "block";
+      resultsContainer.innerHTML = `<div style="padding: 12px; text-align: center; color: var(--fg-muted); font-size: 11px;">アルバム候補を検索中…</div>`;
+
+      try {
+        const results = await searchAlbumMetadata(q);
+        if (results.length === 0) {
+          resultsContainer.innerHTML = `<div style="padding: 12px; text-align: center; color: var(--fg-muted); font-size: 11px;">該当するアルバムが見つかりませんでした</div>`;
+          return;
+        }
+
+        const itunesResults = results.filter((r) => r.source === "iTunes");
+        const mbResults = results.filter((r) => r.source === "MusicBrainz");
+        const defaultTab = itunesResults.length > 0 ? "itunes" : "mb";
+
+        const renderAlbumList = (list, prefix) => {
+          if (!list || list.length === 0) {
+            return `<div style="padding: 10px; text-align: center; color: var(--fg-muted); font-size: 11px;">候補がありません</div>`;
+          }
+          return list.map((res, i) => `
+            <div class="meta-search-item" data-source="${escapeAttr(prefix)}" data-idx="${i}" style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; border-bottom: 1px solid var(--border-color); font-size: 11px; cursor: pointer; border-radius: 4px;">
+              <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">
+                <div style="width: 34px; height: 34px; border-radius: 4px; overflow: hidden; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 14px; position: relative;">
+                  ${res.artworkUrl
+                    ? `<img src="${escapeAttr(res.artworkUrl)}" style="width: 100%; height: 100%; object-fit: cover; display: block;" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" /><div style="display: none; width: 100%; height: 100%; align-items: center; justify-content: center;">💿</div>`
+                    : `💿`}
+                </div>
+                <div style="flex: 1; min-width: 0;">
+                  <div style="font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.title)}</div>
+                  <div style="color: var(--fg-muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(res.artist)} • ${escapeHtml(res.year || "年不明")}${res.trackCount ? ` (${res.trackCount}曲)` : ""}</div>
+                </div>
+              </div>
+              <button type="button" class="btn btn-apply-sel-meta" data-source="${escapeAttr(prefix)}" data-idx="${i}" style="padding: 3px 8px; font-size: 10px; white-space: nowrap; margin-left: 6px;">
+                一括反映
+              </button>
+            </div>
+          `).join("");
+        };
+
+        resultsContainer.innerHTML = `
+          <div class="meta-source-tabs" style="display: flex; gap: 4px; border-bottom: 1px solid var(--border-color); margin-bottom: 6px; padding-bottom: 6px;">
+            <button type="button" class="btn btn-sel-source-tab ${defaultTab === "itunes" ? "primary" : ""}" data-tab="itunes" style="padding: 3px 8px; font-size: 11px; flex: 1;">
+              🍎 iTunes (${itunesResults.length})
+            </button>
+            <button type="button" class="btn btn-sel-source-tab ${defaultTab === "mb" ? "primary" : ""}" data-tab="mb" style="padding: 3px 8px; font-size: 11px; flex: 1;">
+              🧠 MusicBrainz (${mbResults.length})
+            </button>
+          </div>
+          <div id="meta-sel-tab-pane-itunes" style="display: ${defaultTab === "itunes" ? "block" : "none"};">
+            ${renderAlbumList(itunesResults, "itunes")}
+          </div>
+          <div id="meta-sel-tab-pane-mb" style="display: ${defaultTab === "mb" ? "block" : "none"};">
+            ${renderAlbumList(mbResults, "mb")}
+          </div>
+        `;
+
+        resultsContainer.querySelectorAll(".btn-sel-source-tab").forEach((tabBtn) => {
+          tabBtn.addEventListener("click", () => {
+            resultsContainer.querySelectorAll(".btn-sel-source-tab").forEach((b) => b.classList.remove("primary"));
+            tabBtn.classList.add("primary");
+            const tab = tabBtn.dataset.tab;
+            const paneItunes = resultsContainer.querySelector("#meta-sel-tab-pane-itunes");
+            const paneMb = resultsContainer.querySelector("#meta-sel-tab-pane-mb");
+            if (paneItunes) paneItunes.style.display = tab === "itunes" ? "block" : "none";
+            if (paneMb) paneMb.style.display = tab === "mb" ? "block" : "none";
+          });
+        });
+
+        resultsContainer.querySelectorAll(".btn-apply-sel-meta").forEach((btn) => {
+          btn.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            const source = btn.dataset.source;
+            const idx = parseInt(btn.dataset.idx, 10);
+            const targetList = source === "itunes" ? itunesResults : mbResults;
+            const sel = targetList[idx];
+            if (!sel) return;
+
+            btn.textContent = "曲目取得中…";
+            btn.disabled = true;
+
+            body.querySelector("#meta-sel-album").value = sel.title || "";
+            body.querySelector("#meta-sel-album-artist").value = sel.artist || "";
+            body.querySelector("#meta-sel-track-artist").value = sel.artist || "";
+            if (sel.year) body.querySelector("#meta-sel-year").value = sel.year;
+            if (sel.genre) body.querySelector("#meta-sel-genre").value = sel.genre;
+
+            if (sel.artworkUrl) {
+              const blob = await fetchArtworkBlob(sel.artworkUrl);
+              if (blob) {
+                pendingArtworkBlob = blob;
+                renderSelArtPreview();
+              }
+            }
+
+            const onlineTracks = await fetchAlbumTracklist(sel);
+            if (onlineTracks && onlineTracks.length > 0) {
+              const rows = body.querySelectorAll(".meta-album-track-row");
+              rows.forEach((row, rowIdx) => {
+                const onlineSong = onlineTracks[rowIdx];
+                if (onlineSong) {
+                  const noInput = row.querySelector(".meta-track-no-input");
+                  const titleInput = row.querySelector(".meta-track-title-input");
+                  const artistInput = row.querySelector(".meta-track-artist-input");
+                  if (noInput && onlineSong.trackNo) noInput.value = onlineSong.trackNo;
+                  if (titleInput && onlineSong.title) titleInput.value = onlineSong.title;
+                  if (artistInput && onlineSong.artist) artistInput.value = onlineSong.artist;
+                }
+              });
+              toast(`「${sel.title}」(${sel.source}) の情報と曲目を反映しました`, "ok");
+            } else {
+              toast(`「${sel.title}」(${sel.source}) のアルバム情報を反映しました`, "ok");
+            }
+
+            btn.textContent = "一括反映";
+            btn.disabled = false;
+            resultsContainer.style.display = "none";
+          });
+        });
+      } catch (err) {
+        resultsContainer.innerHTML = `<div style="padding: 8px; color: var(--err); font-size: 11px;">検索エラー: ${escapeHtml(err.message)}</div>`;
+      } finally {
+        searchBtn.disabled = false;
+        searchBtn.textContent = "検索";
+      }
+    };
+
+    searchBtn.addEventListener("click", performSearch);
+    searchInput.addEventListener("keydown", (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === "Enter") {
+        e.preventDefault();
+        performSearch();
+      }
+    });
+
+    openModal({
+      title: `選択した ${tracks.length} 曲を一括編集`,
+      body,
+      actions: [
+        {
+          label: "🗑 選択曲を削除",
+          danger: true,
+          onClick: async () => {
+            const confirmed = window.confirm(`選択中の ${tracks.length} 曲をすべてライブラリから削除しますか？\n（曲データは完全に削除されます）`);
+            if (!confirmed) return false;
+            for (const t of tracks) {
+              if (appState.get().currentTrack?.id === t.id) stopPlayback();
+              await deleteTrack(t.id);
+              await removeTrackFromAllPlaylists(t.id).catch(() => {});
+              releaseArtwork(t.id);
+            }
+            recordLibraryModified();
+            toast(`選択した ${tracks.length} 曲を削除しました`, "ok");
+            if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+            if (typeof onUpdated === "function") onUpdated(null);
+            resolve(null);
+            return true;
+          },
+        },
+        {
+          label: "キャンセル",
+          onClick: () => {
+            if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+            resolve(null);
+          },
+        },
+        {
+          label: `選択した ${tracks.length} 曲に一括保存`,
+          primary: true,
+          onClick: async () => {
+            const albumName = body.querySelector("#meta-sel-album").value.trim();
+            const albumArtist = body.querySelector("#meta-sel-album-artist").value.trim();
+            const trackArtist = body.querySelector("#meta-sel-track-artist").value.trim();
+            const year = body.querySelector("#meta-sel-year").value.trim();
+            const genre = body.querySelector("#meta-sel-genre").value.trim();
+
+            const trackRows = body.querySelectorAll(".meta-album-track-row");
+            const trackPatchMap = new Map();
+            trackRows.forEach((row) => {
+              const tid = row.dataset.trackId;
+              const noVal = row.querySelector(".meta-track-no-input")?.value.trim();
+              const titleVal = row.querySelector(".meta-track-title-input")?.value.trim();
+              const artistVal = row.querySelector(".meta-track-artist-input")?.value.trim();
+              const memoVal = row.querySelector(".meta-track-memo-input")?.value.trim();
+              trackPatchMap.set(tid, {
+                trackNo: noVal,
+                title: titleVal,
+                artist: artistVal,
+                memo: memoVal !== undefined ? memoVal : undefined,
+              });
+            });
+
+            const basePatch = {
+              userEdited: true,
+            };
+            if (albumName || commonAlbum) basePatch.album = albumName;
+            if (albumArtist || commonAlbumArtist) basePatch.albumArtist = albumArtist;
+            if (year || commonYear) basePatch.year = year;
+            if (genre || commonGenre) basePatch.genre = genre;
+
+            if (pendingArtworkBlob !== undefined) {
+              basePatch.artworkBlob = pendingArtworkBlob;
+              if (pendingArtworkBlob instanceof Blob) {
+                try {
+                  basePatch.artworkDataUrl = await blobToDataUrl(pendingArtworkBlob, 500);
+                } catch {
+                  basePatch.artworkDataUrl = null;
+                }
+              } else {
+                basePatch.artworkDataUrl = null;
+              }
+            }
+
+            for (const t of tracks) {
+              const perTrack = trackPatchMap.get(t.id) || {};
+              const individualPatch = { ...basePatch };
+              if (perTrack.title) individualPatch.title = perTrack.title;
+              if (perTrack.trackNo !== undefined && perTrack.trackNo !== "") individualPatch.trackNo = perTrack.trackNo;
+              if (trackArtist) individualPatch.artist = trackArtist;
+              else if (perTrack.artist) individualPatch.artist = perTrack.artist;
+              if (perTrack.memo !== undefined) individualPatch.memo = perTrack.memo;
+
+              releaseArtwork(t.id);
+              await updateTrack(t.id, individualPatch);
+              releaseArtwork(t.id);
+              Object.assign(t, individualPatch);
+            }
+            recordLibraryModified();
+
+            const cur = appState.get().currentTrack;
+            if (cur && tracks.some((t) => t.id === cur.id)) {
+              releaseArtwork(cur.id);
+              const curPatch = trackPatchMap.get(cur.id) || {};
+              appState.set({ currentTrack: { ...cur, ...basePatch, ...curPatch } });
+            }
+
+            if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+            toast(`${tracks.length} 曲のメタデータを一括更新しました`, "ok");
+            if (typeof onUpdated === "function") onUpdated(tracks);
+            resolve(tracks);
+          },
+        },
+      ],
+    });
+  });
+}
