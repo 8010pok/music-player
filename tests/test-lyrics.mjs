@@ -15,6 +15,7 @@ import {
   cleanTitleForLyrics, cleanArtistForLyrics, fetchOnlineLyrics,
   stripParenthesesAndSubtitles, extractPrimaryArtist,
   isArtistMatch, isTitleMatch, isDurationMatch, getExternalLyricsUrls,
+  setLyricsCache, clearLyricsCache,
 } from "../js/metadata/lrclib.js";
 
 let passCount = 0, failCount = 0;
@@ -371,8 +372,8 @@ describe("LRCLIB: アーティスト/タイトル/再生時間の一致判定", 
   assert(isDurationMatch(0, 200), "再生時間不明(0)はスキップして許容");
 });
 
-/* ============ 外部歌詞サイトURL生成 ============ */
-describe("LRCLIB: 外部歌詞サイト検索URL生成", () => {
+/* ============ 外部歌詞サイトURL生成 & タイトル救済 ============ */
+describe("LRCLIB: 外部歌詞サイト検索URL生成 & 自動救済", () => {
   const urls = getExternalLyricsUrls("アイドル", "YOASOBI");
   assert(urls.petitLyrics.includes("petitlyrics.com"), "プチリリURL生成");
   assert(urls.petitLyrics.includes("title=%E3%82%A2%E3%82%A4%E3%83%89%E3%83%AB"), "プチリリ タイトルエンコード");
@@ -380,6 +381,21 @@ describe("LRCLIB: 外部歌詞サイト検索URL生成", () => {
   assert(urls.utaTen.includes("utaten.com"), "UtaTen URL生成");
   assert(urls.jLyric.includes("j-lyric.net"), "J-Lyric URL生成");
   assert(urls.google.includes("google.com"), "Google URL生成");
+
+  // アーティスト名が空で、タイトルが "YOASOBI - アイドル" の場合の救済URL生成
+  const urlsRescued = getExternalLyricsUrls("YOASOBI - アイドル", "");
+  assert(urlsRescued.petitLyrics.includes("title=%E3%82%A2%E3%82%A4%E3%83%89%E3%83%AB"), "タイトル分離による曲名救済");
+  assert(urlsRescued.petitLyrics.includes("artist=YOASOBI"), "タイトル分離によるアーティスト救済");
+});
+
+/* ============ 歌詞キャッシュ ============ */
+describe("LRCLIB: 歌詞キャッシュ制御", () => {
+  clearLyricsCache();
+  setLyricsCache("Bohemian Rhapsody", "Queen", { synced: null, unsynced: "Mama..." });
+  // cleanArtistForLyrics / cleanTitleForLyrics を通して整合すること
+  assertEqual(cleanArtistForLyrics("YouTube"), "", "YouTube はプレースホルダーとして除外");
+  assertEqual(cleanArtistForLyrics("Download"), "", "Download はプレースホルダーとして除外");
+  assertEqual(cleanArtistForLyrics("Downloads"), "", "Downloads はプレースホルダーとして除外");
 });
 
 /* ============ 結果 ============ */

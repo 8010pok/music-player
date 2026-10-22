@@ -1197,7 +1197,8 @@ function openLibraryTrackActionsModal(track, refs) {
     if (!btn) return;
     const act = btn.dataset.act;
 
-    // モーダルを確実に閉じる
+    // モーダルを確実に閉じる（リスナ解除・Promise完了を伴う正規ルート）
+    dismissActiveModal();
     const modalRoot = document.getElementById("modal-root");
     if (modalRoot) {
       modalRoot.hidden = true;
@@ -1968,8 +1969,7 @@ async function openSyncModal(refs) {
         toast(diffMsg, "ok");
         await reloadTracks(activeRefs || refs);
         await refreshStorage(activeRefs || refs);
-        const closeBtn = document.querySelector("#modal-root .modal-actions .btn");
-        if (closeBtn) closeBtn.click();
+        dismissActiveModal();
       } catch (err) {
         toast(`同期エラー: ${err.message}`, "err");
         importBtn.disabled = false;

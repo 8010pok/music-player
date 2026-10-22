@@ -15,12 +15,12 @@ import { getPublic, setPublic } from "../store/settings.js";
 import { extractMetadata } from "../metadata/index.js";
 import { initVisualizer, startVisualizer, stopVisualizer, decodePcmForVisualization } from "../player/visualizer.js";
 import { setLoved, retryScrobbleForTrack } from "../lastfm/scrobble.js";
-import { formatTime, toast, escapeHtml, openModal } from "./components.js";
+import { formatTime, toast, escapeHtml, openModal, dismissActiveModal } from "./components.js";
 import { getBlob, updateTrack } from "../store/library-db.js";
 import { getArtworkUrl, markArtworkBroken } from "./artwork-cache.js";
 import { editTrackMetadata } from "./metadata-editor.js";
 import { openNormalizeModal } from "./normalize-modal.js";
-import { fetchOnlineLyrics, fetchLyricsCandidates, getExternalLyricsUrls } from "../metadata/lrclib.js";
+import { fetchOnlineLyrics, fetchLyricsCandidates, getExternalLyricsUrls, setLyricsCache } from "../metadata/lrclib.js";
 import { parseLrc } from "../metadata/lyrics.js";
 import { go } from "../router.js";
 import { getAlbumKey, getAlbumArtist } from "../metadata/album-util.js";
@@ -218,12 +218,15 @@ export async function mount(root) {
         artist: cur.artist,
         album: cur.album,
         duration: cur.duration,
+        originalName: cur.originalName,
       });
 
       if (!alive || appState.get().currentTrack?.id !== cur.id) return null;
 
       if (fetched) {
         applyLyrics(fetched);
+        cur.lyrics = fetched;
+        updateTrack(cur.id, { lyrics: fetched }).catch(() => {});
         return fetched;
       } else if (lyricsVisible && !currentLyrics) {
         renderEmptyLyrics("歌詞が見つかりませんでした");
@@ -242,7 +245,6 @@ export async function mount(root) {
     const cur = track || appState.get().currentTrack;
     if (!cur) return;
 
-    const urls = getExternalLyricsUrls(cur.title, cur.artist);
     const body = document.createElement("div");
     body.style.cssText = "display: flex; flex-direction: column; gap: 10px; max-height: 72vh; overflow-y: auto;";
     body.innerHTML = `
@@ -278,10 +280,7 @@ export async function mount(root) {
           外部サイトで探す (ワンタップで検索結果を開く):
         </div>
         <div style="display: flex; gap: 6px; flex-wrap: wrap;" id="custom-ext-links">
-          <a href="${urls.petitLyrics}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 5px 8px; text-decoration: none;">🌸 プチリリ</a>
-          <a href="${urls.utaNet}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 5px 8px; text-decoration: none;">🎵 歌ネット</a>
-          <a href="${urls.utaTen}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 5px 8px; text-decoration: none;">🎤 UtaTen</a>
-          <a href="${urls.google}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 5px 8px; text-decoration: none;">🔍 Google</a>
+          <!-- 動的生成 -->
         </div>
         <div style="font-size: 10px; color: var(--fg-muted); margin-top: 6px;">
           コピーした歌詞は「歌詞を貼り付け」から登録すると永久保存されます。
@@ -303,6 +302,23 @@ export async function mount(root) {
     const resultsWrap = body.querySelector("#custom-lyrics-results");
     const countLabel = body.querySelector("#results-count-label");
     const listEl = body.querySelector("#candidates-list");
+    const extLinksWrap = body.querySelector("#custom-ext-links");
+
+    const updateExtLinks = () => {
+      if (!extLinksWrap) return;
+      const t = titleInput.value.trim() || cur.title;
+      const a = artistInput.value.trim() || cur.artist;
+      const urls = getExternalLyricsUrls(t, a);
+      extLinksWrap.innerHTML = `
+        <a href="${urls.petitLyrics}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 5px 8px; text-decoration: none;">🌸 プチリリ</a>
+        <a href="${urls.utaNet}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 5px 8px; text-decoration: none;">🎵 歌ネット</a>
+        <a href="${urls.utaTen}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 5px 8px; text-decoration: none;">🎤 UtaTen</a>
+        <a href="${urls.google}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 5px 8px; text-decoration: none;">🔍 Google</a>
+      `;
+    };
+    updateExtLinks();
+    titleInput.addEventListener("input", updateExtLinks);
+    artistInput.addEventListener("input", updateExtLinks);
 
     const doSearch = async () => {
       const t = titleInput.value.trim();
@@ -362,11 +378,14 @@ export async function mount(root) {
               synced: synced && synced.length > 0 ? synced : null,
               unsynced: c.plainLyrics || null,
             };
-            applyLyrics(newLyr);
+            if (appState.get().currentTrack?.id === cur.id) {
+              applyLyrics(newLyr);
+              cur.lyrics = newLyr;
+            }
             await updateTrack(cur.id, { lyrics: newLyr }).catch(() => {});
+            setLyricsCache(cur.title, cur.artist, newLyr);
             toast(`「${c.title} - ${c.artist}」の歌詞を反映しました`, "ok");
-            const closeBtn = document.querySelector("#modal-root .modal-actions .btn");
-            if (closeBtn) closeBtn.click();
+            dismissActiveModal();
           });
 
           listEl.appendChild(item);
@@ -423,13 +442,21 @@ export async function mount(root) {
               return false;
             }
             const synced = parseLrc(text);
+            const plain = (synced && synced.length > 0)
+              ? text.replace(/\[\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\]/g, "").replace(/\n{3,}/g, "\n\n").trim()
+              : text;
             const newLyrics = {
               synced: synced && synced.length > 0 ? synced : null,
-              unsynced: text,
+              unsynced: plain || null,
             };
-            applyLyrics(newLyrics);
+            if (appState.get().currentTrack?.id === cur.id) {
+              applyLyrics(newLyrics);
+              cur.lyrics = newLyrics;
+            }
             await updateTrack(cur.id, { lyrics: newLyrics }).catch(() => {});
+            setLyricsCache(cur.title, cur.artist, newLyrics);
             toast("歌詞を登録・更新しました", "ok");
+            dismissActiveModal();
             return true;
           },
         },

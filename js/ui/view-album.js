@@ -475,7 +475,8 @@ function openTrackActionsModal(track, root) {
     if (!btn) return;
     const act = btn.dataset.act;
 
-    // モーダルを確実に閉じる
+    // モーダルを確実に閉じる（リスナ解除・Promise完了を伴う正規ルート）
+    dismissActiveModal();
     const modalRoot = document.getElementById("modal-root");
     if (modalRoot) {
       modalRoot.hidden = true;

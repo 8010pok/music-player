@@ -574,8 +574,13 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
       if (!blob) throw new Error("曲の音声データが見つかりませんでした");
 
       const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const arrayBuf = await blob.arrayBuffer();
-      const decBuf = await audioCtx.decodeAudioData(arrayBuf);
+      let decBuf;
+      try {
+        const arrayBuf = await blob.arrayBuffer();
+        decBuf = await audioCtx.decodeAudioData(arrayBuf);
+      } finally {
+        try { await audioCtx.close(); } catch (_) {}
+      }
       const loudness = analyzeAudioLoudness(decBuf);
 
       const refData = {
@@ -761,7 +766,11 @@ export function openYouTubeDownloadModal({ onSaved = null } = {}) {
 
     // 1. Web Audio API でデコード
     const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    currentAudioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+    try {
+      currentAudioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+    } finally {
+      try { await audioCtx.close(); } catch (_) {}
+    }
     audioDuration = currentAudioBuffer.duration;
     cutStartTime = 0;
     cutEndTime = audioDuration;

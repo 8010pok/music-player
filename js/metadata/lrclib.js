@@ -8,9 +8,28 @@
  */
 
 import { parseLrc } from "./lyrics.js";
+import { isPlaceholderArtist, parseArtistAndTitle } from "../lastfm/scrobble-cleaner.js";
 
 // メモリ内キャッシュ (同一曲の重複フェッチ防止)
 const lyricsCache = new Map();
+
+/**
+ * 歌詞キャッシュを設定・更新（手動登録・選択時）
+ */
+export function setLyricsCache(title, artist = "", lyrics = null) {
+  const cTitle = cleanTitleForLyrics(title);
+  const cArtist = cleanArtistForLyrics(artist);
+  if (!cTitle) return;
+  const key = `${cArtist.toLowerCase()}|||${cTitle.toLowerCase()}`;
+  lyricsCache.set(key, lyrics);
+}
+
+/**
+ * 歌詞キャッシュを全消去
+ */
+export function clearLyricsCache() {
+  lyricsCache.clear();
+}
 
 /**
  * 検索用の曲名をクリーンアップ
@@ -47,12 +66,14 @@ export function cleanArtistForLyrics(artist) {
   if (!artist || typeof artist !== "string") return "";
   const a = artist.trim();
   if (
+    isPlaceholderArtist(a) ||
     a === "(Google Drive)" ||
     a === "(不明)" ||
     a === "(不明アーティスト)" ||
     a === "Unknown Artist" ||
     a.toLowerCase() === "music" ||
-    a.toLowerCase() === "download"
+    a.toLowerCase() === "download" ||
+    a.toLowerCase() === "downloads"
   ) {
     return "";
   }
@@ -316,11 +337,24 @@ async function fetchLyricsOvh(title, artist) {
  * @param {string} [param.artist] - アーティスト名
  * @param {string} [param.album] - アルバム名
  * @param {number} [param.duration] - 再生時間(秒)
+ * @param {string} [param.originalName] - 元ファイル名 (未設定時の救済用)
  * @returns {Promise<{ synced: Array<{timeMs: number, text: string}>|null, unsynced: string|null, source?: string, artistName?: string, trackName?: string }|null>}
  */
-export async function fetchOnlineLyrics({ title, artist = "", album = "", duration = 0 } = {}) {
-  const cTitle = cleanTitleForLyrics(title);
-  const cArtist = cleanArtistForLyrics(artist);
+export async function fetchOnlineLyrics({ title, artist = "", album = "", duration = 0, originalName = "" } = {}) {
+  let effectiveTitle = title;
+  let effectiveArtist = artist;
+
+  // アーティスト名が空またはプレースホルダーの場合、title または originalName から "Artist - Title" を抽出救済
+  if (!cleanArtistForLyrics(effectiveArtist)) {
+    const parsed = parseArtistAndTitle(effectiveTitle) || (originalName ? parseArtistAndTitle(originalName) : null);
+    if (parsed && !isPlaceholderArtist(parsed.artist)) {
+      effectiveArtist = parsed.artist;
+      effectiveTitle = parsed.title;
+    }
+  }
+
+  const cTitle = cleanTitleForLyrics(effectiveTitle);
+  const cArtist = cleanArtistForLyrics(effectiveArtist);
   if (!cTitle) return null;
 
   const cacheKey = `${cArtist.toLowerCase()}|||${cTitle.toLowerCase()}`;
@@ -328,8 +362,8 @@ export async function fetchOnlineLyrics({ title, artist = "", album = "", durati
     return lyricsCache.get(cacheKey);
   }
 
-  const baseTitle = stripParenthesesAndSubtitles(title);
-  const primaryArtist = extractPrimaryArtist(artist);
+  const baseTitle = stripParenthesesAndSubtitles(effectiveTitle);
+  const primaryArtist = extractPrimaryArtist(effectiveArtist);
 
   // 1. LRCLIB: /api/get (曲名 + アーティスト + アルバム + duration 完全一致)
   let found = await fetchLrclibGet(cTitle, cArtist, album, duration);
@@ -399,8 +433,19 @@ export async function fetchOnlineLyrics({ title, artist = "", album = "", durati
  * @returns {Promise<Array<{ id: number|string, title: string, artist: string, album?: string, duration?: number, hasSynced: boolean, syncedLyrics?: string, plainLyrics?: string }>>}
  */
 export async function fetchLyricsCandidates({ title, artist = "" } = {}) {
-  const cTitle = cleanTitleForLyrics(title);
-  const cArtist = cleanArtistForLyrics(artist);
+  let effectiveTitle = title;
+  let effectiveArtist = artist;
+
+  if (!cleanArtistForLyrics(effectiveArtist)) {
+    const parsed = parseArtistAndTitle(effectiveTitle);
+    if (parsed && !isPlaceholderArtist(parsed.artist)) {
+      effectiveArtist = parsed.artist;
+      effectiveTitle = parsed.title;
+    }
+  }
+
+  const cTitle = cleanTitleForLyrics(effectiveTitle);
+  const cArtist = cleanArtistForLyrics(effectiveArtist);
   if (!cTitle) return [];
 
   const candidates = [];
@@ -445,8 +490,19 @@ export async function fetchLyricsCandidates({ title, artist = "" } = {}) {
  * @returns {{ petitLyrics: string, utaNet: string, utaTen: string, jLyric: string, google: string }}
  */
 export function getExternalLyricsUrls(title, artist = "") {
-  const cTitle = cleanTitleForLyrics(title) || title || "";
-  const cArtist = cleanArtistForLyrics(artist) || artist || "";
+  let effTitle = title || "";
+  let effArtist = artist || "";
+
+  if (!cleanArtistForLyrics(effArtist)) {
+    const parsed = parseArtistAndTitle(effTitle);
+    if (parsed && !isPlaceholderArtist(parsed.artist)) {
+      effArtist = parsed.artist;
+      effTitle = parsed.title;
+    }
+  }
+
+  const cTitle = cleanTitleForLyrics(effTitle) || effTitle || "";
+  const cArtist = cleanArtistForLyrics(effArtist) || effArtist || "";
   const t = encodeURIComponent(cTitle);
   const a = encodeURIComponent(cArtist);
   const combined = encodeURIComponent(`${cArtist} ${cTitle}`.trim());
