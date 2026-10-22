@@ -601,6 +601,40 @@ describe("resolveScrobbleTrack (スクロブルメタデータ総合解決 & 救
   assertEqual(cleanArtistName("キャラクター名 (CV: 声優名)"), "キャラクター名", 'CV表記除去');
   assert(isPlaceholderArtist("downloads"), 'downloads はプレースホルダー');
   assert(isPlaceholderArtist("music"), 'music はプレースホルダー');
+  assert(isPlaceholderArtist("google drive"), 'google drive はプレースホルダー');
+  assert(isPlaceholderArtist("(Google Drive)"), '(Google Drive) はプレースホルダー');
+
+  // ケース8: 未キャッシュ Google Drive トラックの自動救済 (originalName からの抽出 & アルバム除外)
+  const driveTrack1 = {
+    id: "gd-file123",
+    title: "夜に駆ける",
+    artist: "(不明アーティスト)",
+    album: "Google Drive",
+    originalName: "YOASOBI - 夜に駆ける.mp3",
+    source: "gdrive",
+    cached: false,
+  };
+  const resDrive1 = resolveScrobbleTrack(driveTrack1);
+  assertEqual(resDrive1.artist, "YOASOBI", "originalName から YOASOBI を救済");
+  assertEqual(resDrive1.title, "夜に駆ける", "タイトル保持");
+  assertEqual(resDrive1.album, "", "Google Drive アルバムは除外");
+  assertEqual(resDrive1.isInvalid, false, "有効なスクロブルデータになる");
+
+  // ケース9: フォルダ名 "Music" が入ってしまった未キャッシュ曲の救済
+  const driveTrack2 = {
+    id: "gd-file456",
+    title: "白日",
+    artist: "Music",
+    album: "Music",
+    originalName: "King Gnu - 白日.mp3",
+    source: "gdrive",
+    cached: false,
+  };
+  const resDrive2 = resolveScrobbleTrack(driveTrack2);
+  assertEqual(resDrive2.artist, "King Gnu", "Music プレースホルダーから King Gnu を救済");
+  assertEqual(resDrive2.title, "白日", "タイトル 白日");
+  assertEqual(resDrive2.album, "", "Music アルバムは除外");
+  assertEqual(resDrive2.isInvalid, false, "有効");
 });
 
 /* ============ 結果 ============ */

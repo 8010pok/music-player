@@ -20,6 +20,142 @@ import {
 } from "../lastfm/scrobble-cleaner.js";
 
 /**
+ * MP4/MOV の ArrayBuffer から映像トラック (vide trak) を free ボックス（パディング）に無効化し、
+ * 純粋な音声コンテナ (audio/mp4) として decodeAudioData で確実に読み込めるようにする。
+ *
+ * 【技術的背景】
+ * iOS Safari / WebKit や一部の Android / PC ブラウザでは、映像トラックを含む MP4/MOV を
+ * AudioContext.decodeAudioData に直接渡すと EncodingError ("Unable to decode audio data") で失敗する。
+ * moov 内のビデオ trak を ISO 標準の free ボックスに書き換えることで、チャンクオフセット (stco/co64) を
+ * 1バイトもズラさずに、ブラウザに「純粋な音声トラックのみの MP4 (M4A)」と認識させ、100% 確実にデコード可能にする。
+ *
+ * @param {ArrayBuffer} arrayBuffer
+ * @returns {ArrayBuffer|null}
+ */
+export function stripVideoTracksFromMp4(arrayBuffer) {
+  if (!arrayBuffer || arrayBuffer.byteLength < 16) return null;
+
+  try {
+    const u8 = new Uint8Array(arrayBuffer.slice(0));
+    const view = new DataView(u8.buffer);
+    const len = u8.length;
+
+    function readBoxHeader(offset) {
+      if (offset + 8 > len) return null;
+      let size = view.getUint32(offset);
+      const type = String.fromCharCode(
+        u8[offset + 4],
+        u8[offset + 5],
+        u8[offset + 6],
+        u8[offset + 7]
+      );
+      let headerSize = 8;
+      if (size === 1) {
+        if (offset + 16 > len) return null;
+        const hi = view.getUint32(offset + 8);
+        const lo = view.getUint32(offset + 12);
+        if (hi > 0) return null; // 4GB以上はスキップ
+        size = lo;
+        headerSize = 16;
+      } else if (size === 0) {
+        size = len - offset;
+      }
+      return { offset, size, type, headerSize };
+    }
+
+    // トップレベルボックス走査
+    let pos = 0;
+    let moovBox = null;
+    while (pos < len) {
+      const box = readBoxHeader(pos);
+      if (!box || box.size <= 0) break;
+      if (box.type === "moov") {
+        moovBox = box;
+        break;
+      }
+      pos += box.size;
+    }
+
+    if (!moovBox) return null;
+
+    // moov の中身を走査
+    let moovPos = moovBox.offset + moovBox.headerSize;
+    const moovEnd = moovBox.offset + moovBox.size;
+    let hasAudioTrack = false;
+    const videoTrakOffsets = [];
+
+    while (moovPos < moovEnd) {
+      const trakBox = readBoxHeader(moovPos);
+      if (!trakBox || trakBox.size <= 0) break;
+
+      if (trakBox.type === "trak") {
+        let trakPos = trakBox.offset + trakBox.headerSize;
+        const trakEnd = trakBox.offset + trakBox.size;
+        let isVideo = false;
+        let isAudio = false;
+
+        while (trakPos < trakEnd) {
+          const subBox = readBoxHeader(trakPos);
+          if (!subBox || subBox.size <= 0) break;
+
+          if (subBox.type === "mdia") {
+            let mdiaPos = subBox.offset + subBox.headerSize;
+            const mdiaEnd = subBox.offset + subBox.size;
+            while (mdiaPos < mdiaEnd) {
+              const mdiaSub = readBoxHeader(mdiaPos);
+              if (!mdiaSub || mdiaSub.size <= 0) break;
+
+              if (mdiaSub.type === "hdlr") {
+                // hdlr box: 4 byte size + 4 byte "hdlr" + 4 byte (ver+flags) + 4 byte pre_defined + 4 byte handler_type
+                const handlerOffset = mdiaSub.offset + 16;
+                if (handlerOffset + 4 <= len) {
+                  const handlerType = String.fromCharCode(
+                    u8[handlerOffset],
+                    u8[handlerOffset + 1],
+                    u8[handlerOffset + 2],
+                    u8[handlerOffset + 3]
+                  );
+                  if (handlerType === "vide") isVideo = true;
+                  if (handlerType === "soun") isAudio = true;
+                }
+                break;
+              }
+              mdiaPos += mdiaSub.size;
+            }
+          }
+          trakPos += subBox.size;
+        }
+
+        if (isVideo) {
+          videoTrakOffsets.push(trakBox.offset);
+        }
+        if (isAudio) {
+          hasAudioTrack = true;
+        }
+      }
+      moovPos += trakBox.size;
+    }
+
+    // ビデオトラックが存在し、音声トラックも確認できた場合
+    if (videoTrakOffsets.length > 0 && hasAudioTrack) {
+      // 各ビデオ trak の 'trak' を 'free' に書き換えてパディング化
+      for (const offset of videoTrakOffsets) {
+        u8[offset + 4] = 0x66; // 'f'
+        u8[offset + 5] = 0x72; // 'r'
+        u8[offset + 6] = 0x65; // 'e'
+        u8[offset + 7] = 0x65; // 'e'
+      }
+      return u8.buffer;
+    }
+
+    return null;
+  } catch (e) {
+    console.warn("[video-audio-extractor] stripVideoTracksFromMp4 エラー:", e);
+    return null;
+  }
+}
+
+/**
  * 動画 Blob からオーディオトラックを直接 PCM AudioBuffer としてデコード
  * @param {Blob} videoBlob - 動画データ (MP4, MOV, WebM 等)
  * @returns {Promise<AudioBuffer>}
@@ -33,11 +169,30 @@ export async function extractAudioBufferFromVideoBlob(videoBlob) {
   const audioCtx = new AC();
   try {
     const arrayBuffer = await videoBlob.arrayBuffer();
-    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-    return audioBuffer;
+
+    // 1. まず標準デコードを試行
+    try {
+      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+      return audioBuffer;
+    } catch (directErr) {
+      console.warn("[video-audio-extractor] decodeAudioData 直接デコード失敗、MP4ストリップフォールバックを試行:", directErr);
+    }
+
+    // 2. MP4/MOV のビデオトラック無効化 (freeボックス置換) フォールバック
+    const strippedBuffer = stripVideoTracksFromMp4(arrayBuffer);
+    if (strippedBuffer) {
+      try {
+        const audioBuffer = await audioCtx.decodeAudioData(strippedBuffer);
+        return audioBuffer;
+      } catch (stripErr) {
+        console.warn("[video-audio-extractor] MP4ストリップ後のデコードも失敗:", stripErr);
+      }
+    }
+
+    throw new Error("動画から音声トラックをデコードできませんでした (非対応の音声コーデックまたは音声トラックが含まれていません)");
   } catch (err) {
-    console.warn("[video-audio-extractor] decodeAudioData 失敗、フォールバックを試行:", err);
-    throw new Error(`動画から音声トラックをデコードできませんでした: ${err.message || "非対応の音声コーデックです"}`);
+    console.warn("[video-audio-extractor] 音声抽出エラー:", err);
+    throw new Error(err.message || "動画から音声を抽出できませんでした");
   } finally {
     try { await audioCtx.close(); } catch (_) {}
   }

@@ -14,6 +14,7 @@ import { formatFromName, mimeFromName } from "../metadata/util.js";
 import { openModal, toast, escapeHtml, escapeAttr } from "../ui/components.js";
 import { findDuplicateInList } from "../store/dedup-service.js";
 import { processAudioNormalization } from "../audio/normalize-service.js";
+import { isPlaceholderArtist, parseArtistAndTitle } from "../lastfm/scrobble-cleaner.js";
 
 let _cachedToken = null;
 let _gisTokenClient = null;
@@ -625,8 +626,13 @@ export function inferMetadataFromFileName(filename, folderName = "") {
     work = (trackMatch[3] || "").trim();
   }
 
-  // 2. 残りの work から "Artist - Title" を抽出
-  if (work) {
+  // 2. parseArtistAndTitle によるインテリジェント分離
+  const parsed = parseArtistAndTitle(work);
+  if (parsed && parsed.artist && !isPlaceholderArtist(parsed.artist)) {
+    artist = parsed.artist;
+    title = parsed.title;
+  } else if (work) {
+    // 3. 残りの work から "Artist - Title" を抽出
     const dashMatch = work.match(/^([^-–—]+)\s*[-–—]\s*(.+)$/);
     if (dashMatch) {
       const part1 = dashMatch[1].trim();
@@ -636,13 +642,13 @@ export function inferMetadataFromFileName(filename, folderName = "") {
         if (!trackNo) trackNo = String(parseInt(part1, 10));
         // part2 がさらに "Artist - Title" に分かれるか？
         const subDash = part2.match(/^([^-–—]+)\s*[-–—]\s*(.+)$/);
-        if (subDash && !/^\d+$/.test(subDash[1].trim())) {
+        if (subDash && !/^\d+$/.test(subDash[1].trim()) && !isPlaceholderArtist(subDash[1].trim())) {
           artist = subDash[1].trim();
           title = subDash[2].trim();
         } else {
           title = part2;
         }
-      } else {
+      } else if (!isPlaceholderArtist(part1)) {
         artist = part1;
         title = part2;
       }
@@ -651,15 +657,20 @@ export function inferMetadataFromFileName(filename, folderName = "") {
     }
   }
 
-  // 3. 最終安全ガード: artist が数字のみの場合は絶対にアーティストにしない
-  if (/^\d+$/.test(artist)) {
-    if (!trackNo) trackNo = String(parseInt(artist, 10));
+  // 4. 最終安全ガード: artist が数字のみ、またはプレースホルダーの場合はアーティストにしない
+  if (/^\d+$/.test(artist) || isPlaceholderArtist(artist)) {
+    if (/^\d+$/.test(artist) && !trackNo) trackNo = String(parseInt(artist, 10));
     artist = "";
+  }
+
+  // 5. フォルダ名フォールバック: album が実在アーティスト名（プレースホルダー以外）の場合のみ考慮
+  if (!artist && album && !isPlaceholderArtist(album)) {
+    artist = album;
   }
 
   return {
     title: title || base || "(無題)",
-    artist: artist || (album ? album : ""),
+    artist: artist || "",
     album: album || "",
     trackNo,
   };
@@ -818,12 +829,13 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           "(無題)";
 
         const isNumeric = (s) => typeof s === "string" && /^\d+$/.test(s.trim());
-        const artist =
-          (existing && existing.artist && existing.artist !== "(Google Drive)" && !isNumeric(existing.artist) ? existing.artist : null) ||
-          (extractedMeta && extractedMeta.artist && extractedMeta.artist !== "(不明アーティスト)" && !extractedMeta.artist.includes("Google Drive") && !isNumeric(extractedMeta.artist) ? extractedMeta.artist : null) ||
-          (inferred.artist && !inferred.artist.includes("Google Drive") && !isNumeric(inferred.artist) ? inferred.artist : null) ||
-          (existing && existing.artist && !isNumeric(existing.artist) ? existing.artist : null) ||
-          "(不明アーティスト)";
+        const validExistingArtist = existing && existing.artist && !isPlaceholderArtist(existing.artist) && !isNumeric(existing.artist) ? existing.artist : null;
+        const validMetaArtist = extractedMeta && extractedMeta.artist && !isPlaceholderArtist(extractedMeta.artist) && !isNumeric(extractedMeta.artist) ? extractedMeta.artist : null;
+        const validInferredArtist = inferred && inferred.artist && !isPlaceholderArtist(inferred.artist) && !isNumeric(inferred.artist) ? inferred.artist : null;
+        const fallbackParsed = parseArtistAndTitle(file.name);
+        const validParsedArtist = fallbackParsed && fallbackParsed.artist && !isPlaceholderArtist(fallbackParsed.artist) && !isNumeric(fallbackParsed.artist) ? fallbackParsed.artist : null;
+
+        const artist = validExistingArtist || validMetaArtist || validInferredArtist || validParsedArtist || "(不明アーティスト)";
 
         const album =
           (existing && existing.album && existing.album !== "Google Drive") ||
@@ -1636,16 +1648,33 @@ export async function getOrCreateDriveFolder(folderName = "MUSIC-PLAYER", parent
  * - 多段階アップロードアーキテクチャ:
  *   1. Multipart Upload (Google Drive 公式標準・ブラウザCORS完全対応・1リクエストでメタデータとファイルを同時作成)
  *   2. Simple Media Upload (POST uploadType=media -> PATCH metadata)
- * @param {object} params
- * @param {string} params.name アップロードするファイル名 (例: "song.mp3")
- * @param {Blob} params.blob ファイルバイナリ
- * @param {string} [params.mimeType="audio/mpeg"] MIME タイプ
- * @param {string} [params.folderName="MUSIC-PLAYER"] 保存先フォルダ名（folderId 未指定時に使用）
- * @param {string} [params.folderId] 特定フォルダのID
- * @param {(pct: number) => void} [params.onProgress]
+ * @param {object|Blob} arg1 引数オブジェクトまたはBlob
+ * @param {string} [arg2] ファイル名 (Blob指定時)
+ * @param {string} [arg3] MIMEタイプ (Blob指定時)
  * @returns {Promise<{ id: string, name: string, mimeType: string, size?: number }>}
  */
-export async function uploadFileToDrive({ name, blob, mimeType = "audio/mpeg", folderName = "MUSIC-PLAYER", folderId = null, onProgress = null }) {
+export async function uploadFileToDrive(arg1, arg2 = null, arg3 = null) {
+  let name, blob, mimeType, folderName, folderId, onProgress;
+  if (arg1 instanceof Blob || (arg1 && arg1.size !== undefined && typeof arg1.slice === "function")) {
+    blob = arg1;
+    name = (typeof arg2 === "string" ? arg2 : null) || "audio.mp3";
+    mimeType = (typeof arg3 === "string" ? arg3 : null) || "audio/mpeg";
+    folderName = "MUSIC-PLAYER";
+    folderId = null;
+    onProgress = null;
+  } else if (arg1 && typeof arg1 === "object") {
+    ({
+      name = "audio.mp3",
+      blob,
+      mimeType = "audio/mpeg",
+      folderName = "MUSIC-PLAYER",
+      folderId = null,
+      onProgress = null,
+    } = arg1);
+  } else {
+    throw new Error("アップロードするデータが指定されていません");
+  }
+
   const token = await getDriveToken();
   if (!token) {
     throw new Error("Google Drive に接続されていません。設定画面または連携ボタンから接続してください。");
@@ -1841,44 +1870,61 @@ export async function fetchDriveTextFile(fileId) {
  */
 export async function saveOrUpdateDriveSyncFile(fileName, textContent, folderName = "MUSIC-PLAYER") {
   const token = await getDriveToken();
-  if (!token) throw new Error("Google Drive に接続されていません");
+  if (!token) throw new Error("Google Drive に接続されていません。設定画面から再接続してください。");
 
-  const targetFolderId = await getOrCreateDriveFolder(folderName);
-  const existing = await findDriveFileByName(fileName, targetFolderId);
+  let targetFolderId = null;
+  try {
+    targetFolderId = await getOrCreateDriveFolder(folderName);
+  } catch (fe) {
+    console.warn("[gdrive] フォルダ取得警告（ルートを検索・保存対象とします）:", fe);
+  }
+
+  let existing = null;
+  try {
+    existing = await findDriveFileByName(fileName, targetFolderId);
+    if (!existing && targetFolderId) {
+      existing = await findDriveFileByName(fileName, null);
+    }
+  } catch (findErr) {
+    console.warn("[gdrive] 既存ファイル検索失敗:", findErr);
+  }
 
   const blob = new Blob([textContent], { type: "application/json; charset=utf-8" });
 
   if (existing && existing.id) {
-    // 既存ファイルを PATCH で上書き更新
-    const uploadUrl = `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(existing.id)}?uploadType=media`;
-    const res = await fetch(uploadUrl, {
-      method: "PATCH",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json; charset=utf-8",
-      },
-      body: blob,
-    });
+    try {
+      // 既存ファイルを PATCH で上書き更新
+      const uploadUrl = `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(existing.id)}?uploadType=media`;
+      const res = await fetch(uploadUrl, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json; charset=utf-8",
+        },
+        body: blob,
+      });
 
-    if (!res.ok) {
-      const errMsg = await parseGoogleApiError(res, "Google Drive 同期ファイルの更新に失敗しました");
-      throw new Error(errMsg);
+      if (res.ok) {
+        const updated = await res.json();
+        return {
+          id: existing.id,
+          name: fileName,
+          modifiedTime: updated.modifiedTime || new Date().toISOString(),
+        };
+      }
+      console.warn(`[gdrive] 既存同期ファイル PATCH 失敗 (HTTP ${res.status})。他端末作成ファイルまたは権限の制約のため新規作成へ自己修復フォールバックします。`);
+    } catch (patchErr) {
+      console.warn("[gdrive] 同期ファイル PATCH 通信エラー。新規作成へフォールバックします:", patchErr);
     }
-
-    const updated = await res.json();
-    return {
-      id: existing.id,
-      name: fileName,
-      modifiedTime: updated.modifiedTime || new Date().toISOString(),
-    };
   }
 
-  // 新規作成
+  // PATCH 失敗、または既存ファイルがない場合は新規作成
   const uploaded = await uploadFileToDrive({
     name: fileName,
     blob,
     mimeType: "application/json",
     folderId: targetFolderId,
+    folderName,
   });
 
   return {

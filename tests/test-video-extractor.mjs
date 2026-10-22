@@ -6,6 +6,7 @@ import { strictEqual, ok } from "node:assert";
 import {
   inferMetadataFromFilename,
   encodeVideoAudioTrack,
+  stripVideoTracksFromMp4,
 } from "../js/audio/video-audio-extractor.js";
 
 let passed = 0;
@@ -146,6 +147,76 @@ asyncTest("encodeVideoAudioTrack で normalizeMode='none' の時はゲイン 1.0
 
   strictEqual(result.gain, 1.0);
   strictEqual(result.gainDb, 0.0);
+});
+
+console.log("=== 3. MP4/MOV 映像トラック無効化 (stripVideoTracksFromMp4) テスト ===");
+
+test("MP4のビデオトラック (vide) が free ボックスに置換され、音声トラック (soun) が保持される", () => {
+  function makeBox(type, payload = new Uint8Array(0)) {
+    const size = 8 + payload.length;
+    const buf = new Uint8Array(size);
+    const v = new DataView(buf.buffer);
+    v.setUint32(0, size);
+    for (let i = 0; i < 4; i++) buf[4 + i] = type.charCodeAt(i);
+    buf.set(payload, 8);
+    return buf;
+  }
+
+  function concatBufs(...bufs) {
+    const total = bufs.reduce((s, b) => s + b.length, 0);
+    const out = new Uint8Array(total);
+    let cur = 0;
+    for (const b of bufs) {
+      out.set(b, cur);
+      cur += b.length;
+    }
+    return out;
+  }
+
+  // hdlr box 作成ヘルパー
+  // size(4) + "hdlr"(4) + ver(1)+flags(3) + pre_defined(4) + handler_type(4)
+  function makeHdlr(handlerType) {
+    const payload = new Uint8Array(16); // 4 + 4 + 4 + 4 - 8? payload is after size + type:
+    // payload starts at byte 8 of box:
+    // byte 8: ver, 9-11: flags, 12-15: pre_defined, 16-19: handler_type
+    // offset 16 from mdiaSub.offset: mdiaSub.offset + 8 + 8 = mdiaSub.offset + 16
+    for (let i = 0; i < 4; i++) payload[8 + i] = handlerType.charCodeAt(i);
+    return makeBox("hdlr", payload);
+  }
+
+  const videoMdia = makeBox("mdia", makeHdlr("vide"));
+  const videoTrak = makeBox("trak", videoMdia);
+
+  const audioMdia = makeBox("mdia", makeHdlr("soun"));
+  const audioTrak = makeBox("trak", audioMdia);
+
+  const moovPayload = concatBufs(videoTrak, audioTrak);
+  const moovBox = makeBox("moov", moovPayload);
+
+  const ftypBox = makeBox("ftyp", new Uint8Array([0x6D, 0x70, 0x34, 0x32])); // mp42
+  const mp4Buf = concatBufs(ftypBox, moovBox);
+
+  // 変換前: videoTrak の位置に "trak" がある
+  const videoTrakPosInMp4 = ftypBox.length + 8; // moovヘッダ(8)の直後
+  const trakStrBefore = String.fromCharCode(...mp4Buf.slice(videoTrakPosInMp4 + 4, videoTrakPosInMp4 + 8));
+  strictEqual(trakStrBefore, "trak");
+
+  const strippedBuf = stripVideoTracksFromMp4(mp4Buf.buffer);
+  ok(strippedBuf, "stripped buffer が返ること");
+
+  const strippedU8 = new Uint8Array(strippedBuf);
+  const trakStrAfter = String.fromCharCode(...strippedU8.slice(videoTrakPosInMp4 + 4, videoTrakPosInMp4 + 8));
+  strictEqual(trakStrAfter, "free", "video trak が free に置換されていること");
+
+  // 音声トラックは 'trak' のままであること
+  const audioTrakPosInMp4 = videoTrakPosInMp4 + videoTrak.length;
+  const audioTrakStr = String.fromCharCode(...strippedU8.slice(audioTrakPosInMp4 + 4, audioTrakPosInMp4 + 8));
+  strictEqual(audioTrakStr, "trak", "audio trak は保持されていること");
+});
+
+test("不正なバッファや音声トラック無しのMP4では安全に null を返す", () => {
+  strictEqual(stripVideoTracksFromMp4(null), null);
+  strictEqual(stripVideoTracksFromMp4(new ArrayBuffer(10)), null);
 });
 
 // 非同期テストの完了を待機

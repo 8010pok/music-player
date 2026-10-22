@@ -265,24 +265,27 @@ export async function getDriveSyncFileInfo() {
   if (!connected) return { exists: false };
 
   try {
-    const folderId = await getOrCreateDriveFolder("MUSIC-PLAYER");
-    const file = await findDriveFileByName(SYNC_FILE_NAME, folderId);
+    let folderId = null;
+    try {
+      folderId = await getOrCreateDriveFolder("MUSIC-PLAYER");
+    } catch (_) {}
+
+    let file = null;
+    if (folderId) {
+      try {
+        file = await findDriveFileByName(SYNC_FILE_NAME, folderId);
+      } catch (_) {}
+    }
+    if (!file) {
+      file = await findDriveFileByName(SYNC_FILE_NAME, null);
+    }
+
     if (file) {
       return {
         exists: true,
         id: file.id,
         modifiedTime: file.modifiedTime,
         size: file.size,
-      };
-    }
-    // ルートフォルダも検索
-    const rootFile = await findDriveFileByName(SYNC_FILE_NAME, null);
-    if (rootFile) {
-      return {
-        exists: true,
-        id: rootFile.id,
-        modifiedTime: rootFile.modifiedTime,
-        size: rootFile.size,
       };
     }
   } catch (e) {
@@ -327,8 +330,17 @@ export async function importLibraryFromDrive({ deleteMissing = false } = {}) {
     throw new Error("Google Drive に接続されていません。設定画面から接続してください。");
   }
 
-  const folderId = await getOrCreateDriveFolder("MUSIC-PLAYER");
-  let file = await findDriveFileByName(SYNC_FILE_NAME, folderId);
+  let folderId = null;
+  try {
+    folderId = await getOrCreateDriveFolder("MUSIC-PLAYER");
+  } catch (_) {}
+
+  let file = null;
+  if (folderId) {
+    try {
+      file = await findDriveFileByName(SYNC_FILE_NAME, folderId);
+    } catch (_) {}
+  }
   if (!file) {
     file = await findDriveFileByName(SYNC_FILE_NAME, null);
   }

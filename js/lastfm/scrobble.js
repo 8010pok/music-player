@@ -13,8 +13,8 @@ import { enqueue, peek, removeMany, count } from "../store/queue-db.js";
 import { getAuth } from "./auth.js";
 import { appState } from "../state.js";
 import { toast } from "../ui/components.js";
-import { resolveScrobbleTrack, isPlaceholderArtist } from "./scrobble-cleaner.js";
-import { getTrack } from "../store/library-db.js";
+import { resolveScrobbleTrack, isPlaceholderArtist, parseArtistAndTitle } from "./scrobble-cleaner.js";
+import { getTrack, updateTrack } from "../store/library-db.js";
 
 const MAX_BATCH = 50;
 let flushing = false;
@@ -118,17 +118,41 @@ function inspectScrobbleResponse(response) {
 
 /**
  * 送信直前の最新メタデータ再取得（ハイドレーション）
- * 再生キュー内の古いスナップショットではなく、IndexedDBから最新のartist/title/albumを取得
+ * - 再生キュー内の古いスナップショットではなく、IndexedDBから最新のartist/title/albumを取得
+ * - 未キャッシュの Google Drive 曲やプレースホルダー状態の曲をファイル名から強力に自動救済
  */
 async function hydrateTrack(track) {
   if (!track || !track.id) return track;
+  let target = track;
   try {
     const latest = await getTrack(track.id);
     if (latest) {
-      return { ...track, ...latest };
+      target = { ...track, ...latest };
     }
   } catch {}
-  return track;
+
+  // Google Drive 音源やプレースホルダー状態のトラックに対する最終メタデータ自動救済
+  if (isPlaceholderArtist(target.artist)) {
+    const nameToParse = target.originalName || target.title || "";
+    const parsed = parseArtistAndTitle(nameToParse);
+    if (parsed && parsed.artist && !isPlaceholderArtist(parsed.artist)) {
+      target = {
+        ...target,
+        artist: parsed.artist,
+        title: parsed.title || target.title,
+      };
+      // IndexedDB と再生状態にも同期保存して二度とプレースホルダーに戻らないようにする
+      try {
+        await updateTrack(target.id, { artist: target.artist, title: target.title });
+        const cur = appState.get().currentTrack;
+        if (cur && cur.id === target.id) {
+          appState.set({ currentTrack: { ...cur, artist: target.artist, title: target.title } });
+        }
+      } catch (_) {}
+    }
+  }
+
+  return target;
 }
 
 function sanitizeLastFmValue(val) {

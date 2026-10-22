@@ -414,7 +414,11 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
         progressStatus.textContent = "Google Drive に保存中…";
         try {
           const driveFilename = `${artist} - ${title}.mp3`.replace(/[/\\?%*:|"<>]/g, "_");
-          const driveFile = await uploadFileToDrive(encResult.mp3Blob, driveFilename, "audio/mpeg");
+          const driveFile = await uploadFileToDrive({
+            blob: encResult.mp3Blob,
+            name: driveFilename,
+            mimeType: "audio/mpeg",
+          });
           if (driveFile && driveFile.id) {
             newTrack.driveFileId = driveFile.id;
             await putTrack(newTrack, encResult.mp3Blob);

@@ -146,9 +146,10 @@ function ensureTrackMetadataInBackground(id, blob, extraPatch = null) {
       const missingArt = !track.artworkBlob && !track.artworkDataUrl && !track._noEmbeddedArt;
       const missingDataUrl = (track.artworkBlob || !track._noEmbeddedArt) && !track.artworkDataUrl;
       const missingDuration = !track.duration || track.duration <= 0;
-      const isPlaceholderArtist = !track.artist || track.artist === "(不明)" || track.artist === "(不明アーティスト)" || track.artist === "(Google Drive)";
-      const isPlaceholderAlbum = !track.album || track.album === "Google Drive";
-      const needsParse = missingDuration || missingArt || !track.userEdited || isPlaceholderArtist || isPlaceholderAlbum;
+      const { isPlaceholderArtist, parseArtistAndTitle } = await import("../lastfm/scrobble-cleaner.js");
+      const isPlaceholderArtistVal = isPlaceholderArtist(track.artist);
+      const isPlaceholderAlbum = !track.album || track.album === "Google Drive" || isPlaceholderArtist(track.album);
+      const needsParse = missingDuration || missingArt || !track.userEdited || isPlaceholderArtistVal || isPlaceholderAlbum;
 
       const patch = extraPatch ? { ...extraPatch } : {};
       if (needsParse) {
@@ -159,21 +160,30 @@ function ensureTrackMetadataInBackground(id, blob, extraPatch = null) {
           duration = await readDurationViaAudio(blob);
         }
         const isNumeric = (s) => typeof s === "string" && /^\d+$/.test(s.trim());
-        const validArtist = meta.artist && meta.artist !== "(不明アーティスト)" && meta.artist !== "(Google Drive)" && !isNumeric(meta.artist);
-        const validAlbum = meta.album && meta.album !== "Google Drive";
+        let validArtist = meta.artist && !isPlaceholderArtist(meta.artist) && !isNumeric(meta.artist) ? meta.artist : null;
+        if (!validArtist) {
+          const parsed = parseArtistAndTitle(track.originalName || track.title || "");
+          if (parsed && parsed.artist && !isPlaceholderArtist(parsed.artist) && !isNumeric(parsed.artist)) {
+            validArtist = parsed.artist;
+            if (!track.userEdited && parsed.title && (!meta.title || meta.title === "(無題)")) {
+              patch.title = parsed.title;
+            }
+          }
+        }
+        const validAlbum = meta.album && meta.album !== "Google Drive" && !isPlaceholderArtist(meta.album) ? meta.album : null;
 
         if (!track.userEdited) {
           if (meta.title && meta.title !== "(無題)") patch.title = meta.title;
-          if (validArtist) patch.artist = meta.artist;
-          if (validAlbum) patch.album = meta.album;
+          if (validArtist) patch.artist = validArtist;
+          if (validAlbum) patch.album = validAlbum;
           if (meta.albumArtist) patch.albumArtist = meta.albumArtist;
           if (meta.trackNo) patch.trackNo = meta.trackNo;
           if (meta.discNo) patch.discNo = meta.discNo;
           if (meta.year) patch.year = meta.year;
           if (meta.genre) patch.genre = meta.genre;
         } else {
-          if (isPlaceholderArtist && validArtist) patch.artist = meta.artist;
-          if (isPlaceholderAlbum && validAlbum) patch.album = meta.album;
+          if (isPlaceholderArtistVal && validArtist) patch.artist = validArtist;
+          if (isPlaceholderAlbum && validAlbum) patch.album = validAlbum;
         }
 
         // アートワークは userEdited (他端末からの同期後など) であっても未保持なら音源から補完する

@@ -251,8 +251,13 @@ export function resolveScrobbleTrack(track) {
     artist = albumArtist;
     resolved = true;
   } else {
-    // artist も albumArtist もプレースホルダー（無効）の場合のみ、タイトルからの自動分離を試みる
-    const parsed = parseArtistAndTitle(originalTitle);
+    // artist も albumArtist もプレースホルダー（無効）の場合のみ、タイトルや元ファイル名からの自動分離を試みる
+    let parsed = parseArtistAndTitle(originalTitle);
+    if (!parsed || isPlaceholderArtist(parsed.artist)) {
+      if (track.originalName) {
+        parsed = parseArtistAndTitle(track.originalName);
+      }
+    }
     if (parsed && !isPlaceholderArtist(parsed.artist)) {
       artist = parsed.artist;
       title = parsed.title;
@@ -275,8 +280,8 @@ export function resolveScrobbleTrack(track) {
     }
   }
 
-  // 2. アルバム名が "YouTube" などのプレースホルダーなら除外（Last.fm のアルバム汚染を防ぐ）
-  if (isPlaceholderArtist(album)) {
+  // 2. アルバム名が "YouTube" や "Google Drive" などのプレースホルダーなら除外（Last.fm のアルバム汚染を防ぐ）
+  if (isPlaceholderArtist(album) || album.toLowerCase().includes("google drive")) {
     album = "";
   }
 

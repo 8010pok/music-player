@@ -1056,7 +1056,7 @@ function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices, dr
         <div class="settings-row">
           <div>
             <div class="label">最新版へ強制アップデート (キャッシュ消去)</div>
-            <div class="help">キャッシュを完全消去し、サーバーから最新版 (v1.3.0) を再取得してリロードします。変更が反映されない場合にお使いください。</div>
+            <div class="help">キャッシュを完全消去し、サーバーから最新版 (v1.7.2) を再取得してリロードします。変更が反映されない場合にお使いください。</div>
           </div>
           <button class="btn primary" id="btn-force-update" style="white-space:nowrap;">🔄 最新版に更新</button>
         </div>
