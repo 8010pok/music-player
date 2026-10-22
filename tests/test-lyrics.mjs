@@ -14,6 +14,7 @@ import {
 import {
   cleanTitleForLyrics, cleanArtistForLyrics, fetchOnlineLyrics,
   stripParenthesesAndSubtitles, extractPrimaryArtist,
+  isArtistMatch, isTitleMatch, isDurationMatch, getExternalLyricsUrls,
 } from "../js/metadata/lrclib.js";
 
 let passCount = 0, failCount = 0;
@@ -343,6 +344,42 @@ describe("LRCLIB: タイトル/アーティスト名クリーンアップ", () =
   assertEqual(extractPrimaryArtist("Age Factory feat. JESSE"), "Age Factory", "feat. から第一アーティスト抽出");
   assertEqual(extractPrimaryArtist("YOASOBI & Ayase"), "YOASOBI", "& から第一アーティスト抽出");
   assertEqual(extractPrimaryArtist("10-FEET / ゲスト"), "10-FEET", "/ から第一アーティスト抽出");
+});
+
+/* ============ LRCLIB 誤マッチ防止・厳格照合 ============ */
+describe("LRCLIB: アーティスト/タイトル/再生時間の一致判定", () => {
+  // アーティスト名一致
+  assert(isArtistMatch("YOASOBI", "YOASOBI"), "完全一致 (YOASOBI)");
+  assert(isArtistMatch("yoasobi", "YOASOBI"), "大文字小文字無視");
+  assert(isArtistMatch("YOASOBI feat. 初音ミク", "YOASOBI"), "コラボ・フィーチャリング包含");
+  assert(isArtistMatch("YOASOBI", "YOASOBI feat. 初音ミク"), "コラボ・フィーチャリング逆包含");
+  assert(!isArtistMatch("米津玄師", "YOASOBI"), "別アーティストは不一致");
+  assert(isArtistMatch("米津玄師", ""), "期待アーティスト未指定時は許容");
+  assert(!isArtistMatch("", "YOASOBI"), "候補アーティスト空は不一致");
+
+  // タイトル一致
+  assert(isTitleMatch("アイドル", "アイドル"), "完全一致 (アイドル)");
+  assert(isTitleMatch("アイドル (Anime Ver.)", "アイドル"), "カッコ内付加でも一致");
+  assert(isTitleMatch("アイドル", "アイドル - Anime Size"), "サブタイトル付加でも一致");
+  assert(!isTitleMatch("勇者", "アイドル"), "別曲名は不一致");
+  assert(!isTitleMatch("", "アイドル"), "空曲名は不一致");
+
+  // 再生時間判定 (許容差±35秒)
+  assert(isDurationMatch(210, 215), "差5秒以内は合格");
+  assert(isDurationMatch(200, 230), "差30秒以内は合格");
+  assert(!isDurationMatch(100, 200), "差100秒は不合格(別曲/TV SizeとFull Size違い)");
+  assert(isDurationMatch(0, 200), "再生時間不明(0)はスキップして許容");
+});
+
+/* ============ 外部歌詞サイトURL生成 ============ */
+describe("LRCLIB: 外部歌詞サイト検索URL生成", () => {
+  const urls = getExternalLyricsUrls("アイドル", "YOASOBI");
+  assert(urls.petitLyrics.includes("petitlyrics.com"), "プチリリURL生成");
+  assert(urls.petitLyrics.includes("title=%E3%82%A2%E3%82%A4%E3%83%89%E3%83%AB"), "プチリリ タイトルエンコード");
+  assert(urls.utaNet.includes("uta-net.com"), "歌ネットURL生成");
+  assert(urls.utaTen.includes("utaten.com"), "UtaTen URL生成");
+  assert(urls.jLyric.includes("j-lyric.net"), "J-Lyric URL生成");
+  assert(urls.google.includes("google.com"), "Google URL生成");
 });
 
 /* ============ 結果 ============ */

@@ -20,7 +20,7 @@ import { getBlob, updateTrack } from "../store/library-db.js";
 import { getArtworkUrl, markArtworkBroken } from "./artwork-cache.js";
 import { editTrackMetadata } from "./metadata-editor.js";
 import { openNormalizeModal } from "./normalize-modal.js";
-import { fetchOnlineLyrics } from "../metadata/lrclib.js";
+import { fetchOnlineLyrics, fetchLyricsCandidates, getExternalLyricsUrls } from "../metadata/lrclib.js";
 import { parseLrc } from "../metadata/lyrics.js";
 import { go } from "../router.js";
 import { getAlbumKey, getAlbumArtist } from "../metadata/album-util.js";
@@ -135,6 +135,31 @@ export async function mount(root) {
         refs.lyricsLines.appendChild(div);
       }
     }
+
+    // 歌詞末尾に控えめな操作アクションバーを追加（誤マッチ時の別候補選択・手動編集用）
+    if (lyrics?.synced?.length || lyrics?.unsynced) {
+      const footer = document.createElement("div");
+      footer.style.cssText = "display: flex; gap: 8px; justify-content: center; padding: 24px 10px 48px; opacity: 0.75;";
+      footer.innerHTML = `
+        <button type="button" class="btn" id="btn-lyrics-footer-search" style="font-size: 11px; padding: 4px 10px; border-radius: 6px;">
+          🔄 別の候補を探す
+        </button>
+        <button type="button" class="btn" id="btn-lyrics-footer-paste" style="font-size: 11px; padding: 4px 10px; border-radius: 6px;">
+          ✏️ 歌詞を編集
+        </button>
+      `;
+      footer.querySelector("#btn-lyrics-footer-search")?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const cur = appState.get().currentTrack;
+        if (cur) openCustomLyricsSearch(cur);
+      });
+      footer.querySelector("#btn-lyrics-footer-paste")?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const cur = appState.get().currentTrack;
+        if (cur) openPasteLyricsModal(cur);
+      });
+      refs.lyricsLines.appendChild(footer);
+    }
   }
 
   // 同期ハイライトの rAF ループ。
@@ -214,71 +239,182 @@ export async function mount(root) {
   }
 
   function openCustomLyricsSearch(track) {
+    const cur = track || appState.get().currentTrack;
+    if (!cur) return;
+
+    const urls = getExternalLyricsUrls(cur.title, cur.artist);
     const body = document.createElement("div");
-    body.style.cssText = "display: flex; flex-direction: column; gap: 8px;";
+    body.style.cssText = "display: flex; flex-direction: column; gap: 10px; max-height: 72vh; overflow-y: auto;";
     body.innerHTML = `
-      <p style="font-size: 11px; color: var(--fg-muted); margin: 0 0 4px 0;">
-        検索キーワードを変更して LRCLIB から歌詞を再検索します。
-      </p>
-      <div>
-        <label style="font-size: 11px; font-weight: 600; display: block; margin-bottom: 2px;">曲名</label>
-        <input type="text" id="custom-lyrics-title" value="${escapeHtml(track.title || "")}" style="width: 100%; box-sizing: border-box; padding: 6px; font-size: 12px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" />
+      <div style="font-size: 11px; color: var(--fg-muted); line-height: 1.4;">
+        曲名やアーティスト名を修正して再検索、または候補一覧から該当する歌詞を選択できます。
       </div>
-      <div>
-        <label style="font-size: 11px; font-weight: 600; display: block; margin-bottom: 2px;">アーティスト名 (空欄でも検索可能)</label>
-        <input type="text" id="custom-lyrics-artist" value="${escapeHtml(track.artist || "")}" style="width: 100%; box-sizing: border-box; padding: 6px; font-size: 12px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" />
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+        <div>
+          <label style="font-size: 11px; font-weight: 600; display: block; margin-bottom: 2px;">曲名</label>
+          <input type="text" id="custom-lyrics-title" value="${escapeHtml(cur.title || "")}" style="width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 12px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" />
+        </div>
+        <div>
+          <label style="font-size: 11px; font-weight: 600; display: block; margin-bottom: 2px;">アーティスト名</label>
+          <input type="text" id="custom-lyrics-artist" value="${escapeHtml(cur.artist || "")}" style="width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 12px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg);" />
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 8px;">
+        <button type="button" class="btn primary" id="btn-do-lyrics-search" style="font-size: 12px; padding: 7px 14px; flex: 1;">
+          🔍 歌詞を再検索
+        </button>
+      </div>
+
+      <!-- 候補一覧エリア -->
+      <div id="custom-lyrics-results" style="margin-top: 4px; display: none;">
+        <div style="font-size: 11px; font-weight: 700; color: var(--fg-muted); margin-bottom: 6px;" id="results-count-label">検索結果の候補:</div>
+        <div id="candidates-list" style="display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; padding-right: 4px;"></div>
+      </div>
+
+      <!-- 外部サービスリンク -->
+      <div style="border-top: 1px solid var(--border-color); padding-top: 10px; margin-top: 4px;">
+        <div style="font-size: 11px; font-weight: 600; color: var(--fg-muted); margin-bottom: 6px;">
+          外部サイトで探す (ワンタップで検索結果を開く):
+        </div>
+        <div style="display: flex; gap: 6px; flex-wrap: wrap;" id="custom-ext-links">
+          <a href="${urls.petitLyrics}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 5px 8px; text-decoration: none;">🌸 プチリリ</a>
+          <a href="${urls.utaNet}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 5px 8px; text-decoration: none;">🎵 歌ネット</a>
+          <a href="${urls.utaTen}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 5px 8px; text-decoration: none;">🎤 UtaTen</a>
+          <a href="${urls.google}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 5px 8px; text-decoration: none;">🔍 Google</a>
+        </div>
+        <div style="font-size: 10px; color: var(--fg-muted); margin-top: 6px;">
+          コピーした歌詞は「歌詞を貼り付け」から登録すると永久保存されます。
+        </div>
       </div>
     `;
 
     openModal({
-      title: "歌詞を検索",
+      title: "歌詞の検索と候補選択",
       body,
       actions: [
-        { label: "キャンセル", onClick: () => {} },
-        {
-          label: "検索して反映",
-          primary: true,
-          onClick: async () => {
-            const t = body.querySelector("#custom-lyrics-title")?.value.trim();
-            const a = body.querySelector("#custom-lyrics-artist")?.value.trim();
-            if (!t) {
-              toast("曲名を入力してください", "err");
-              return false;
-            }
-            toast("歌詞を検索中…", "info");
-            const res = await fetchOnlineLyrics({ title: t, artist: a });
-            if (res) {
-              applyLyrics(res);
-              await updateTrack(track.id, { lyrics: res }).catch(() => {});
-              toast("歌詞を取得して反映しました", "ok");
-              return true;
-            } else {
-              toast("歌詞が見つかりませんでした", "err");
-              return false;
-            }
-          },
-        },
+        { label: "閉じる", onClick: () => {} },
       ],
     });
+
+    const titleInput = body.querySelector("#custom-lyrics-title");
+    const artistInput = body.querySelector("#custom-lyrics-artist");
+    const searchBtn = body.querySelector("#btn-do-lyrics-search");
+    const resultsWrap = body.querySelector("#custom-lyrics-results");
+    const countLabel = body.querySelector("#results-count-label");
+    const listEl = body.querySelector("#candidates-list");
+
+    const doSearch = async () => {
+      const t = titleInput.value.trim();
+      const a = artistInput.value.trim();
+      if (!t) {
+        toast("曲名を入力してください", "err");
+        return;
+      }
+
+      searchBtn.disabled = true;
+      searchBtn.textContent = "検索中…";
+      resultsWrap.style.display = "block";
+      listEl.innerHTML = '<div style="font-size: 12px; color: var(--fg-muted); padding: 12px; text-align: center;">候補を検索しています…</div>';
+
+      try {
+        const candidates = await fetchLyricsCandidates({ title: t, artist: a });
+        searchBtn.disabled = false;
+        searchBtn.textContent = "🔍 歌詞を再検索";
+
+        if (!candidates || candidates.length === 0) {
+          listEl.innerHTML = `
+            <div style="font-size: 12px; color: var(--fg-muted); padding: 14px 10px; text-align: center; line-height: 1.5;">
+              LRCLIB で候補が見つかりませんでした。<br/>
+              下の「🌸 プチリリ」や「🎵 歌ネット」からコピーして貼り付けることができます。
+            </div>
+          `;
+          return;
+        }
+
+        countLabel.textContent = `見つかった候補 (${candidates.length} 件) - タップして反映:`;
+        listEl.innerHTML = "";
+
+        for (const c of candidates) {
+          const item = document.createElement("div");
+          item.className = "btn";
+          item.style.cssText = "display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border-radius: 8px; text-align: left; background: var(--bg-elev-1); cursor: pointer; border: 1px solid var(--border-color);";
+          item.innerHTML = `
+            <div style="min-width: 0; flex: 1; padding-right: 8px;">
+              <div style="font-size: 12px; font-weight: 700; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                ${escapeHtml(c.title)}
+              </div>
+              <div style="font-size: 11px; color: var(--fg-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                ${escapeHtml(c.artist)} ${c.album ? `・ ${escapeHtml(c.album)}` : ""}
+              </div>
+            </div>
+            <div style="display: flex; gap: 6px; align-items: center; flex-shrink: 0;">
+              <span style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: ${c.hasSynced ? "rgba(0,113,227,0.15)" : "var(--bg-elev-2)"}; color: ${c.hasSynced ? "var(--accent)" : "var(--fg-muted)"};">
+                ${c.hasSynced ? "⏱ 同期歌詞" : "📄 テキスト"}
+              </span>
+              <span style="font-size: 11px; font-weight: 700; color: var(--accent);">適用 →</span>
+            </div>
+          `;
+
+          item.addEventListener("click", async () => {
+            const synced = c.syncedLyrics ? parseLrc(c.syncedLyrics) : null;
+            const newLyr = {
+              synced: synced && synced.length > 0 ? synced : null,
+              unsynced: c.plainLyrics || null,
+            };
+            applyLyrics(newLyr);
+            await updateTrack(cur.id, { lyrics: newLyr }).catch(() => {});
+            toast(`「${c.title} - ${c.artist}」の歌詞を反映しました`, "ok");
+            const closeBtn = document.querySelector("#modal-root .modal-actions .btn");
+            if (closeBtn) closeBtn.click();
+          });
+
+          listEl.appendChild(item);
+        }
+      } catch (err) {
+        searchBtn.disabled = false;
+        searchBtn.textContent = "🔍 歌詞を再検索";
+        listEl.innerHTML = `<div style="font-size: 12px; color: var(--err); padding: 10px; text-align: center;">検索に失敗しました: ${escapeHtml(err.message)}</div>`;
+      }
+    };
+
+    searchBtn.addEventListener("click", doSearch);
+    setTimeout(doSearch, 150);
   }
 
   function openPasteLyricsModal(track) {
+    const cur = track || appState.get().currentTrack;
+    if (!cur) return;
+
+    let initialText = "";
+    if (currentLyrics) {
+      if (currentLyrics.unsynced) {
+        initialText = currentLyrics.unsynced;
+      } else if (currentLyrics.synced?.length) {
+        initialText = currentLyrics.synced.map((l) => {
+          const m = Math.floor(l.timeMs / 60000);
+          const s = ((l.timeMs % 60000) / 1000).toFixed(2).padStart(5, "0");
+          return `[${String(m).padStart(2, "0")}:${s}]${l.text}`;
+        }).join("\n");
+      }
+    }
+
     const body = document.createElement("div");
     body.style.cssText = "display: flex; flex-direction: column; gap: 8px;";
     body.innerHTML = `
       <p style="font-size: 11px; color: var(--fg-muted); margin: 0 0 4px 0;">
-        Web サイトやメモからコピーした歌詞テキスト（またはタイムタグ付き LRC）を貼り付けてください。
+        プチリリや歌ネット、Web サイト等からコピーした歌詞テキスト（またはタイムタグ付き LRC）を貼り付けてください。
       </p>
-      <textarea id="paste-lyrics-textarea" rows="10" placeholder="歌詞をここに貼り付け…\n\n[00:12.34]タイムタグ付きならカラオケ同期表示されます\nタグ無しのプレーン歌詞もそのまま表示できます" style="width: 100%; box-sizing: border-box; padding: 8px; font-size: 11px; line-height: 1.5; font-family: inherit; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg); resize: vertical;"></textarea>
+      <textarea id="paste-lyrics-textarea" rows="12" placeholder="歌詞をここに貼り付け…\n\n[00:12.34]タイムタグ付きならカラオケ同期表示されます\nタグ無しのプレーン歌詞もそのまま表示できます" style="width: 100%; box-sizing: border-box; padding: 8px; font-size: 11px; line-height: 1.5; font-family: inherit; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg); color: var(--fg); resize: vertical;">${escapeHtml(initialText)}</textarea>
     `;
 
     openModal({
-      title: "歌詞を手動登録",
+      title: "歌詞の手動登録・編集",
       body,
       actions: [
         { label: "キャンセル", onClick: () => {} },
         {
-          label: "保存",
+          label: "保存して反映",
           primary: true,
           onClick: async () => {
             const text = body.querySelector("#paste-lyrics-textarea")?.value.trim();
@@ -292,8 +428,8 @@ export async function mount(root) {
               unsynced: text,
             };
             applyLyrics(newLyrics);
-            await updateTrack(track.id, { lyrics: newLyrics }).catch(() => {});
-            toast("歌詞を登録しました", "ok");
+            await updateTrack(cur.id, { lyrics: newLyrics }).catch(() => {});
+            toast("歌詞を登録・更新しました", "ok");
             return true;
           },
         },
@@ -302,30 +438,56 @@ export async function mount(root) {
   }
 
   function renderEmptyLyrics(msg = "歌詞が見つかりませんでした") {
+    const cur = appState.get().currentTrack;
+    const urls = cur ? getExternalLyricsUrls(cur.title, cur.artist) : null;
+
     refs.lyricsLines.innerHTML = `
-      <div class="lyrics-line lyrics-empty" style="padding: 24px 16px; text-align: center; max-width: 320px; margin: 0 auto;">
-        <div style="font-size: 13px; color: var(--fg-muted); margin-bottom: 14px;">${escapeHtml(msg)}</div>
-        <div style="display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;">
-          <button type="button" class="btn" id="btn-lyrics-custom-search" style="font-size: 11px; padding: 5px 10px; border-radius: 6px;">
-            🔍 条件を変えて検索
+      <div class="lyrics-line lyrics-empty" style="padding: 24px 16px; text-align: center; max-width: 340px; margin: 0 auto;">
+        <div style="font-size: 13px; color: var(--fg-muted); margin-bottom: 12px;">${escapeHtml(msg)}</div>
+        <div style="display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 16px;">
+          <button type="button" class="btn" id="btn-lyrics-custom-search" style="font-size: 11px; padding: 6px 12px; border-radius: 6px;">
+            🔍 候補を探す / 再検索
           </button>
-          <button type="button" class="btn primary" id="btn-lyrics-paste" style="font-size: 11px; padding: 5px 10px; border-radius: 6px;">
-            ✏️ 歌詞を貼り付け
+          <button type="button" class="btn primary" id="btn-lyrics-paste" style="font-size: 11px; padding: 6px 12px; border-radius: 6px;">
+            📋 歌詞を貼り付け
           </button>
         </div>
+
+        ${urls ? `
+          <div style="border-top: 1px solid var(--border-color); padding-top: 12px; margin-top: 8px;">
+            <div style="font-size: 11px; color: var(--fg-muted); margin-bottom: 8px;">外部の歌詞サービスで探す (ワンタップで開く):</div>
+            <div style="display: flex; gap: 6px; justify-content: center; flex-wrap: wrap;">
+              <a href="${urls.petitLyrics}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 4px 8px; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
+                🌸 プチリリ
+              </a>
+              <a href="${urls.utaNet}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 4px 8px; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
+                🎵 歌ネット
+              </a>
+              <a href="${urls.utaTen}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 4px 8px; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
+                🎤 UtaTen
+              </a>
+              <a href="${urls.google}" target="_blank" rel="noopener" class="btn" style="font-size: 11px; padding: 4px 8px; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
+                🔍 Google
+              </a>
+            </div>
+            <div style="font-size: 10px; color: var(--fg-muted); margin-top: 6px; line-height: 1.4;">
+              コピーした歌詞は「📋 歌詞を貼り付け」から登録すると次回以降自動表示されます
+            </div>
+          </div>
+        ` : ''}
       </div>
     `;
 
     const searchBtn = refs.lyricsLines.querySelector("#btn-lyrics-custom-search");
     searchBtn?.addEventListener("click", () => {
-      const cur = appState.get().currentTrack;
-      if (cur) openCustomLyricsSearch(cur);
+      const c = appState.get().currentTrack;
+      if (c) openCustomLyricsSearch(c);
     });
 
     const pasteBtn = refs.lyricsLines.querySelector("#btn-lyrics-paste");
     pasteBtn?.addEventListener("click", () => {
-      const cur = appState.get().currentTrack;
-      if (cur) openPasteLyricsModal(cur);
+      const c = appState.get().currentTrack;
+      if (c) openPasteLyricsModal(c);
     });
   }
 
