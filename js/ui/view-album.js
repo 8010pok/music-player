@@ -490,9 +490,9 @@ function openTrackActionsModal(track, root) {
       addToQueueEnd(track);
       toast("再生キューに追加しました", "info");
     } else if (act === "playlist") {
-      openAddToPlaylistModal(track);
+      setTimeout(() => openAddToPlaylistModal(track), 20);
     } else if (act === "edit") {
-      editTrackMetadata(track, () => mount(root));
+      setTimeout(() => editTrackMetadata(track, () => mount(root)), 20);
     } else if (act === "love") {
       const nextLoved = !isLoved;
       await updateTrack(track.id, { loved: nextLoved });
@@ -500,29 +500,31 @@ function openTrackActionsModal(track, root) {
       toast(nextLoved ? "お気に入りに追加しました" : "お気に入りを解除しました", "ok");
       mount(root);
     } else if (act === "delete") {
-      const yes = await confirm(`「${track.title || "(無題)"}」を削除しますか？\n（曲データは完全に削除されます）`, { danger: true, okLabel: "削除" });
-      if (yes) {
-        if (appState.get().currentTrack?.id === track.id) {
-          stopPlayback();
+      setTimeout(async () => {
+        const yes = await confirm(`「${track.title || "(無題)"}」を削除しますか？\n（曲データは完全に削除されます）`, { danger: true, okLabel: "削除" });
+        if (yes) {
+          if (appState.get().currentTrack?.id === track.id) {
+            stopPlayback();
+          }
+          try {
+            await deleteTrack(track.id);
+          } catch (err) {
+            console.warn("曲削除に失敗", err);
+            toast("削除に失敗しました", "err");
+            return;
+          }
+          await removeTrackFromAllPlaylists(track.id).catch(() => {});
+          releaseArtwork(track.id);
+          album.tracks = album.tracks.filter((x) => x.id !== track.id);
+          if (album.tracks.length === 0) {
+            toast("アルバムの全曲が削除されました", "ok");
+            go("albums");
+          } else {
+            toast("削除しました", "ok");
+            mount(root);
+          }
         }
-        try {
-          await deleteTrack(track.id);
-        } catch (err) {
-          console.warn("曲削除に失敗", err);
-          toast("削除に失敗しました", "err");
-          return;
-        }
-        await removeTrackFromAllPlaylists(track.id).catch(() => {});
-        releaseArtwork(track.id);
-        album.tracks = album.tracks.filter((x) => x.id !== track.id);
-        if (album.tracks.length === 0) {
-          toast("アルバムの全曲が削除されました", "ok");
-          go("albums");
-        } else {
-          toast("削除しました", "ok");
-          mount(root);
-        }
-      }
+      }, 20);
     }
   });
 }

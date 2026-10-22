@@ -231,6 +231,16 @@ test("video-extract-modal で previewAudioCtx.resume() が呼ばれ、suspended 
   ok(modalCode.includes("btn-ve-preview-start"), "開始3秒試聴ボタンが配備されている");
   ok(modalCode.includes("btn-ve-preview-end"), "終了前3秒試聴ボタンが配備されている");
   ok(modalCode.includes("getAllTracks"), "重複保存防止のため getAllTracks で既存曲を検索している");
+  ok(modalCode.includes("baseFilename"), "元動画ファイル名 (video__...) の未変換重複トラックを検出・クリーンアップしている");
+});
+
+test("view-library で動画ファイルが単体選択された場合、生動画保存を防ぎ動画抽出モーダルへ自動誘導する", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const libCode = fs.readFileSync(path.resolve("js/ui/view-library.js"), "utf-8");
+
+  ok(libCode.includes("isVideoFile"), "isVideoFile 関数で動画ファイルが判定されている");
+  ok(libCode.includes("openVideoExtractModal(videoFiles[0]"), "生動画保存を防ぎ openVideoExtractModal に自動誘導している");
 });
 
 // 非同期テストの完了を待機

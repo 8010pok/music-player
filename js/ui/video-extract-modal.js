@@ -15,7 +15,8 @@ import {
   inferMetadataFromFilename,
   encodeVideoAudioTrack,
 } from "../audio/video-audio-extractor.js";
-import { putTrack, getAllTracks } from "../store/library-db.js";
+import { putTrack, getAllTracks, deleteTrack, removeTrackFromAllPlaylists } from "../store/library-db.js";
+import { releaseArtwork } from "./artwork-cache.js";
 import { getPublic } from "../store/settings.js";
 import { isDriveConnected, uploadFileToDrive } from "../gdrive/drive-service.js";
 
@@ -518,12 +519,22 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
       progressBar.style.width = "85%";
       progressStatus.textContent = "ライブラリに保存中…";
 
-      // 2. 既存トラックの重複チェック（同名・同アーティストがあればIDを再利用して上書き）
+      // 2. 既存トラックの重複チェック & 元動画トラックの自動置換
       const allTracks = await getAllTracks().catch(() => []);
       const norm = (s) => (s || "").trim().toLowerCase();
-      const existing = allTracks.find((t) =>
+      const baseFilename = filename.replace(/\.[^.]+$/, "");
+
+      // (a) 同名・同アーティストの既存トラック
+      let existing = allTracks.find((t) =>
         norm(t.title) === norm(title) && norm(t.artist) === norm(artist)
       );
+
+      // (b) もし (a) が見つからず、元動画ファイル名 (例: video__xxx) で生登録されていたトラックがあればそれを置換対象にする
+      if (!existing && baseFilename) {
+        existing = allTracks.find((t) =>
+          norm(t.title) === norm(baseFilename) || norm(t.originalName) === norm(filename)
+        );
+      }
 
       const trackId = existing ? existing.id : `track-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const newTrack = {
@@ -536,6 +547,7 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
         format: "mp3",
         mime: "audio/mpeg",
         fileSize: encResult.mp3Blob.size,
+        originalName: filename,
         addedAt: existing ? (existing.addedAt || Date.now()) : Date.now(),
         updatedAt: Date.now(),
         source: "video-extract",
@@ -549,6 +561,19 @@ export async function openVideoExtractModal(videoFile, { onSaved = null } = {}) 
 
       // 3. IndexedDB へ保存
       await putTrack(newTrack, encResult.mp3Blob);
+
+      // 3.1 元動画ファイル名 (video__...) の未変換動画トラックが別に残っている場合は、二重保存を防ぐため自動整理
+      if (baseFilename) {
+        const orphanDups = allTracks.filter((t) =>
+          t.id !== trackId &&
+          (norm(t.title) === norm(baseFilename) || norm(t.originalName) === norm(filename))
+        );
+        for (const orphan of orphanDups) {
+          await deleteTrack(orphan.id).catch(() => {});
+          await removeTrackFromAllPlaylists(orphan.id).catch(() => {});
+          releaseArtwork(orphan.id);
+        }
+      }
 
       // 4. Google Drive にアップロード（オプション）
       if (saveToDrive) {

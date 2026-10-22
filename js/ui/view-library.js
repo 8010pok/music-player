@@ -1216,13 +1216,15 @@ function openLibraryTrackActionsModal(track, refs) {
       return;
     }
     if (act === "playlist") {
-      openAddToPlaylistModal(track);
+      setTimeout(() => openAddToPlaylistModal(track), 20);
       return;
     }
     if (act === "edit") {
-      await editTrackMetadata(track, () => {
-        renderList(refs);
-      });
+      setTimeout(() => {
+        editTrackMetadata(track, () => {
+          renderList(refs);
+        });
+      }, 20);
       return;
     }
     if (act === "love") {
@@ -1242,7 +1244,7 @@ function openLibraryTrackActionsModal(track, refs) {
       return;
     }
     if (act === "delete") {
-      await deleteTrackWithConfirm(track, refs);
+      setTimeout(() => deleteTrackWithConfirm(track, refs), 20);
       return;
     }
   });
@@ -1586,6 +1588,24 @@ async function onFiles(refs, fileList) {
   const skippedEmpty = audio.length - files.length;
   if (files.length === 0) {
     toast(audio.length === 0 ? "対応する音源ファイルがありません" : "0 バイトのファイルのみのため追加しませんでした", "err");
+    return;
+  }
+
+  // ★ 動画ファイル（MP4 / MOV / WebM 等）のみが選択された場合:
+  //   未変換のまま生動画として保存して "video__hogehoge" というゴミ音源が増殖するのを防ぎ、
+  //   高品質 MP3 音声抽出・カット編集画面へ自動誘導する。
+  const isVideoFile = (f) => /\.(mp4|mov|webm|m4v|avi|mkv)$/i.test(f.name) || (f.type && f.type.startsWith("video/"));
+  const videoFiles = files.filter(isVideoFile);
+  const pureAudioFiles = files.filter((f) => !isVideoFile(f));
+
+  if (videoFiles.length > 0 && pureAudioFiles.length === 0) {
+    openVideoExtractModal(videoFiles[0], {
+      onSaved: async () => {
+        await reloadTracks(refs);
+        await refreshStorage(refs);
+        renderList(refs);
+      },
+    });
     return;
   }
   bulkBusy = true;
