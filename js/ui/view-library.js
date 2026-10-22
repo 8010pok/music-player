@@ -1181,6 +1181,10 @@ async function onListClick(e, refs) {
 
   if (act === "edit") {
     await editTrackMetadata(t, () => {
+      cachedAlbumsGroup = null;
+      cachedArtistsGroup = null;
+      dirtyTabs.albums = true;
+      dirtyTabs.artists = true;
       renderList(refs);
     });
     return;
@@ -1381,6 +1385,10 @@ function openLibraryTrackActionsModal(track, refs) {
     if (act === "edit") {
       // モーダル切り替え（編集モーダルを即座に安全オープン）
       editTrackMetadata(track, () => {
+        cachedAlbumsGroup = null;
+        cachedArtistsGroup = null;
+        dirtyTabs.albums = true;
+        dirtyTabs.artists = true;
         renderList(refs);
       });
       return;

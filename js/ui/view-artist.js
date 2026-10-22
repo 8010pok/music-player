@@ -274,7 +274,17 @@ async function onTrackClick(e, root) {
       return;
     }
     if (act === "edit") {
-      editTrackMetadata(track, () => mount(root));
+      editTrackMetadata(track, async (updatedTrack) => {
+        if (updatedTrack && updatedTrack.artist && updatedTrack.artist.trim().toLowerCase() !== (artist?.name || "").trim().toLowerCase()) {
+          const allTracks = await getAllTracks();
+          const allArtists = groupTracksIntoArtists(allTracks);
+          const oldStillExists = allArtists.some((a) => a.name.trim().toLowerCase() === (artist?.name || "").trim().toLowerCase());
+          if (!oldStillExists) {
+            history.replaceState(null, "", `#/artist?name=${encodeURIComponent(updatedTrack.artist.trim())}`);
+          }
+        }
+        await mount(root);
+      });
       return;
     }
   }

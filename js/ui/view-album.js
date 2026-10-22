@@ -7,7 +7,7 @@
  */
 
 import { getAllTracks, deleteTrack, removeTrackFromAllPlaylists, updateTrack, getAllPlaylists, savePlaylist, addTracksToPlaylist } from "../store/library-db.js";
-import { groupTracksIntoAlbums, parseTrackIndex } from "../metadata/album-util.js";
+import { groupTracksIntoAlbums, parseTrackIndex, getAlbumKey } from "../metadata/album-util.js";
 import { setQueueAndPlay, setShuffleMode, stopPlayback, prewarmTrack, prewarmTracks, playNextTrack, addToQueueEnd } from "../player/audio-engine.js";
 import { appState } from "../state.js";
 import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
@@ -66,12 +66,20 @@ export async function mount(root, options = {}) {
   refs.playAllBtn.addEventListener("click", () => playAlbum(false));
   refs.playShuffleBtn.addEventListener("click", () => playAlbum(true));
   const openAlbumEditor = () => {
-    editAlbumMetadata(album, (updatedAlb) => {
+    editAlbumMetadata(album, async (updatedAlb) => {
       if (!updatedAlb) {
-        go("albums");
-      } else {
-        mount(root);
+        go("library", { tab: "albums" });
+        return;
       }
+      // アルバム名やアルバムアーティストが変更された場合、新しいアルバムキーを計算して URL を更新してから再マウント
+      if (updatedAlb.tracks && updatedAlb.tracks.length > 0) {
+        const newKey = getAlbumKey(updatedAlb.tracks[0]);
+        const curKey = parseQuery().key;
+        if (newKey && newKey !== curKey) {
+          history.replaceState(null, "", `#/album?key=${encodeURIComponent(newKey)}`);
+        }
+      }
+      await mount(root);
     });
   };
   if (refs.editAlbumBtn) {
@@ -113,15 +121,24 @@ export async function mount(root, options = {}) {
         toast("編集する曲を選択してください", "info");
         return;
       }
-      editSelectedTracksMetadata(selected, async () => {
+      editSelectedTracksMetadata(selected, async (updatedTracks) => {
         const latestTracks = await getAllTracks();
         const latestAlbums = groupTracksIntoAlbums(latestTracks);
         const curKey = parseQuery().key;
         const stillExists = latestAlbums.find((a) => a.key === curKey);
         if (!stillExists) {
+          // アルバム内の全曲が別アルバム名へ変更された場合、その新しいアルバムページへ自動遷移
+          if (Array.isArray(updatedTracks) && updatedTracks.length > 0) {
+            const newKey = getAlbumKey(updatedTracks[0]);
+            if (newKey && latestAlbums.some((a) => a.key === newKey)) {
+              history.replaceState(null, "", `#/album?key=${encodeURIComponent(newKey)}`);
+              await mount(root);
+              return;
+            }
+          }
           go("library", { tab: "albums" });
         } else {
-          mount(root);
+          await mount(root);
         }
       });
     });
@@ -213,6 +230,30 @@ function parseQuery() {
     params[k] = v;
   }
   return params;
+}
+
+/**
+ * アルバム内の1曲を編集した後の安全な再描画・遷移ヘルパー
+ * （1曲だけのアルバムでアルバム名を変更した場合も、新しいアルバムページへ自動遷移してエラーを防ぐ）
+ */
+async function reloadAlbumAfterTrackEdit(root, updatedTrack) {
+  const latestTracks = await getAllTracks();
+  const latestAlbums = groupTracksIntoAlbums(latestTracks);
+  const curKey = parseQuery().key;
+  const stillExists = latestAlbums.find((a) => a.key === curKey);
+  if (!stillExists) {
+    if (updatedTrack) {
+      const newKey = getAlbumKey(updatedTrack);
+      if (newKey && latestAlbums.some((a) => a.key === newKey)) {
+        history.replaceState(null, "", `#/album?key=${encodeURIComponent(newKey)}`);
+        await mount(root);
+        return;
+      }
+    }
+    go("library", { tab: "albums" });
+  } else {
+    await mount(root);
+  }
 }
 
 function render(alb) {
@@ -463,7 +504,9 @@ async function onListClick(e, root) {
     const id = row?.dataset.id;
     const t = album.tracks.find((x) => x.id === id);
     if (t) {
-      await editTrackMetadata(t, () => mount(root));
+      await editTrackMetadata(t, async (updatedTrack) => {
+        await reloadAlbumAfterTrackEdit(root, updatedTrack);
+      });
     }
     return;
   }
@@ -637,7 +680,9 @@ function openTrackActionsModal(track, root) {
       openAddToPlaylistModal(track);
     } else if (act === "edit") {
       // モーダルを切り替え（編集モーダルを即座に安全オープン）
-      editTrackMetadata(track, () => mount(root));
+      editTrackMetadata(track, async (updatedTrack) => {
+        await reloadAlbumAfterTrackEdit(root, updatedTrack);
+      });
     } else if (act === "multi-select") {
       closeMenu();
       selectedTrackIds.add(track.id);

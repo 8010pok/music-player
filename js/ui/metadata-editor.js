@@ -9,7 +9,7 @@
  */
 
 import { openModal, toast, escapeHtml, escapeAttr } from "./components.js";
-import { updateTrack, deleteTrack, removeTrackFromAllPlaylists } from "../store/library-db.js";
+import { updateTrack, bulkUpdateTracks, deleteTrack, removeTrackFromAllPlaylists } from "../store/library-db.js";
 import { stopPlayback } from "../player/audio-engine.js";
 import { appState } from "../state.js";
 import { releaseArtwork, getArtworkUrl } from "./artwork-cache.js";
@@ -409,14 +409,16 @@ export function editTrackMetadata(track, onUpdated) {
             };
 
             if (pendingArtworkBlob !== undefined) {
-              patch.artworkBlob = pendingArtworkBlob;
               if (pendingArtworkBlob instanceof Blob) {
                 try {
                   patch.artworkDataUrl = await blobToDataUrl(pendingArtworkBlob, 500);
+                  patch.artworkBlob = null; // Base64 Data URL 化できた場合は生 Blob を null にして iOS WebKit の DataCloneError を防ぐ
                 } catch {
+                  patch.artworkBlob = pendingArtworkBlob;
                   patch.artworkDataUrl = null;
                 }
               } else {
+                patch.artworkBlob = null;
                 patch.artworkDataUrl = null;
               }
             }
@@ -841,18 +843,21 @@ export function editAlbumMetadata(album, onUpdated) {
             };
             if (genre) basePatch.genre = genre;
             if (pendingArtworkBlob !== undefined) {
-              basePatch.artworkBlob = pendingArtworkBlob;
               if (pendingArtworkBlob instanceof Blob) {
                 try {
                   basePatch.artworkDataUrl = await blobToDataUrl(pendingArtworkBlob, 500);
+                  basePatch.artworkBlob = null;
                 } catch {
+                  basePatch.artworkBlob = pendingArtworkBlob;
                   basePatch.artworkDataUrl = null;
                 }
               } else {
+                basePatch.artworkBlob = null;
                 basePatch.artworkDataUrl = null;
               }
             }
 
+            const batchUpdates = [];
             for (const t of album.tracks) {
               const perTrack = trackPatchMap.get(t.id) || {};
               const individualPatch = { ...basePatch };
@@ -863,9 +868,12 @@ export function editAlbumMetadata(album, onUpdated) {
               if (perTrack.memo !== undefined) individualPatch.memo = perTrack.memo;
 
               releaseArtwork(t.id);
-              await updateTrack(t.id, individualPatch);
-              releaseArtwork(t.id);
+              batchUpdates.push({ id: t.id, patch: individualPatch });
               Object.assign(t, individualPatch);
+            }
+            await bulkUpdateTracks(batchUpdates);
+            for (const t of album.tracks) {
+              releaseArtwork(t.id);
             }
             recordLibraryModified();
 
@@ -1308,18 +1316,21 @@ export function editSelectedTracksMetadata(tracks, onUpdated) {
             if (genre || commonGenre) basePatch.genre = genre;
 
             if (pendingArtworkBlob !== undefined) {
-              basePatch.artworkBlob = pendingArtworkBlob;
               if (pendingArtworkBlob instanceof Blob) {
                 try {
                   basePatch.artworkDataUrl = await blobToDataUrl(pendingArtworkBlob, 500);
+                  basePatch.artworkBlob = null;
                 } catch {
+                  basePatch.artworkBlob = pendingArtworkBlob;
                   basePatch.artworkDataUrl = null;
                 }
               } else {
+                basePatch.artworkBlob = null;
                 basePatch.artworkDataUrl = null;
               }
             }
 
+            const batchUpdates = [];
             for (const t of tracks) {
               const perTrack = trackPatchMap.get(t.id) || {};
               const individualPatch = { ...basePatch };
@@ -1330,9 +1341,12 @@ export function editSelectedTracksMetadata(tracks, onUpdated) {
               if (perTrack.memo !== undefined) individualPatch.memo = perTrack.memo;
 
               releaseArtwork(t.id);
-              await updateTrack(t.id, individualPatch);
-              releaseArtwork(t.id);
+              batchUpdates.push({ id: t.id, patch: individualPatch });
               Object.assign(t, individualPatch);
+            }
+            await bulkUpdateTracks(batchUpdates);
+            for (const t of tracks) {
+              releaseArtwork(t.id);
             }
             recordLibraryModified();
 

@@ -463,6 +463,27 @@ test("21. モーダル連動の同期安全化 ＆ アルバム/ライブラリ�
   assert.match(dedupCode, /baseA\s*===\s*baseB/, "動画抽出元ファイル名と動画トラックの重複判定が実装されている");
 });
 
+test("22. IndexedDB write failed 防止（sanitizeRecordForIdb, bulkUpdateTracks 単一トランザクション化, アルバム名変更時のURL自動追従）の検証", () => {
+  const rootDir = path.join(__dirname, "..");
+  const libraryDbCode = fs.readFileSync(path.join(rootDir, "js/store/library-db.js"), "utf-8");
+  const metaEditorCode = fs.readFileSync(path.join(rootDir, "js/ui/metadata-editor.js"), "utf-8");
+  const viewAlbumCode = fs.readFileSync(path.join(rootDir, "js/ui/view-album.js"), "utf-8");
+
+  // 1) library-db.js に sanitizeRecordForIdb と bulkUpdateTracks と stripBlob フォールバックが実装されていること
+  assert.match(libraryDbCode, /function sanitizeRecordForIdb\(rec\)/, "sanitizeRecordForIdb が実装されている");
+  assert.match(libraryDbCode, /export function bulkUpdateTracks\(updates\)/, "bulkUpdateTracks がエクスポートされている");
+  assert.match(libraryDbCode, /runUpdate\(false\)\)\.catch[\s\S]*?runUpdate\(true\)/, "updateTrack に artworkBlob 除去フォールバックが実装されている");
+  assert.match(libraryDbCode, /runBatch\(false\)\)\.catch[\s\S]*?runBatch\(true\)/, "bulkUpdateTracks に artworkBlob 除去フォールバックが実装されている");
+
+  // 2) metadata-editor.js が一括保存時にループ updateTrack ではなく bulkUpdateTracks を使用していること
+  assert.match(metaEditorCode, /await bulkUpdateTracks\(batchUpdates\);/, "metadata-editor が bulkUpdateTracks で単一トランザクション保存を行う");
+
+  // 3) view-album.js でアルバム名変更時に新しいアルバムキーへ URL を replaceState して「アルバムが見つかりません」を防ぐこと
+  assert.match(viewAlbumCode, /history\.replaceState\(null,\s*"",\s*`#\/album\?key=\$\{encodeURIComponent\(newKey\)\}`\)/, "アルバム名変更時に新しいキーへ URL を自動更新する");
+  assert.match(viewAlbumCode, /async function reloadAlbumAfterTrackEdit\(root,\s*updatedTrack\)/, "単曲編集後のアルバムキー追従ヘルパーが実装されている");
+});
+
+
 
 
 

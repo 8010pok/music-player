@@ -91,7 +91,7 @@ function txReq(req) {
  * @returns {Promise<T>}
  */
 function withWriteRetry(run) {
-  const MAX_ATTEMPTS = 3;
+  const MAX_ATTEMPTS = 4;
   return (async () => {
     let lastErr;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -99,19 +99,10 @@ function withWriteRetry(run) {
         return await run();
       } catch (err) {
         lastErr = err;
-        if (err && err.name === "QuotaExceededError") break; // 容量不足は再試行不可
         if (attempt < MAX_ATTEMPTS) {
           // ★ 再試行前にキャッシュ接続を破棄し、次の openDb() に新しい接続を張り直させる。
-          //   iOS ではバックグラウンド復帰後に接続が onclose を発火しないまま使用不能(InvalidStateError /
-          //   tx abort)になることがあり、その壊れた接続を掴んだまま再試行すると同一接続上で連続失敗する。
-          //   これが「再生無効トグルや並び替えが一度失敗すると、再タップしてもまた失敗(リロードまで復帰
-          //   不能)」の主因。ここで参照を外せば openDb() が新接続を開き、操作内リトライと(全リトライ失敗後の)
-          //   ユーザの再操作の両方が回復しやすくなる。実接続は close しない(進行中の別 tx を巻き込まない。
-          //   IndexedDB は同一 DB への複数接続を許容し、参照されない旧接続は GC 時に閉じる)。
-          //   QuotaExceededError は上で break 済みなので、容量不足での無駄な再接続は起きない。
           _dbPromise = null;
-          // 短い待機で(iOS の一過性のサスペンド解除や再接続確立を)待ってから再試行する。
-          await new Promise((r) => setTimeout(r, attempt * 100));
+          await new Promise((r) => setTimeout(r, attempt * 120));
         }
       }
     }
@@ -233,22 +224,64 @@ function ensureTrackMetadataInBackground(id, blob, extraPatch = null) {
  * @param {Blob} blob
  */
 export function putTrack(track, blob) {
+  const cleanTrack = sanitizeRecordForIdb(track);
   return withWriteRetry(async () => {
     const db = await openDb();
     const tx = db.transaction(["tracks", "blobs"], "readwrite");
-    tx.objectStore("tracks").put(track);
+    tx.objectStore("tracks").put(cleanTrack);
     if (blob) {
-      tx.objectStore("blobs").put({ id: track.id, blob });
+      tx.objectStore("blobs").put({ id: cleanTrack.id, blob });
     }
     return new Promise((resolve, reject) => {
       tx.oncomplete = () => {
-        if (track) notifyTrackUpdated(track, track);
+        if (cleanTrack) notifyTrackUpdated(cleanTrack, cleanTrack);
         resolve();
       };
       tx.onerror = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
       tx.onabort = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
     });
+  }).catch((err) => {
+    // artworkBlob が GC/失効または容量圧迫を起こしている場合のフォールバック: artworkBlob を除いて再保存
+    if (cleanTrack && cleanTrack.artworkBlob) {
+      const stripped = { ...cleanTrack, artworkBlob: null };
+      return withWriteRetry(async () => {
+        const db = await openDb();
+        const tx = db.transaction(["tracks", "blobs"], "readwrite");
+        tx.objectStore("tracks").put(stripped);
+        if (blob) tx.objectStore("blobs").put({ id: stripped.id, blob });
+        return new Promise((resolve, reject) => {
+          tx.oncomplete = () => {
+            notifyTrackUpdated(stripped, stripped);
+            resolve();
+          };
+          tx.onerror = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
+          tx.onabort = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
+        });
+      });
+    }
+    throw err;
   });
+}
+
+/**
+ * IndexedDB (特に iOS Safari / WebKit) での DataCloneError / InvalidStateError / QuotaExceeded を防ぐため、
+ * トラックレコード内の artworkBlob を検証・正規化する。
+ * - artworkDataUrl (Base64) がすでにある場合は、WebKit で失効しやすい生の artworkBlob を保持せず null に統一する。
+ */
+function sanitizeRecordForIdb(rec) {
+  if (!rec || typeof rec !== "object") return rec;
+  const copy = { ...rec };
+  if (copy.artworkDataUrl && typeof copy.artworkDataUrl === "string" && copy.artworkDataUrl.startsWith("data:")) {
+    // Base64 Data URL がある場合は生の Blob を IndexedDB に重複保存しない（iOS WebKit の stale Blob DataCloneError を完全防止）
+    copy.artworkBlob = null;
+  } else if (copy.artworkBlob != null) {
+    if (typeof Blob !== "undefined" && !(copy.artworkBlob instanceof Blob)) {
+      copy.artworkBlob = null;
+    } else if (copy.artworkBlob.size === 0) {
+      copy.artworkBlob = null;
+    }
+  }
+  return copy;
 }
 
 const _repairedTrackIds = new Set();
@@ -286,8 +319,11 @@ function repairCorruptedTracksInBackground(tracks) {
     let anyUpdated = false;
     try {
       const { extractMetadata } = await import("../metadata/index.js");
+      const batchUpdates = [];
       for (const t of tracks) {
         if (!t || !t.id) continue;
+        // ユーザーがすでに編集した曲はスキップ
+        if (t.userEdited && typeof t.album === "string" && !isCorruptedMetaField(t.album)) continue;
         try {
           const patch = {
             album: typeof t.album === "string" ? t.album : "",
@@ -323,11 +359,14 @@ function repairCorruptedTracksInBackground(tracks) {
             }
           }
 
-          await updateTrack(t.id, patch);
-          anyUpdated = true;
+          batchUpdates.push({ id: t.id, patch, onlyIfNotUserEdited: true });
         } catch (err) {
           console.warn("[library-db] 破損メタデータ自動修復スキップ:", t.id, err);
         }
+      }
+      if (batchUpdates.length > 0) {
+        await bulkUpdateTracks(batchUpdates);
+        anyUpdated = true;
       }
       if (anyUpdated && typeof window !== "undefined" && typeof window.dispatchEvent === "function" && typeof CustomEvent === "function") {
         window.dispatchEvent(new CustomEvent("music-player:library-synced", { detail: { repaired: true } }));
@@ -479,7 +518,7 @@ export async function countTracks() {
  * get の onsuccess 内で put を同期的に呼び出すことで防ぐ。
  */
 export function updateTrack(id, patch) {
-  return withWriteRetry(() => openDb().then((db) => new Promise((resolve, reject) => {
+  const runUpdate = (stripBlob) => openDb().then((db) => new Promise((resolve, reject) => {
     const tx = db.transaction("tracks", "readwrite");
     const store = tx.objectStore("tracks");
     const req = store.get(id);
@@ -488,8 +527,18 @@ export function updateTrack(id, patch) {
       const cur = req.result;
       if (!cur) { resolve(undefined); return; }
       Object.assign(cur, patch);
-      updated = cur;
-      store.put(cur);
+      const clean = sanitizeRecordForIdb(cur);
+      if (stripBlob) {
+        clean.artworkBlob = null;
+      }
+      updated = clean;
+      try {
+        store.put(clean);
+      } catch (putErr) {
+        // 同期的な DataCloneError 等の場合は artworkBlob を除去して即座に再 put
+        clean.artworkBlob = null;
+        store.put(clean);
+      }
     };
     req.onerror = () => reject(req.error);
     tx.oncomplete = () => {
@@ -498,7 +547,70 @@ export function updateTrack(id, patch) {
     };
     tx.onerror  = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
     tx.onabort  = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
-  })));
+  }));
+
+  return withWriteRetry(() => runUpdate(false)).catch((err) => {
+    console.warn("[library-db] updateTrack 通常保存失敗、artworkBlob 除去フォールバックを実行:", id, err);
+    return withWriteRetry(() => runUpdate(true));
+  });
+}
+
+/**
+ * 複数トラックのメタデータを【単一トランザクション】で一括更新する（アルバム一括編集・複数選択一括編集用）。
+ *   - 従来は N 曲分の updateTrack をループで N 回別々の readwrite トランザクションとして発行していたため、
+ *     iOS Safari 等でトランザクション競合や DataCloneError / abort が起きやすく「IndexedDB library write failed/aborted」
+ *     の原因になっていた。
+ *   - 単一トランザクションにまとめることで N→1 トランザクションに削減し、万一 Blob クローンエラーや容量不足が
+ *     発生しても自動で artworkBlob を整理して確実に保存を完了させる。
+ * @param {Array<{ id: string, patch: object, onlyIfNotUserEdited?: boolean }>} updates
+ * @returns {Promise<Array<object>>}
+ */
+export function bulkUpdateTracks(updates) {
+  if (!Array.isArray(updates) || updates.length === 0) return Promise.resolve([]);
+
+  const runBatch = (stripBlob) => openDb().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction("tracks", "readwrite");
+    const store = tx.objectStore("tracks");
+    const updatedList = [];
+
+    for (const item of updates) {
+      if (!item || !item.id || !item.patch) continue;
+      const req = store.get(item.id);
+      req.onsuccess = () => {
+        const cur = req.result;
+        if (!cur) return;
+        if (item.onlyIfNotUserEdited && cur.userEdited && typeof cur.album === "string" && !isCorruptedMetaField(cur.album)) {
+          return;
+        }
+        Object.assign(cur, item.patch);
+        const clean = sanitizeRecordForIdb(cur);
+        if (stripBlob) {
+          clean.artworkBlob = null;
+        }
+        try {
+          store.put(clean);
+        } catch (_) {
+          clean.artworkBlob = null;
+          store.put(clean);
+        }
+        updatedList.push({ track: clean, patch: item.patch });
+      };
+    }
+
+    tx.oncomplete = () => {
+      for (const u of updatedList) {
+        notifyTrackUpdated(u.track, u.patch);
+      }
+      resolve(updatedList.map((u) => u.track));
+    };
+    tx.onerror = () => reject(tx.error || new Error("IndexedDB bulk track write failed/aborted"));
+    tx.onabort = () => reject(tx.error || new Error("IndexedDB bulk track write failed/aborted"));
+  }));
+
+  return withWriteRetry(() => runBatch(false)).catch((err) => {
+    console.warn("[library-db] bulkUpdateTracks 通常保存失敗、artworkBlob 除去フォールバックを実行:", err);
+    return withWriteRetry(() => runBatch(true));
+  });
 }
 
 /**
