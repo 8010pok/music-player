@@ -16,7 +16,10 @@ import {
   parseGoogleApiError,
   inferMetadataFromFileName,
   isInvalidDriveAlbum,
+  getDriveStreamUrl,
 } from "../js/gdrive/drive-service.js";
+import { isSuspectPartialHeaderDuration } from "../js/store/library-db.js";
+import { parseMp3 } from "../js/metadata/parse-mp3.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -240,6 +243,62 @@ test("アルバム解決優先順位: 音源ファイル内のタグ (extractedM
 
   strictEqual(typeof finalAlbum, "string");
   strictEqual(finalAlbum, "THE BOOK 2");
+});
+
+console.log("=== 0:39 (39秒) 固定再生時間バグ防止 & 自動修復テスト ===");
+
+await asyncTest("parseMp3: 1.5MB 部分ヘッダ (_isPartialHeader) で _fullFileSize がある場合、0:39 ではなく全体サイズから正しい再生時間を算出する", async () => {
+  // MPEG1 Layer III (0xFB), 320kbps (0xE0), 44100Hz (0x00) のフレームヘッダを持つ 1.5MB (1,572,864 bytes) の擬似 Blob
+  const buf = new Uint8Array(1572864);
+  buf[0] = 0xff;
+  buf[1] = 0xfb;
+  buf[2] = 0xe0;
+  buf[3] = 0x00;
+
+  // 1) _fullFileSize = 9,600,000 bytes (320kbps で 240秒 = 4:00) を付与した部分ヘッダ
+  const headerWithFullSize = new Blob([buf], { type: "audio/mpeg" });
+  headerWithFullSize._isPartialHeader = true;
+  headerWithFullSize._fullFileSize = 9600000;
+  const meta1 = await parseMp3(headerWithFullSize);
+  strictEqual(Math.round(meta1.duration), 240);
+
+  // 2) _isPartialHeader = true かつ全体サイズ不明の場合、偽の 39秒 (0:39) を返さず 0 を返す
+  const headerWithoutFullSize = new Blob([buf], { type: "audio/mpeg" });
+  headerWithoutFullSize._isPartialHeader = true;
+  const meta2 = await parseMp3(headerWithoutFullSize);
+  strictEqual(meta2.duration, 0);
+});
+
+test("isSuspectPartialHeaderDuration: 1.5MB ヘッダ由来の 0:39 (39秒) 固定バグ曲を正確に検出し、本物の短尺曲は誤検知しない", () => {
+  // 9.6MB あるのに 39秒 (0:39) になっている Google Drive 曲 -> バグとして検出 (true)
+  strictEqual(
+    isSuspectPartialHeaderDuration({ id: "gd-abc123", source: "gdrive", duration: 39, fileSize: 9600000 }),
+    true
+  );
+  // 補正後の再生時間は約 238秒 (3:58) になる
+  const repairedDur = Math.round(39 * (9600000 / 1572864));
+  strictEqual(repairedDur, 238);
+
+  // 実際にファイルサイズが 1.5MB 以下の短いジングル曲 (39秒) -> 正常 (false)
+  strictEqual(
+    isSuspectPartialHeaderDuration({ id: "gd-short", source: "gdrive", duration: 39, fileSize: 1500000 }),
+    false
+  );
+  // すでに正常な長さ (240秒) の Google Drive 曲 -> 正常 (false)
+  strictEqual(
+    isSuspectPartialHeaderDuration({ id: "gd-normal", source: "gdrive", duration: 240, fileSize: 9600000 }),
+    false
+  );
+});
+
+console.log("=== 外出時ダイレクトストリーミング URL 生成 (getDriveStreamUrl) ===");
+
+await asyncTest("getDriveStreamUrl: gd- トラックIDとトークンから HTTP Range ストリーミング再生用 URL を即座に生成する", async () => {
+  const url = await getDriveStreamUrl("gd-FILE_ID_777", "ya29.test_token_xyz");
+  strictEqual(
+    url,
+    "https://www.googleapis.com/drive/v3/files/FILE_ID_777?alt=media&access_token=ya29.test_token_xyz"
+  );
 });
 
 console.log("============================================================");

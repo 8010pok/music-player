@@ -65,7 +65,8 @@ export async function extractMetadata(fileOrBlob, name) {
 
   // 音声プロパティの補完: パーサが audioProps を返さなかった場合でもデフォルトを生成し、
   // bitrate が未設定かつ duration > 0 の場合は fileSize / duration から平均値を算出
-  const fileSize = (fileOrBlob && fileOrBlob.size) || 0;
+  // ※ 部分ヘッダ Blob (_isPartialHeader) の場合は _fullFileSize を優先し、切り出しサイズ(1.5MB等)での誤算出を防ぐ
+  const fileSize = (fileOrBlob && (fileOrBlob._fullFileSize || (!fileOrBlob._isPartialHeader ? fileOrBlob.size : 0))) || 0;
   if (!parsed.audioProps) {
     parsed.audioProps = {
       codec: (format || "AUDIO").toUpperCase(),

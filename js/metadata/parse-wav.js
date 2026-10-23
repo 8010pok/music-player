@@ -98,8 +98,13 @@ export async function parseWav(blob) {
 
   if (sampleRate > 0 && dataLen > 0 && byteRate > 0) {
     meta.duration = dataLen / byteRate;
-  } else if (sampleRate > 0 && byteRate > 0 && blob.size > p) {
-    meta.duration = (blob.size - 44) / byteRate;
+  } else if (sampleRate > 0 && byteRate > 0) {
+    const totalSize = (blob && blob._fullFileSize > blob.size)
+      ? blob._fullFileSize
+      : ((blob && blob._isPartialHeader) ? 0 : blob.size);
+    if (totalSize > p && totalSize > 44) {
+      meta.duration = (totalSize - 44) / byteRate;
+    }
   }
   if (sampleRate > 0) {
     const codec = audioFormat === 1 ? "PCM" : audioFormat === 3 ? "IEEE Float" : audioFormat === 0xfffe ? "Extensible" : "WAV";

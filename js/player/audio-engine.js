@@ -21,7 +21,7 @@
  */
 
 import { appState } from "../state.js";
-import { getBlob, getTrack, hasCachedBlob, recordHistory, updateTrack, getAllTracks } from "../store/library-db.js";
+import { getBlob, getTrack, hasCachedBlob, cacheDriveTrackInBackground, isSuspectPartialHeaderDuration, recordHistory, updateTrack, getAllTracks } from "../store/library-db.js";
 import {
   applyEffectsSetting,
   applyEqGains,
@@ -262,15 +262,23 @@ export function initAudioEngine({ onNowPlaying, onScrobble } = {}) {
     el.addEventListener("pause", (e) => { if (e.target === audioEl) onPause(e); });
     el.addEventListener("ended", (e) => { if (e.target === audioEl) onEnded(e); });
     el.addEventListener("timeupdate", (e) => { if (e.target === audioEl) onTimeUpdate(e); });
-    el.addEventListener("durationchange", (e) => {
-      if (e.target === audioEl) {
-        if (state.transitioning || (audioEl.src && audioEl.src.startsWith("data:audio/wav"))) return;
-        const d = audioEl.duration;
-        if (isFinite(d) && d > 0.5) {
-          appState.set({ duration: d });
+    const syncRealAudioDuration = (e) => {
+      if (e.target !== audioEl) return;
+      if (state.transitioning || (audioEl.src && audioEl.src.startsWith("data:audio/wav"))) return;
+      const d = audioEl.duration;
+      if (isFinite(d) && d > 0.5) {
+        appState.set({ duration: d });
+        const cur = appState.get().currentTrack;
+        // DB 上の duration が未設定、または 1.5MB ヘッダ由来の 0:39 (39秒) 等で実測値とズレている場合は即座に修正・永続化
+        if (cur && cur.id && (!cur.duration || isSuspectPartialHeaderDuration(cur) || Math.abs(cur.duration - d) > 1.5)) {
+          cur.duration = d;
+          updateTrack(cur.id, { duration: d }).catch(() => {});
+          updateMediaPositionState({ duration: d });
         }
       }
-    });
+    };
+    el.addEventListener("loadedmetadata", syncRealAudioDuration);
+    el.addEventListener("durationchange", syncRealAudioDuration);
     el.addEventListener("error", (e) => {
       if (e.target === audioEl) {
         console.warn("[audio-engine] audio error", e, audioEl.error);
@@ -1407,6 +1415,8 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
   // ★ Phase 0: 音源 URL / Blob の取得
   let targetUrl = null;
   let blobErr = null;
+  let isDirectStream = false;
+  const isDriveTrack = typeof track.id === "string" && track.id.startsWith("gd-");
 
   // 1. Prewarm キャッシュにあるか確認
   const prewarmed = prewarmCache.get(track.id);
@@ -1419,13 +1429,75 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
     }
   }
 
-  // 2. 音源 Blob 取得 (Google Drive 音源含む: 未キャッシュなら自動フェッチ＆IndexedDB保存)
+  // 2. 未キャッシュの Google Drive 曲:
+  //    - 未連携/期限切れならスキップせず「その場で再連携モーダル」を出して再連携後にそのまま再生
+  //    - 外出時（モバイル回線）でも待ち時間なく即再生できるよう、ダイレクトストリーミングURLを使用しつつ裏でキャッシュ
+  if (!targetUrl && isDriveTrack) {
+    const cached = await hasCachedBlob(track.id).catch(() => false);
+    if (!cached) {
+      try {
+        const { getDriveToken, getDriveStreamUrl, promptDriveReconnectModal } = await import("../gdrive/drive-service.js");
+        let token = await getDriveToken();
+        if (!token) {
+          // ユーザー操作による再連携待ちの間、無音ループを一時解除してモーダルを表示
+          try { audioEl.pause(); } catch {}
+          token = await promptDriveReconnectModal({ track });
+          if (!token) {
+            // ユーザーがキャンセルした場合は勝手に次曲へスキップせず停止状態で待機
+            if (myToken === state.transitionToken) {
+              state.transitioning = false;
+              appState.set({ isPlaying: false, loadingTrackId: null });
+            }
+            return;
+          }
+          primeAudioElement();
+        }
+        // WebAudio EQ エフェクト無効時は HTTP Range ダイレクトストリーミングで即座に再生開始（外出時でも約1秒で再生）
+        if (!getPublic().enableAudioEffects) {
+          const streamUrl = await getDriveStreamUrl(track.id, token);
+          if (streamUrl) {
+            targetUrl = streamUrl;
+            isDirectStream = true;
+            // 再生開始と並行してバックグラウンドで IndexedDB キャッシュと完全メタデータ・再生時間補完を行う
+            setTimeout(() => {
+              cacheDriveTrackInBackground(track.id);
+            }, 1200);
+          }
+        }
+      } catch (driveErr) {
+        console.warn("[audio-engine] Drive ストリーム準備警告、通常取得へフォールバック:", driveErr);
+      }
+    }
+  }
+
+  // 3. 音源 Blob 取得 (ローカル曲、キャッシュ済み Drive 曲、または EQ 有効時 / ストリームフォールバック)
   if (!targetUrl) {
-    const blob = await getBlob(track.id).catch((e) => {
+    let blob = await getBlob(track.id).catch((e) => {
       console.warn("[audio-engine] getBlob 失敗", track.id, e);
       blobErr = e;
       return null;
     });
+    // Drive 曲で 401 / 未接続エラーだった場合は、スキップせずその場で再連携モーダルを出して再試行
+    if (!blob && isDriveTrack && blobErr && /401|接続されていません|期限/.test(blobErr.message || "")) {
+      try {
+        const { promptDriveReconnectModal } = await import("../gdrive/drive-service.js");
+        try { audioEl.pause(); } catch {}
+        const newToken = await promptDriveReconnectModal({ track, reason: blobErr.message });
+        if (!newToken) {
+          if (myToken === state.transitionToken) {
+            state.transitioning = false;
+            appState.set({ isPlaying: false, loadingTrackId: null });
+          }
+          return;
+        }
+        primeAudioElement();
+        blobErr = null;
+        blob = await getBlob(track.id).catch((e) => {
+          blobErr = e;
+          return null;
+        });
+      } catch (_) {}
+    }
     if (blob) {
       targetUrl = URL.createObjectURL(blob);
     }
@@ -1524,6 +1596,25 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
                 state.consecutiveSkips = 0;
               }
             } catch (_) {}
+          } else if (isDirectStream && !state.userPausedExplicitly && appState.get().currentTrack?.id === track.id) {
+            // ダイレクトストリーム URL がブラウザ制限やトークン期限切れ等で再生失敗した場合、Blob 取得へ自動フォールバック
+            console.info("[audio-engine] ダイレクトストリーム失敗のため Blob ダウンロードへフォールバックします:", track.id);
+            try {
+              const fbBlob = await getBlob(track.id);
+              if (fbBlob && !state.userPausedExplicitly && appState.get().currentTrack?.id === track.id) {
+                const fbUrl = URL.createObjectURL(fbBlob);
+                state.currentObjectUrl = fbUrl;
+                audioEl.src = fbUrl;
+                if (startTime > 0) {
+                  try { audioEl.currentTime = startTime; } catch {}
+                }
+                await audioEl.play();
+                state.consecutiveSkips = 0;
+              }
+            } catch (fbErr) {
+              console.warn("[audio-engine] Blob フォールバック再生も失敗:", fbErr);
+              appState.set({ isPlaying: false });
+            }
           } else if (err?.name === "NotAllowedError") {
             appState.set({ isPlaying: false });
           }
@@ -1727,7 +1818,17 @@ function onTimeUpdate() {
   const track = appState.get().currentTrack;
   if (!track) return;
 
-  const dur = audioEl.duration || track.duration || 0;
+  const realAudioDur = (isFinite(audioEl.duration) && audioEl.duration > 0.5) ? audioEl.duration : 0;
+  if (realAudioDur > 0 && (!track.duration || isSuspectPartialHeaderDuration(track) || Math.abs(track.duration - realAudioDur) > 1.5)) {
+    track.duration = realAudioDur;
+    appState.set({ duration: realAudioDur });
+    updateTrack(track.id, { duration: realAudioDur }).catch(() => {});
+  }
+  const dur = realAudioDur > 0
+    ? realAudioDur
+    : (isSuspectPartialHeaderDuration(track)
+      ? Math.round(track.duration * (track.fileSize / 1572864))
+      : (track.duration || 0));
   const cur = audioEl.currentTime || 0;
   appState.set({ currentTime: cur });
 

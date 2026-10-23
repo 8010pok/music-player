@@ -78,36 +78,44 @@ function setLocalStorageToken(token, expiry) {
 
 /**
  * 保存されたアクセストークンを取得（有効期限切れ時は自動サイレントリフレッシュ）
+ * @param {{ forceRefresh?: boolean }} [opts]
  * @returns {Promise<string|null>}
  */
-export async function getDriveToken() {
+export async function getDriveToken({ forceRefresh = false } = {}) {
   const pub = getPublic();
   const now = Date.now();
+  // 有効期限の3分前（180秒前）から早めにリフレッシュを試みることで再生中の401切れを防ぐ
+  const EXPIRY_MARGIN_MS = 180000;
 
-  // 1. メモリキャッシュが有効
-  if (_cachedToken) {
-    if (!pub.gdriveTokenExpiry || now < pub.gdriveTokenExpiry - 60000) {
-      return _cachedToken;
+  if (!forceRefresh) {
+    // 1. メモリキャッシュが有効
+    if (_cachedToken) {
+      if (!pub.gdriveTokenExpiry || now < pub.gdriveTokenExpiry - EXPIRY_MARGIN_MS) {
+        return _cachedToken;
+      }
     }
+
+    // 2. localStorage からの即時参照
+    const ls = getLocalStorageToken();
+    if (ls && ls.token && (!ls.expiry || now < ls.expiry - EXPIRY_MARGIN_MS)) {
+      _cachedToken = ls.token;
+      return ls.token;
+    }
+
+    // 3. settings (IndexedDB) から参照
+    const secret = await getSecret();
+    const token = secret && secret.gdriveAccessToken ? secret.gdriveAccessToken : null;
+    if (token && (!pub.gdriveTokenExpiry || now < pub.gdriveTokenExpiry - EXPIRY_MARGIN_MS)) {
+      _cachedToken = token;
+      setLocalStorageToken(token, pub.gdriveTokenExpiry || 0);
+      return token;
+    }
+  } else {
+    _cachedToken = null;
+    setLocalStorageToken(null, 0);
   }
 
-  // 2. localStorage からの即時参照
-  const ls = getLocalStorageToken();
-  if (ls && ls.token && (!ls.expiry || now < ls.expiry - 60000)) {
-    _cachedToken = ls.token;
-    return ls.token;
-  }
-
-  // 3. settings (IndexedDB) から参照
-  const secret = await getSecret();
-  const token = secret && secret.gdriveAccessToken ? secret.gdriveAccessToken : null;
-  if (token && (!pub.gdriveTokenExpiry || now < pub.gdriveTokenExpiry - 60000)) {
-    _cachedToken = token;
-    setLocalStorageToken(token, pub.gdriveTokenExpiry || 0);
-    return token;
-  }
-
-  // 4. 有効期限切れの場合、自動サイレントリフレッシュを試行
+  // 4. 有効期限切れ（または forceRefresh）の場合、自動サイレントリフレッシュを試行
   if (_refreshingPromise) return _refreshingPromise;
 
   const clientId = pub.gdriveClientId;
@@ -124,12 +132,13 @@ export async function getDriveToken() {
       } finally {
         _refreshingPromise = null;
       }
-      return token || ls?.token || null;
+      // 期限切れトークンは返さず null を返す（401 ループを防止し、必要なら再連携モーダルへ誘導）
+      return null;
     })();
     return _refreshingPromise;
   }
 
-  return token || ls?.token || null;
+  return null;
 }
 
 /**
@@ -137,7 +146,7 @@ export async function getDriveToken() {
  * @param {string} token
  * @param {{ expiresIn?: number, email?: string }} [opts]
  */
-export async function setDriveToken(token, { expiresIn = 3600, email = "" } = {}) {
+export async function setDriveToken(token, { expiresIn = 3600, email } = {}) {
   _cachedToken = token || null;
   const expiry = token && expiresIn ? Date.now() + expiresIn * 1000 : 0;
   setLocalStorageToken(token, expiry);
@@ -145,12 +154,27 @@ export async function setDriveToken(token, { expiresIn = 3600, email = "" } = {}
   const patch = {
     gdriveTokenExpiry: expiry,
   };
-  if (email !== undefined) patch.gdriveUserEmail = email;
+  // ★ email が明示的に指定された場合のみ更新する（サイレントリフレッシュ時に既存の gdriveUserEmail を空文字で消さない）
+  if (typeof email === "string" && email.length > 0) {
+    patch.gdriveUserEmail = email;
+  }
   setPublic(patch);
 }
 
 /**
- * Google Drive 連携を切断
+ * トークンのみをクリア（Client ID やユーザーメールアドレスは保持し、ワンタップ再連携を可能にする）
+ */
+export async function clearExpiredDriveToken() {
+  _cachedToken = null;
+  setLocalStorageToken(null, 0);
+  await setSecret({ gdriveAccessToken: "" });
+  setPublic({
+    gdriveTokenExpiry: 0,
+  });
+}
+
+/**
+ * Google Drive 連携を明示的に切断（設定画面の「切断」ボタン用）
  */
 export async function disconnectDrive() {
   _cachedToken = null;
@@ -159,6 +183,21 @@ export async function disconnectDrive() {
   setPublic({
     gdriveTokenExpiry: 0,
     gdriveUserEmail: "",
+  });
+}
+
+// 画面復帰時（バックグラウンドから戻った時）にトークン有効期限が残り10分未満なら事前リフレッシュを試行
+if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    try {
+      const pub = getPublic();
+      if (!pub || !pub.gdriveClientId || !pub.gdriveTokenExpiry) return;
+      const remainingMs = pub.gdriveTokenExpiry - Date.now();
+      if (remainingMs < 10 * 60 * 1000) {
+        getDriveToken({ forceRefresh: remainingMs <= 60000 }).catch(() => {});
+      }
+    } catch (_) {}
   });
 }
 
@@ -287,9 +326,12 @@ export function silentRefreshGisToken(clientId) {
     ensureGisScript()
       .then(() => {
         try {
+          const pub = getPublic();
+          const emailHint = pub && pub.gdriveUserEmail ? pub.gdriveUserEmail : undefined;
           const client = window.google.accounts.oauth2.initTokenClient({
             client_id: clientId,
             scope: "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file",
+            ...(emailHint ? { hint: emailHint } : {}),
             callback: async (resp) => {
               if (resp.error) {
                 reject(new Error(`サイレント更新エラー: ${resp.error_description || resp.error}`));
@@ -307,7 +349,7 @@ export function silentRefreshGisToken(clientId) {
               reject(new Error(err && err.message ? err.message : "サイレント更新失敗"));
             },
           });
-          client.requestAccessToken({ prompt: "" });
+          client.requestAccessToken(emailHint ? { prompt: "", hint: emailHint } : { prompt: "" });
         } catch (e) {
           reject(e);
         }
@@ -331,9 +373,12 @@ export function requestGisToken(clientId) {
     ensureGisScript()
       .then(() => {
         try {
+          const pub = getPublic();
+          const emailHint = pub && pub.gdriveUserEmail ? pub.gdriveUserEmail : undefined;
           const client = window.google.accounts.oauth2.initTokenClient({
             client_id: clientId,
             scope: "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file",
+            ...(emailHint ? { hint: emailHint } : {}),
             callback: async (resp) => {
               if (resp.error) {
                 reject(new Error(`Google 認証エラー: ${resp.error_description || resp.error}`));
@@ -343,7 +388,7 @@ export function requestGisToken(clientId) {
                 const expiresIn = resp.expires_in ? parseInt(resp.expires_in, 10) : 3600;
                 // ユーザー情報取得を試行
                 const test = await testConnection(resp.access_token);
-                const email = (test.ok && test.user && (test.user.emailAddress || test.user.displayName)) || "";
+                const email = (test.ok && test.user && (test.user.emailAddress || test.user.displayName)) || emailHint || "";
                 await setDriveToken(resp.access_token, { expiresIn, email });
                 setPublic({ gdriveClientId: clientId });
                 resolve(resp.access_token);
@@ -355,7 +400,7 @@ export function requestGisToken(clientId) {
               reject(new Error(err && err.message ? err.message : "認証ウィンドウが閉じられたか失敗しました"));
             },
           });
-          client.requestAccessToken({ prompt: "" });
+          client.requestAccessToken(emailHint ? { prompt: "", hint: emailHint } : { prompt: "" });
         } catch (e) {
           reject(e);
         }
@@ -370,7 +415,7 @@ export function requestGisToken(clientId) {
  * @returns {Promise<{ files: Array<object>, nextPageToken: string|null }>}
  */
 export async function listDriveItems({ folderId = "root", query = "", pageToken = null, pageSize = 100 } = {}) {
-  const token = await getDriveToken();
+  let token = await getDriveToken();
   if (!token) throw new Error("Google Drive に接続されていません");
 
   let q = "trashed = false";
@@ -384,13 +429,24 @@ export async function listDriveItems({ folderId = "root", query = "", pageToken 
   let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=${pageSize}&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime)&orderBy=folder,name`;
   if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
 
-  const res = await fetch(url, {
+  let res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
 
+  if (res.status === 401) {
+    // 1回だけサイレントリフレッシュを試行（即座に disconnectDrive でメール等を消さない）
+    const refreshed = await getDriveToken({ forceRefresh: true }).catch(() => null);
+    if (refreshed) {
+      token = refreshed;
+      res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    }
+  }
+
   if (!res.ok) {
     if (res.status === 401) {
-      await disconnectDrive();
+      await clearExpiredDriveToken();
       throw new Error("認証の有効期限が切れました。再度接続してください。");
     }
     const errMsg = await parseGoogleApiError(res, "Google Drive API エラー");
@@ -557,27 +613,222 @@ export async function fetchDriveAudioBlob(fileId, { onProgress, maxRetries = 3 }
 }
 
 /**
+ * 外出時・モバイル回線向けに、ファイル全体のダウンロードを待たずに
+ * <audio> の HTTP Range プログレッシブストリーミングで即時再生するための URL を生成する
+ * @param {string} fileId
+ * @param {string} [tokenOverride]
+ * @returns {Promise<string|null>}
+ */
+export async function getDriveStreamUrl(fileId, tokenOverride = null) {
+  if (!fileId) return null;
+  const cleanId = driveFileIdFromTrackId(fileId);
+  const token = tokenOverride || (await getDriveToken());
+  if (!token) return null;
+  return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(cleanId)}?alt=media&access_token=${encodeURIComponent(token)}`;
+}
+
+let _activeReconnectModalPromise = null;
+
+/**
+ * 未連携またはトークン有効期限切れの状態で Google Drive の曲を再生しようとした際、
+ * 勝手に曲をスキップせず「その場で再連携」してそのまま再生を開始するためのモーダルを表示する。
+ * @param {{ track?: object, reason?: string }} [opts]
+ * @returns {Promise<string|null>} 再連携成功時は新しいアクセストークン、キャンセル時は null
+ */
+export function promptDriveReconnectModal({ track = null, reason = "" } = {}) {
+  if (typeof document === "undefined") return Promise.resolve(null);
+  if (_activeReconnectModalPromise) return _activeReconnectModalPromise;
+
+  _activeReconnectModalPromise = new Promise((resolve) => {
+    let settled = false;
+    const finish = (tokenVal) => {
+      if (settled) return;
+      settled = true;
+      _activeReconnectModalPromise = null;
+      resolve(tokenVal || null);
+    };
+
+    const pub = getPublic() || {};
+    const savedClientId = pub.gdriveClientId || "";
+    const savedEmail = pub.gdriveUserEmail || "";
+    const trackTitle = (track && track.title) ? track.title : "Google Drive の曲";
+
+    const bodyHtml = `
+      <div class="gdrive-reconnect-modal" style="display:flex; flex-direction:column; gap:14px;">
+        <div style="padding:12px 14px; border-radius:10px; background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.3); font-size:0.92rem; line-height:1.5;">
+          <div style="font-weight:700; margin-bottom:4px;">🎵 「${escapeHtml(trackTitle)}」を再生します</div>
+          <div class="muted" style="font-size:0.84rem;">
+            Google Drive の認証有効期限が切れているか未連携のため、この場でワンタップ再連携するとそのまま再生を開始します。
+            ${savedEmail ? `<br><span style="color:var(--accent, #60a5fa);">前回の連携アカウント: ${escapeHtml(savedEmail)}</span>` : ""}
+          </div>
+        </div>
+
+        <button type="button" class="btn primary" id="gd-reconnect-now-btn" style="padding:13px 16px; font-size:1rem; font-weight:700; display:flex; align-items:center; justify-content:center; gap:8px;">
+          🔗 今すぐ Google Drive に再連携して再生
+        </button>
+
+        <details style="font-size:0.84rem; color:var(--text-muted, #9ca3af);" ${!savedClientId ? "open" : ""}>
+          <summary style="cursor:pointer; user-select:none; padding:4px 0;">詳細設定（Client ID / アクセストークン直接入力）</summary>
+          <div style="display:flex; flex-direction:column; gap:10px; margin-top:10px; padding:10px; border-radius:8px; background:rgba(255,255,255,0.04);">
+            <label style="display:flex; flex-direction:column; gap:4px;">
+              <span>Google OAuth Client ID</span>
+              <input type="text" id="gd-reconnect-client-id" class="input" placeholder="xxxx.apps.googleusercontent.com" value="${escapeAttr(savedClientId)}" style="width:100%;" />
+            </label>
+            <label style="display:flex; flex-direction:column; gap:4px;">
+              <span>またはアクセストークンを直接貼り付け (任意)</span>
+              <div style="display:flex; gap:6px;">
+                <input type="password" id="gd-reconnect-manual-token" class="input" placeholder="ya29.a0..." style="flex:1;" />
+                <button type="button" class="btn" id="gd-reconnect-manual-btn">適用して再生</button>
+              </div>
+            </label>
+          </div>
+        </details>
+
+        <div id="gd-reconnect-status" style="font-size:0.84rem; min-height:1.2em; color:#f87171;"></div>
+      </div>
+    `;
+
+    const modal = openModal({
+      title: "☁ Google Drive の再連携",
+      bodyHtml,
+      buttons: [
+        {
+          label: "キャンセル",
+          onClick: () => {
+            finish(null);
+            modal.close();
+          },
+        },
+      ],
+    });
+
+    // 背景クリックや×ボタンで閉じられた場合も resolve(null) を保証
+    const origClose = modal.close;
+    modal.close = () => {
+      finish(null);
+      origClose();
+    };
+
+    const root = modal.el;
+    const nowBtn = root.querySelector("#gd-reconnect-now-btn");
+    const clientIdInput = root.querySelector("#gd-reconnect-client-id");
+    const manualInput = root.querySelector("#gd-reconnect-manual-token");
+    const manualBtn = root.querySelector("#gd-reconnect-manual-btn");
+    const statusEl = root.querySelector("#gd-reconnect-status");
+
+    if (nowBtn) {
+      nowBtn.addEventListener("click", async () => {
+        const cid = (clientIdInput && clientIdInput.value.trim()) || getPublic().gdriveClientId || "";
+        if (!cid) {
+          if (statusEl) statusEl.textContent = "Google OAuth Client ID を入力するか、アクセストークンを貼り付けてください。";
+          if (clientIdInput) clientIdInput.focus();
+          return;
+        }
+        setPublic({ gdriveClientId: cid });
+        nowBtn.disabled = true;
+        nowBtn.textContent = "⏳ Google 認証ウィンドウを開いています…";
+        if (statusEl) statusEl.textContent = "";
+        try {
+          const newToken = await requestGisToken(cid);
+          if (newToken) {
+            toast("☁ Google Drive に再連携しました！再生を開始します", "ok");
+            settled = true;
+            _activeReconnectModalPromise = null;
+            resolve(newToken);
+            origClose();
+            return;
+          }
+        } catch (err) {
+          if (statusEl) statusEl.textContent = err.message || "再連携に失敗しました。もう一度お試しください。";
+        } finally {
+          nowBtn.disabled = false;
+          nowBtn.textContent = "🔗 今すぐ Google Drive に再連携して再生";
+        }
+      });
+    }
+
+    if (manualBtn) {
+      manualBtn.addEventListener("click", async () => {
+        const rawTok = manualInput ? manualInput.value.trim() : "";
+        if (!rawTok) {
+          if (statusEl) statusEl.textContent = "アクセストークンを入力してください。";
+          return;
+        }
+        manualBtn.disabled = true;
+        if (statusEl) statusEl.textContent = "";
+        try {
+          const check = await testConnection(rawTok);
+          if (!check.ok) {
+            if (statusEl) statusEl.textContent = check.error || "無効なトークンです";
+            return;
+          }
+          const email = (check.user && (check.user.emailAddress || check.user.displayName)) || "";
+          await setDriveToken(rawTok, { expiresIn: 3600, email });
+          toast("☁ Google Drive に再連携しました！再生を開始します", "ok");
+          settled = true;
+          _activeReconnectModalPromise = null;
+          resolve(rawTok);
+          origClose();
+        } finally {
+          manualBtn.disabled = false;
+        }
+      });
+    }
+  });
+
+  return _activeReconnectModalPromise;
+}
+
+/**
  * Google Drive から音源ファイルの先頭ヘッダ部分（maxBytes）のみを取得
  * FLAC や MP3 のメタデータ解析をフルダウンロードせず高速に行う（通信量・ストレージ節約）
  * @param {string} fileId
  * @param {number} [maxBytes=1572864] 1.5MB（高解像度カバーアートの欠損防止）
+ * @param {number} [fullFileSize=0] ファイル全体のバイトサイズ（CBR MP3等の再生時間計算で0:39固定化を防ぐため）
  * @returns {Promise<Blob|null>}
  */
-export async function fetchDriveAudioHeader(fileId, maxBytes = 1572864) {
-  const token = await getDriveToken();
+export async function fetchDriveAudioHeader(fileId, maxBytes = 1572864, fullFileSize = 0) {
+  let token = await getDriveToken();
   if (!token) return null;
 
   const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`;
   try {
-    const res = await fetch(url, {
+    let res = await fetch(url, {
       headers: {
         Authorization: `Bearer ${token}`,
         Range: `bytes=0-${maxBytes - 1}`,
       },
     });
 
+    if (res.status === 401) {
+      const refreshed = await getDriveToken({ forceRefresh: true }).catch(() => null);
+      if (refreshed) {
+        token = refreshed;
+        res = await fetch(url, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Range: `bytes=0-${maxBytes - 1}`,
+          },
+        });
+      }
+    }
+
     if (!res.ok && res.status !== 206) return null;
 
+    // Content-Range: bytes 0-1572863/12345678 からファイル全体サイズを抽出
+    let detectedTotalSize = Number(fullFileSize) || 0;
+    try {
+      const cr = res.headers && typeof res.headers.get === "function" ? res.headers.get("Content-Range") : null;
+      if (cr) {
+        const m = cr.match(/\/(\d+)\s*$/);
+        if (m && m[1]) {
+          const parsedTotal = parseInt(m[1], 10);
+          if (parsedTotal > 0) detectedTotalSize = parsedTotal;
+        }
+      }
+    } catch (_) {}
+
+    let outBlob = null;
     if (res.body) {
       const reader = res.body.getReader();
       const chunks = [];
@@ -590,10 +841,19 @@ export async function fetchDriveAudioHeader(fileId, maxBytes = 1572864) {
       }
       try { await reader.cancel(); } catch {}
       const contentType = res.headers.get("Content-Type") || "audio/flac";
-      return new Blob(chunks, { type: contentType });
+      outBlob = new Blob(chunks, { type: contentType });
+    } else {
+      outBlob = await res.blob();
     }
 
-    return await res.blob();
+    if (outBlob) {
+      // ★ 部分ヘッダであることをマークし、全体ファイルサイズを付与（parse-mp3 等で 1.5MB=0:39 と誤算出されるのを完全防止）
+      outBlob._isPartialHeader = true;
+      if (detectedTotalSize > 0) {
+        outBlob._fullFileSize = detectedTotalSize;
+      }
+    }
+    return outBlob;
   } catch (err) {
     console.warn("[drive-service] ヘッダ取得スキップ:", fileId, err);
     return null;
@@ -842,7 +1102,7 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
 
         let extractedMeta = null;
         try {
-          const headerBlob = await fetchDriveAudioHeader(file.id, 1572864);
+          const headerBlob = await fetchDriveAudioHeader(file.id, 1572864, parseInt(file.size, 10) || 0);
           if (headerBlob && headerBlob.size > 0) {
             extractedMeta = await extractMetadata(headerBlob, file.name);
           }

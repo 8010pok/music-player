@@ -14,7 +14,7 @@ import { getAuth } from "./auth.js";
 import { appState } from "../state.js";
 import { toast } from "../ui/components.js";
 import { resolveScrobbleTrack, isPlaceholderArtist, parseArtistAndTitle } from "./scrobble-cleaner.js";
-import { getTrack, updateTrack } from "../store/library-db.js";
+import { getTrack, updateTrack, isSuspectPartialHeaderDuration } from "../store/library-db.js";
 
 const MAX_BATCH = 50;
 let flushing = false;
@@ -131,11 +131,39 @@ async function hydrateTrack(track) {
     }
   } catch {}
 
-  // Google Drive 音源やプレースホルダー状態のトラックに対する最終メタデータ自動救済
-  if (isPlaceholderArtist(target.artist)) {
+  const isNumeric = (s) => typeof s === "string" && /^\d+$/.test(s.trim());
+
+  // 1. albumArtist が有効なアーティスト名を持っている場合の補完
+  if ((isPlaceholderArtist(target.artist) || isNumeric(target.artist)) && target.albumArtist && !isPlaceholderArtist(target.albumArtist) && !isNumeric(target.albumArtist)) {
+    target = { ...target, artist: target.albumArtist };
+  }
+
+  // 2. Google Drive 音源でまだ先頭ヘッダ解析が終わっていない場合のオンデマンド救済
+  if ((isPlaceholderArtist(target.artist) || isNumeric(target.artist)) && (target.driveFileId || (typeof target.id === "string" && target.id.startsWith("gd-")))) {
+    try {
+      const fileId = target.driveFileId || target.id.slice(3);
+      const { fetchDriveAudioHeader } = await import("../gdrive/drive-service.js");
+      const { extractMetadata } = await import("../metadata/index.js");
+      const headerBlob = await fetchDriveAudioHeader(fileId, 524288, Number(target.fileSize) || 0);
+      if (headerBlob && headerBlob.size > 0) {
+        const meta = await extractMetadata(headerBlob, target.originalName || target.title || "");
+        if (meta && meta.artist && !isPlaceholderArtist(meta.artist) && !isNumeric(meta.artist)) {
+          const patch = { artist: meta.artist };
+          if (meta.title && meta.title !== "(無題)") patch.title = meta.title;
+          if (meta.album && meta.album !== "Google Drive") patch.album = meta.album;
+          if (meta.duration && meta.duration > 30) patch.duration = meta.duration;
+          target = { ...target, ...patch };
+          await updateTrack(target.id, patch).catch(() => {});
+        }
+      }
+    } catch (_) {}
+  }
+
+  // 3. ファイル名・タイトルからの自動救済
+  if (isPlaceholderArtist(target.artist) || isNumeric(target.artist)) {
     const nameToParse = target.originalName || target.title || "";
     const parsed = parseArtistAndTitle(nameToParse);
-    if (parsed && parsed.artist && !isPlaceholderArtist(parsed.artist)) {
+    if (parsed && parsed.artist && !isPlaceholderArtist(parsed.artist) && !isNumeric(parsed.artist)) {
       target = {
         ...target,
         artist: parsed.artist,
@@ -243,12 +271,26 @@ export async function sendScrobble(rawTrack, _durationSec, startedAtMs, sessionI
   const timestamp = startedAtMs
     ? Math.floor(startedAtMs / 1000)
     : Math.floor(Date.now() / 1000);
+
+  // ★ 0:39 (39秒) 固定バグによる Last.fm スパムフィルター誤判定（アーティスト無視・拒否）を防止:
+  //   _durationSec（実測 audioEl.duration）が有効かつ track.duration と乖離している場合は _durationSec を優先し、
+  //   万一 1.5MB ヘッダ由来の短尺疑い（fileSize > 2.2MB なのに <= 68秒）が残っている場合はファイルサイズ比で補正する。
+  let effectiveDuration = Number(track.duration) || 0;
+  if (_durationSec && isFinite(_durationSec) && _durationSec > 30 && (!effectiveDuration || isSuspectPartialHeaderDuration(track) || Math.abs(_durationSec - effectiveDuration) > 2)) {
+    effectiveDuration = _durationSec;
+    if (track.id) {
+      updateTrack(track.id, { duration: _durationSec }).catch(() => {});
+    }
+  } else if (isSuspectPartialHeaderDuration(track)) {
+    effectiveDuration = Math.round(effectiveDuration * (Number(track.fileSize) / 1572864));
+  }
+
   const payload = {
     artist: sanitizeLastFmValue(resolved.artist),
     track: sanitizeLastFmValue(resolved.title),
     album: sanitizeLastFmValue(resolved.album),
     timestamp,
-    duration: track.duration ? Math.floor(track.duration) : undefined,
+    duration: effectiveDuration > 30 ? Math.floor(effectiveDuration) : undefined,
     trackNumber: normalizeTrackNumber(track.trackNo),
   };
 
@@ -525,11 +567,15 @@ export async function retryScrobbleForTrack(track) {
 
 function buildTrackParams(track) {
   const resolved = resolveScrobbleTrack(track) || track;
+  let dur = Number(track.duration) || 0;
+  if (isSuspectPartialHeaderDuration(track)) {
+    dur = Math.round(dur * (Number(track.fileSize) / 1572864));
+  }
   return flatten({
     artist: sanitizeLastFmValue(resolved.artist),
     track: sanitizeLastFmValue(resolved.title),
     album: sanitizeLastFmValue(resolved.album),
-    duration: track.duration ? Math.floor(track.duration) : undefined,
+    duration: dur > 30 ? Math.floor(dur) : undefined,
     trackNumber: normalizeTrackNumber(track.trackNo),
   });
 }

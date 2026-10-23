@@ -122,6 +122,23 @@ function notifyTrackUpdated(track, patch = null) {
 }
 
 /**
+ * Google Drive の先頭 1.5MB (1,572,864 bytes) 部分ヘッダのみから誤って CBR 計算された
+ * 再生時間（例: 320kbps で約 39秒 = 0:39、256kbps で約 49秒、192kbps で約 65秒）かどうかを判定する。
+ * @param {object} track
+ * @returns {boolean}
+ */
+export function isSuspectPartialHeaderDuration(track) {
+  if (!track || typeof track !== "object") return false;
+  const dur = Number(track.duration) || 0;
+  const fsize = Number(track.fileSize) || 0;
+  if (dur <= 0 || fsize <= 2200000) return false;
+  const isDrive = track.source === "gdrive" || Boolean(track.driveFileId) || (typeof track.id === "string" && track.id.startsWith("gd-"));
+  if (!isDrive) return false;
+  // ファイルサイズが 2.2MB 超（通常 3〜5分の曲）にもかかわらず、再生時間が 1.5MB ヘッダ由来の 34〜68秒になっている場合
+  return dur >= 34 && dur <= 68;
+}
+
+/**
  * 音源 Blob から不足しているメタデータ・アートワーク・再生時間をバックグラウンドで補完し、
  * 更新があれば updateTrack 経由でミニプレイヤー・フルプレイヤー・ロック画面へ即時反映する。
  * @param {string} id
@@ -136,7 +153,8 @@ function ensureTrackMetadataInBackground(id, blob, extraPatch = null) {
       if (!track) return;
       const missingArt = !track.artworkBlob && !track.artworkDataUrl && !track._noEmbeddedArt;
       const missingDataUrl = (track.artworkBlob || !track._noEmbeddedArt) && !track.artworkDataUrl;
-      const missingDuration = !track.duration || track.duration <= 0;
+      const suspectDuration = isSuspectPartialHeaderDuration(track);
+      const missingDuration = !track.duration || track.duration <= 0 || suspectDuration;
       const { isPlaceholderArtist, parseArtistAndTitle } = await import("../lastfm/scrobble-cleaner.js");
       const isPlaceholderArtistVal = isPlaceholderArtist(track.artist) || typeof track.artist !== "string";
       const isPlaceholderAlbum =
@@ -198,7 +216,8 @@ function ensureTrackMetadataInBackground(id, blob, extraPatch = null) {
           patch._noEmbeddedArt = true;
         }
 
-        if (duration && duration > 0 && (!track.duration || track.duration <= 0)) {
+        // ★ 0:39 固定バグなどの不正確な再生時間も、実ファイルからの duration で上書き修正する
+        if (duration && duration > 0 && (!track.duration || track.duration <= 0 || suspectDuration || Math.abs(duration - track.duration) > 2)) {
           patch.duration = duration;
         }
       } else if (missingDataUrl && track.artworkBlob) {
@@ -310,6 +329,11 @@ function sanitizeTrackRecord(t) {
     t.albumArtist = "";
     wasCorrupted = true;
   }
+  // ★ 1.5MB (1,572,864 bytes) 部分ヘッダ由来の 0:39 (約39秒) 固定バグの即時補正
+  if (isSuspectPartialHeaderDuration(t)) {
+    t.duration = Math.round(t.duration * (t.fileSize / 1572864));
+    wasCorrupted = true;
+  }
   return wasCorrupted;
 }
 
@@ -322,44 +346,50 @@ function repairCorruptedTracksInBackground(tracks) {
       const batchUpdates = [];
       for (const t of tracks) {
         if (!t || !t.id) continue;
-        // ユーザーがすでに編集した曲はスキップ
-        if (t.userEdited && typeof t.album === "string" && !isCorruptedMetaField(t.album)) continue;
         try {
           const patch = {
             album: typeof t.album === "string" ? t.album : "",
             artist: typeof t.artist === "string" ? t.artist : "(不明アーティスト)",
           };
-          // 1. ローカル Blob があればそこからアルバム名を復元
+          if (t.duration && t.duration > 0) {
+            patch.duration = t.duration;
+          }
+          // 1. ローカル Blob があればそこからアルバム名・再生時間を復元
           const db = await openDb();
           const blobRow = await txReq(db.transaction("blobs").objectStore("blobs").get(t.id)).catch(() => null);
           let targetBlob = blobRow && blobRow.blob ? blobRow.blob : null;
 
-          // 2. ローカル Blob が無く Google Drive 曲であれば先頭ヘッダからアルバム名を復元
+          // 2. ローカル Blob が無く Google Drive 曲であれば先頭ヘッダからアルバム名・再生時間を復元
           if (!targetBlob && (t.driveFileId || (typeof t.id === "string" && t.id.startsWith("gd-")))) {
             const fileId = t.driveFileId || t.id.slice(3);
             try {
               const { fetchDriveAudioHeader } = await import("../gdrive/drive-service.js");
-              targetBlob = await fetchDriveAudioHeader(fileId, 1572864);
+              targetBlob = await fetchDriveAudioHeader(fileId, 1572864, Number(t.fileSize) || 0);
             } catch (_) {}
           }
 
           if (targetBlob && targetBlob.size > 0) {
             const meta = await extractMetadata(targetBlob, t.originalName || t.title || "");
             if (meta) {
-              if (meta.album && !isCorruptedMetaField(meta.album) && meta.album !== "Google Drive") {
+              if (!t.userEdited && meta.album && !isCorruptedMetaField(meta.album) && meta.album !== "Google Drive") {
                 patch.album = meta.album;
               }
-              if (meta.albumArtist && !isCorruptedMetaField(meta.albumArtist) && !t.albumArtist) {
+              if (!t.userEdited && meta.albumArtist && !isCorruptedMetaField(meta.albumArtist) && !t.albumArtist) {
                 patch.albumArtist = meta.albumArtist;
               }
-              if (meta.year && !t.year) patch.year = meta.year;
-              if (meta.trackNo && !t.trackNo) patch.trackNo = meta.trackNo;
-              if (meta.discNo && !t.discNo) patch.discNo = meta.discNo;
-              if (meta.genre && !t.genre) patch.genre = meta.genre;
+              if (meta.duration && meta.duration > 0) {
+                patch.duration = meta.duration;
+              }
+              if (!t.userEdited) {
+                if (meta.year && !t.year) patch.year = meta.year;
+                if (meta.trackNo && !t.trackNo) patch.trackNo = meta.trackNo;
+                if (meta.discNo && !t.discNo) patch.discNo = meta.discNo;
+                if (meta.genre && !t.genre) patch.genre = meta.genre;
+              }
             }
           }
 
-          batchUpdates.push({ id: t.id, patch, onlyIfNotUserEdited: true });
+          batchUpdates.push({ id: t.id, patch });
         } catch (err) {
           console.warn("[library-db] 破損メタデータ自動修復スキップ:", t.id, err);
         }
@@ -470,6 +500,32 @@ export async function hasCachedBlob(id) {
   } catch {
     return false;
   }
+}
+
+const _cachingDriveIds = new Set();
+
+/**
+ * ダイレクトストリーミング再生開始後に、裏（バックグラウンド）で Google Drive 音源を
+ * IndexedDB (blobs ストア) にキャッシュし、完全なメタデータ・アートワーク・正確な再生時間を補完する。
+ * @param {string} id
+ */
+export function cacheDriveTrackInBackground(id) {
+  if (!id || typeof id !== "string" || !id.startsWith("gd-")) return;
+  if (_cachingDriveIds.has(id)) return;
+  _cachingDriveIds.add(id);
+  (async () => {
+    try {
+      const pub = getPublic();
+      if (pub && pub.gdriveAutoCache === false) return;
+      const already = await hasCachedBlob(id);
+      if (already) return;
+      await getBlob(id);
+    } catch (e) {
+      console.warn("[library-db] バックグラウンドDriveキャッシュスキップ:", id, e);
+    } finally {
+      _cachingDriveIds.delete(id);
+    }
+  })();
 }
 
 /**

@@ -288,6 +288,10 @@ function parseOpusId(pkt, meta) {
  */
 async function estimateOggDuration(blob, meta) {
   try {
+    // 先頭ヘッダのみの部分Blob（Google Drive 1.5MB Range取得等）では末尾ページがファイル終端ではないため 0 を返す
+    if (blob && blob._isPartialHeader && (!blob._fullFileSize || blob._fullFileSize > blob.size)) {
+      return 0;
+    }
     // 末尾 64KB から最後のページを探す
     const tailStart = Math.max(0, blob.size - 65536);
     const tail = new Uint8Array(await readSlice(blob, tailStart, blob.size));
