@@ -31,6 +31,8 @@ import {
   applyPan,
   applyMidSide,
   applyNoiseReduction,
+  applyKeyShift,
+  getCurrentKeyShift,
   setAudioOutputDevice,
   resumeEqContext,
 } from "./eq.js";
@@ -516,6 +518,31 @@ export function setPlaybackRate(rate, preservePitch = true) {
   }
 }
 
+/**
+ * 現在再生中の曲のキー（音程）を変更し、曲データに固定保存する
+ * @param {number} semitones -12 〜 +12 (0 で原曲キーに戻す)
+ * @returns {number} 適用された半音シフト量
+ */
+export function setKeyShift(semitones) {
+  const shift = Math.max(-12, Math.min(12, Math.round(Number(semitones) || 0)));
+  applyKeyShift(shift, audioEl);
+  appState.set({ currentKeyShift: shift });
+  const cur = appState.get().currentTrack;
+  if (cur && cur.id) {
+    cur.keyShift = shift;
+    updateTrack(cur.id, { keyShift: shift }).catch(() => {});
+  }
+  return shift;
+}
+
+/**
+ * 現在適用中のキーシフト量を取得 (半音単位, 0 = 原曲)
+ * @returns {number}
+ */
+export function getKeyShift() {
+  return getCurrentKeyShift();
+}
+
 function clampVolume(v) {
   if (!isFinite(v)) return 1;
   return Math.max(0, Math.min(1, v));
@@ -849,6 +876,11 @@ function playPreloadedSync(index, track, url) {
     scrobbleResult: "none",
     scrobbleReason: null,
   });
+
+  // ★ キーチェンジ（音程変更）の反映: track に固定された keyShift または 0
+  const trackKeyShift = (track && typeof track.keyShift === "number") ? track.keyShift : 0;
+  applyKeyShift(trackKeyShift, audioEl);
+  appState.set({ currentKeyShift: trackKeyShift });
 
   state.userPausedExplicitly = false;
   // --- ここから play() まで完全同期 (バックグラウンド再生権限を持つ単一の audioEl を操作) ---
@@ -1359,6 +1391,8 @@ export function stopPlayback() {
   state.streamFallbackInProgress = false;
   // プリロード済み URL も破棄（リーク防止）
   clearPreload();
+  applyKeyShift(0);
+  appState.set({ currentKeyShift: 0 });
   // artwork URL は artwork-cache が ID 単位で管理しているため、ここでは
   // 明示 revoke しない（曲削除時 = releaseArtwork で個別に解放される）
   state.queue = [];
@@ -1454,6 +1488,11 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
   updateMediaSessionMetadata(track);
   updateMediaPositionState({ position: startTime || 0, duration: track.duration });
   hydrateTrackMetadata(track.id);
+
+  // ★ キーチェンジ（音程変更）の反映: track に固定された keyShift または 0
+  const trackKeyShift = (track && typeof track.keyShift === "number") ? track.keyShift : 0;
+  applyKeyShift(trackKeyShift, audioEl);
+  appState.set({ currentKeyShift: trackKeyShift });
 
   // ★ Phase 0: 音源 URL / Blob の取得
   let targetUrl = null;

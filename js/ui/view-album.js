@@ -14,6 +14,7 @@ import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
 import { go } from "../router.js";
 import { escapeHtml, escapeAttr, toast, confirm, openModal, dismissActiveModal, closeActiveModalSync, promptForm } from "./components.js";
 import { editTrackMetadata, editAlbumMetadata, editSelectedTracksMetadata } from "./metadata-editor.js";
+import { openPlayerSoundModal } from "./view-player.js";
 
 let album = null;
 let unsubState = null;
@@ -634,6 +635,10 @@ function openTrackActionsModal(track, root) {
         <span class="track-menu-btn-icon">☑️</span>
         <span class="track-menu-btn-label">複数選択編集</span>
       </button>
+      <button type="button" class="track-menu-btn" data-act="key-change">
+        <span class="track-menu-btn-icon">🎵</span>
+        <span class="track-menu-btn-label">${track.keyShift && track.keyShift !== 0 ? `キー (${track.keyShift > 0 ? "+" : ""}${track.keyShift})` : "キー変更"}</span>
+      </button>
       <button type="button" class="track-menu-btn" data-act="love">
         <span class="track-menu-btn-icon">${isLoved ? "💔" : "❤️"}</span>
         <span class="track-menu-btn-label">${isLoved ? "お気に入り解除" : "お気に入り"}</span>
@@ -671,6 +676,9 @@ function openTrackActionsModal(track, root) {
       closeMenu();
       playNextTrack(track);
       toast("次に再生に追加しました", "info");
+    } else if (act === "key-change") {
+      closeMenu();
+      openPlayerSoundModal(track);
     } else if (act === "add-queue") {
       closeMenu();
       addToQueueEnd(track);

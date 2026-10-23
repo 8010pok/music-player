@@ -37,6 +37,13 @@ let bassBoost = null;
 let panner = null;
 let compressor = null;
 
+// ピッチシフター（キーチェンジ）用ノード
+let pitchShifterNode = null;
+let pitchDryGain = null;
+let pitchWetGain = null;
+let currentKeyShift = 0;
+let isWorkletLoading = false;
+
 // MS encode/decode ステージ用ノード
 let msInput = null;                              // splitter 前段: 入力を必ず 2ch にそろえる
 let msSplitter = null;
@@ -123,14 +130,24 @@ export function applyEffectsSetting(audioEl, enabled) {
     lowPass.frequency.value = 22050;
     lowPass.Q.value = 0.7;
 
+    // --- ピッチシフター (キーチェンジ) Dry/Wet ノード ---
+    pitchDryGain = ctx.createGain();
+    pitchDryGain.gain.value = currentKeyShift === 0 ? 1.0 : 0.0;
+    pitchWetGain = ctx.createGain();
+    pitchWetGain.gain.value = currentKeyShift === 0 ? 0.0 : 1.0;
+
     // --- chain 接続 ---
     let node = source.connect(preampGain).connect(highPass);
     for (const f of EQ_BANDS) {
       node = node.connect(eqFilters[String(f)]);
     }
-    node = node
-      .connect(bassBoost)
-      .connect(msInput); // ここから MS stage 入口 (msInput → msSplitter で 2ch 化)
+    node = node.connect(bassBoost);
+
+    // 原曲キー (0) のときは pitchDryGain を通じて msInput へ完全バイパス直結
+    node.connect(pitchDryGain).connect(msInput);
+
+    // バックグラウンドで AudioWorklet ロードと Wet 経路を接続
+    ensurePitchShifterLoaded(ctx, node);
 
     // 出口: msMerger → panner → compressor → lowPass → destination
     msMerger.connect(panner).connect(compressor).connect(lowPass).connect(ctx.destination);
@@ -410,6 +427,89 @@ function bypassAll() {
   if (panner) panner.pan.value = 0;
   applyCompressor("off");
   applyMidSide({ stereoWidth: 1, vocalRemove: 0, mono: false });
+  applyKeyShift(0);
+}
+
+/**
+ * AudioWorklet ピッチシフターモジュールの非同期読み込みと結線
+ * @param {AudioContext} audioCtx
+ * @param {AudioNode} [sourceNode]
+ */
+async function ensurePitchShifterLoaded(audioCtx, sourceNode) {
+  if (pitchShifterNode || isWorkletLoading || !audioCtx || !audioCtx.audioWorklet) return;
+  isWorkletLoading = true;
+  try {
+    await audioCtx.audioWorklet.addModule("./js/player/pitch-shifter-processor.js");
+    if (!ctx) return;
+    pitchShifterNode = new AudioWorkletNode(audioCtx, "pitch-shifter-processor", {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+    });
+    const src = sourceNode || bassBoost;
+    if (src && pitchWetGain && msInput) {
+      src.connect(pitchShifterNode).connect(pitchWetGain).connect(msInput);
+    }
+    if (currentKeyShift !== 0) {
+      pitchShifterNode.port.postMessage({ type: "setSemitones", semitones: currentKeyShift });
+      if (pitchDryGain && pitchWetGain) {
+        pitchDryGain.gain.setValueAtTime(0, audioCtx.currentTime);
+        pitchWetGain.gain.setValueAtTime(1, audioCtx.currentTime);
+      }
+    }
+  } catch (err) {
+    console.warn("[eq] pitch-shifter-processor 読み込み失敗:", err);
+  } finally {
+    isWorkletLoading = false;
+  }
+}
+
+/**
+ * 半音単位でキーを変更する (-12 〜 +12)
+ * - 0 のときは完全バイパス (pitchDryGain = 1, pitchWetGain = 0, 音質劣化・CPUゼロ)
+ * - 0 以外のときは AudioWorklet 経由でピッチシフト (pitchDryGain = 0, pitchWetGain = 1)
+ * @param {number} semitones
+ * @param {HTMLAudioElement} [audioEl] AudioContext が未作成の場合に初期化用
+ */
+export function applyKeyShift(semitones, audioEl) {
+  const shift = Math.max(-12, Math.min(12, Math.round(Number(semitones) || 0)));
+  currentKeyShift = shift;
+
+  // AudioContext 未初期化で shift !== 0 の場合、audioEl があればエフェクトチェーンを初期化
+  if (!ctx && shift !== 0 && audioEl) {
+    applyEffectsSetting(audioEl, true);
+  }
+
+  if (!ctx) return;
+
+  if (bassBoost) {
+    ensurePitchShifterLoaded(ctx, bassBoost);
+  }
+
+  if (pitchShifterNode) {
+    pitchShifterNode.port.postMessage({ type: "setSemitones", semitones: shift });
+  }
+
+  const now = ctx.currentTime;
+  if (pitchDryGain && pitchWetGain) {
+    if (shift === 0) {
+      // 原曲キー: 100% 完全バイパス (Dry=1, Wet=0)
+      pitchDryGain.gain.setValueAtTime(1, now);
+      pitchWetGain.gain.setValueAtTime(0, now);
+    } else {
+      // キー変更: Worklet 経由 (Dry=0, Wet=1)
+      pitchDryGain.gain.setValueAtTime(0, now);
+      pitchWetGain.gain.setValueAtTime(1, now);
+    }
+  }
+}
+
+/**
+ * 現在のキー変更値を取得 (半音単位, 0 = 原曲)
+ * @returns {number}
+ */
+export function getCurrentKeyShift() {
+  return currentKeyShift;
 }
 
 /**

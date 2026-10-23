@@ -58,6 +58,7 @@ class AppState extends EventTarget {
       enableAudioEffects: false, // EQ等。iOS バックグラウンド再生を壊すのでデフォルトOFF
 
       // オーディオエフェクト (enableAudioEffects=true のときのみ実音声に反映)
+      currentKeyShift: 0,     // 現在のキー変更値 (半音: -12〜+12, 0=原曲)
       eqGains: { 31: 0, 62: 0, 125: 0, 250: 0, 500: 0, 1000: 0, 2000: 0, 4000: 0, 8000: 0, 16000: 0 },
       eqPreset: "flat",
       preamp: 0,

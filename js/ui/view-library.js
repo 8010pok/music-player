@@ -18,6 +18,7 @@ import { appState } from "../state.js";
 import { go, getLastView, saveLastView } from "../router.js";
 import { getArtworkUrl, releaseArtwork, markArtworkBroken } from "./artwork-cache.js";
 import { editTrackMetadata, editSelectedTracksMetadata } from "./metadata-editor.js";
+import { openPlayerSoundModal } from "./view-player.js";
 import { openDriveImportModal, isDriveConnected } from "../gdrive/drive-service.js";
 import { openYouTubeDownloadModal } from "./youtube-modal.js";
 import { openVideoExtractModal } from "./video-extract-modal.js";
@@ -1328,6 +1329,10 @@ function openLibraryTrackActionsModal(track, refs) {
         <span class="track-menu-btn-icon">☑️</span>
         <span class="track-menu-btn-label">複数選択編集</span>
       </button>
+      <button type="button" class="track-menu-btn" data-act="key-change">
+        <span class="track-menu-btn-icon">🎵</span>
+        <span class="track-menu-btn-label">${track.keyShift && track.keyShift !== 0 ? `キー (${track.keyShift > 0 ? "+" : ""}${track.keyShift})` : "キー変更"}</span>
+      </button>
       <button type="button" class="track-menu-btn" data-act="love">
         <span class="track-menu-btn-icon">${isLoved ? "💔" : "❤️"}</span>
         <span class="track-menu-btn-label">${isLoved ? "お気に入り解除" : "お気に入り"}</span>
@@ -1369,6 +1374,11 @@ function openLibraryTrackActionsModal(track, refs) {
       closeMenu();
       playNextTrack(track);
       toast("次に再生に追加しました", "info");
+      return;
+    }
+    if (act === "key-change") {
+      closeMenu();
+      openPlayerSoundModal(track);
       return;
     }
     if (act === "add-queue") {

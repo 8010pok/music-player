@@ -10,12 +10,12 @@
  */
 
 import { appState } from "../state.js";
-import { getAudioElement, togglePlay, playNext, playPrev, seekTo, setShuffleMode, setRepeatMode, setPlaybackRate, getQueue, jumpToQueueIndex, removeFromQueue, setSleepTimer, getSleepTimerState, resolveTrackArtworkFromQueue, toAbsoluteUrl } from "../player/audio-engine.js";
+import { getAudioElement, togglePlay, playNext, playPrev, seekTo, setShuffleMode, setRepeatMode, setPlaybackRate, setKeyShift, getKeyShift, getQueue, jumpToQueueIndex, removeFromQueue, setSleepTimer, getSleepTimerState, resolveTrackArtworkFromQueue, toAbsoluteUrl } from "../player/audio-engine.js";
 import { getPublic, setPublic } from "../store/settings.js";
 import { extractMetadata } from "../metadata/index.js";
 import { initVisualizer, startVisualizer, stopVisualizer, decodePcmForVisualization } from "../player/visualizer.js";
 import { setLoved, retryScrobbleForTrack } from "../lastfm/scrobble.js";
-import { formatTime, toast, escapeHtml, openModal, dismissActiveModal, closeActiveModalSync } from "./components.js";
+import { formatTime, toast, escapeHtml, escapeAttr, openModal, dismissActiveModal, closeActiveModalSync } from "./components.js";
 import { getBlob, updateTrack } from "../store/library-db.js";
 import { getArtworkUrl, markArtworkBroken } from "./artwork-cache.js";
 import { editTrackMetadata } from "./metadata-editor.js";
@@ -646,6 +646,12 @@ export async function mount(root) {
   });
 
   // イベント結線
+  refs.playerMoreBtn?.addEventListener("click", () => {
+    openPlayerSoundModal();
+  });
+  refs.keyBadge?.addEventListener("click", () => {
+    openPlayerSoundModal();
+  });
   refs.playBtn.addEventListener("click", () => togglePlay());
   refs.prevBtn.addEventListener("click", () => playPrev());
   refs.nextBtn.addEventListener("click", () => playNext());
@@ -1051,6 +1057,9 @@ function render() {
         <button class="player-dismiss-btn" id="btn-player-dismiss" aria-label="閉じる" title="閉じる">
           ${ICONS.dismiss}
         </button>
+        <button class="player-more-btn" id="btn-player-more" aria-label="曲メニュー・サウンド設定" title="曲メニュー・サウンド設定">
+          •••
+        </button>
       </div>
       <div class="player-art-wrap" id="player-art-wrap">
         <img class="player-art" id="player-art" alt="" />
@@ -1063,7 +1072,10 @@ function render() {
         <button class="lyrics-toggle" id="btn-lyrics-toggle" hidden aria-label="歌詞を表示">歌詞</button>
       </div>
       <div class="player-meta">
-        <h2 class="player-title" id="player-title">—</h2>
+        <div style="display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap;">
+          <h2 class="player-title" id="player-title">—</h2>
+          <span class="player-key-badge" id="player-key-badge" style="display: none; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px; background: rgba(0, 113, 227, 0.15); color: var(--accent); border: 1px solid rgba(0, 113, 227, 0.3); vertical-align: middle; cursor: pointer;"></span>
+        </div>
         <p class="player-artist" id="player-artist">—</p>
         <p class="player-album" id="player-album"></p>
         <div class="apple-audio-badge-wrap" id="apple-badge-wrap" hidden>
@@ -1203,6 +1215,8 @@ function collectRefs(root) {
   return {
     ambientBg: root.querySelector("#player-ambient-bg"),
     dismissBtn: root.querySelector("#btn-player-dismiss"),
+    playerMoreBtn: root.querySelector("#btn-player-more"),
+    keyBadge: root.querySelector("#player-key-badge"),
     art: root.querySelector("#player-art"),
     title: root.querySelector("#player-title"),
     artist: root.querySelector("#player-artist"),
@@ -1470,6 +1484,7 @@ function updateUI(refs, s) {
     refs.loveBtn.classList.remove("is-active");
     if (refs.appleBadgeWrap) refs.appleBadgeWrap.hidden = true;
     if (refs.flacboxSpecCard) refs.flacboxSpecCard.hidden = true;
+    if (refs.keyBadge) refs.keyBadge.style.display = "none";
     refs._lastQualityTrackId = null;
     updateAmbientColor(refs, null);
     // 曲が無くてもシャッフル/リピートの設定状態をアイコンに反映する
@@ -1490,6 +1505,17 @@ function updateUI(refs, s) {
     refs.title.innerHTML = `<span class="track-title-text">${escapeHtml(t.title || "(無題)")}</span><span class="track-memo-badge" title="${escapeHtml(t.memo)}">${escapeHtml(t.memo)}</span>`;
   } else {
     refs.title.innerHTML = `<span class="track-title-text">${escapeHtml(t.title || "(無題)")}</span>`;
+  }
+
+  const shift = (typeof t.keyShift === "number") ? t.keyShift : (s.currentKeyShift || 0);
+  if (refs.keyBadge) {
+    if (shift !== 0) {
+      refs.keyBadge.textContent = shift > 0 ? `♯${shift}` : `♭${Math.abs(shift)}`;
+      refs.keyBadge.style.display = "inline-flex";
+      refs.keyBadge.title = `キー変更中: ${shift > 0 ? "+" : ""}${shift} 半音（タップで調整）`;
+    } else {
+      refs.keyBadge.style.display = "none";
+    }
   }
   const isPlaceholderArtist = !t.artist
     || t.artist === "(不明)"
@@ -1781,4 +1807,153 @@ function formatDuration(sec) {
   const ss = s % 60;
   if (h > 0) return `${h}:${String(m).padStart(2,"0")}:${String(ss).padStart(2,"0")}`;
   return `${m}:${String(ss).padStart(2,"0")}`;
+}
+
+function formatKeyShort(shift) {
+  if (!shift) return "±0";
+  return shift > 0 ? `♯${shift}` : `♭${Math.abs(shift)}`;
+}
+
+function formatKeyLong(shift) {
+  if (!shift) return "原曲キー (±0)";
+  return shift > 0 ? `♯${shift} (${shift}半音上げ)` : `♭${Math.abs(shift)} (${Math.abs(shift)}半音下げ)`;
+}
+
+/**
+ * 再生画面・三点リーダーから開く「曲メニュー・サウンド設定（キーチェンジ）」モーダル
+ * @param {object} [targetTrack]
+ */
+export function openPlayerSoundModal(targetTrack) {
+  const currentTrack = targetTrack || appState.get().currentTrack;
+  if (!currentTrack) {
+    toast("曲が選択されていません", "info");
+    return;
+  }
+
+  let currentShift = (typeof currentTrack.keyShift === "number") ? currentTrack.keyShift : (appState.get().currentKeyShift || 0);
+  const artUrl = getArtworkUrl(currentTrack) || "./icons/icon-192.png";
+
+  const body = document.createElement("div");
+  body.className = "player-sound-modal-body";
+
+  const renderContent = () => {
+    body.innerHTML = `
+      <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border-color);">
+        <div style="width: 44px; height: 44px; border-radius: 6px; overflow: hidden; background: rgba(255,255,255,0.06); flex-shrink: 0;">
+          <img src="${escapeAttr(artUrl)}" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.src='./icons/icon-192.png'" />
+        </div>
+        <div style="flex: 1; min-width: 0;">
+          <div style="font-weight: 600; font-size: 13px; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+            ${escapeHtml(currentTrack.title || "(無題)")}
+          </div>
+          <div style="font-size: 11px; color: var(--fg-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+            ${escapeHtml(currentTrack.artist || "(不明アーティスト)")}
+          </div>
+        </div>
+      </div>
+
+      <!-- キーチェンジ セクション -->
+      <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 10px; padding: 14px; margin-bottom: 14px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <span style="font-weight: 600; font-size: 12px; color: var(--accent); display: flex; align-items: center; gap: 6px;">
+            <span>🎵 キーチェンジ (音程変更)</span>
+          </span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 10px; background: ${currentShift !== 0 ? "rgba(0, 113, 227, 0.2)" : "rgba(255,255,255,0.06)"}; color: ${currentShift !== 0 ? "var(--accent)" : "var(--fg-muted)"}; font-weight: 600;">
+            ${formatKeyLong(currentShift)}
+          </span>
+        </div>
+
+        <div style="display: flex; align-items: center; justify-content: center; gap: 14px; margin: 14px 0;">
+          <button type="button" class="btn" id="btn-sound-modal-key-down" style="width: 52px; height: 44px; font-size: 20px; font-weight: bold; border-radius: 8px;">♭</button>
+          <div style="min-width: 100px; text-align: center;">
+            <div style="font-size: 24px; font-weight: 700; color: ${currentShift !== 0 ? "var(--accent)" : "var(--fg)"};">
+              ${formatKeyShort(currentShift)}
+            </div>
+            <div style="font-size: 10px; color: var(--fg-muted); margin-top: 2px;">
+              ${currentShift === 0 ? "原曲キー (バイパス)" : (currentShift > 0 ? `+${currentShift} 半音` : `${currentShift} 半音`)}
+            </div>
+          </div>
+          <button type="button" class="btn" id="btn-sound-modal-key-up" style="width: 52px; height: 44px; font-size: 20px; font-weight: bold; border-radius: 8px;">♯</button>
+        </div>
+
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px; gap: 8px; flex-wrap: wrap;">
+          <button type="button" class="btn" id="btn-sound-modal-key-reset" style="font-size: 11px; padding: 5px 12px; border-radius: 6px;" ${currentShift === 0 ? "disabled" : ""}>
+            ↺ 原曲キーに戻す (±0)
+          </button>
+          <div style="font-size: 10px; color: var(--fg-muted);">
+            ✓ この曲のキーとして自動固定保存
+          </div>
+        </div>
+      </div>
+
+      <!-- クイック操作ボタン -->
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <button type="button" class="btn" id="btn-sound-modal-edit-meta" style="justify-content: flex-start; padding: 9px 12px; font-size: 12px; width: 100%; border-radius: 8px;">
+          ✏️ 曲のメタデータ編集…
+        </button>
+        <button type="button" class="btn" id="btn-sound-modal-normalize" style="justify-content: flex-start; padding: 9px 12px; font-size: 12px; width: 100%; border-radius: 8px;">
+          🔊 音量ノーマライズ調整…
+        </button>
+      </div>
+    `;
+
+    body.querySelector("#btn-sound-modal-key-down")?.addEventListener("click", () => {
+      if (currentShift > -12) {
+        currentShift--;
+        setKeyShift(currentShift);
+        currentTrack.keyShift = currentShift;
+        const cur = appState.get().currentTrack;
+        if (cur && cur.id === currentTrack.id) cur.keyShift = currentShift;
+        updateTrack(currentTrack.id, { keyShift: currentShift }).catch(() => {});
+        renderContent();
+      }
+    });
+
+    body.querySelector("#btn-sound-modal-key-up")?.addEventListener("click", () => {
+      if (currentShift < 12) {
+        currentShift++;
+        setKeyShift(currentShift);
+        currentTrack.keyShift = currentShift;
+        const cur = appState.get().currentTrack;
+        if (cur && cur.id === currentTrack.id) cur.keyShift = currentShift;
+        updateTrack(currentTrack.id, { keyShift: currentShift }).catch(() => {});
+        renderContent();
+      }
+    });
+
+    body.querySelector("#btn-sound-modal-key-reset")?.addEventListener("click", () => {
+      currentShift = 0;
+      setKeyShift(0);
+      currentTrack.keyShift = 0;
+      const cur = appState.get().currentTrack;
+      if (cur && cur.id === currentTrack.id) cur.keyShift = 0;
+      updateTrack(currentTrack.id, { keyShift: 0 }).catch(() => {});
+      renderContent();
+      toast("原曲キーに戻しました", "ok");
+    });
+
+    body.querySelector("#btn-sound-modal-edit-meta")?.addEventListener("click", () => {
+      closeActiveModalSync();
+      editTrackMetadata(currentTrack, (updated) => {
+        if (updated) {
+          toast("メタデータを更新しました", "ok");
+        }
+      });
+    });
+
+    body.querySelector("#btn-sound-modal-normalize")?.addEventListener("click", () => {
+      closeActiveModalSync();
+      openNormalizeModal(currentTrack);
+    });
+  };
+
+  renderContent();
+
+  openModal({
+    title: "曲メニュー・サウンド設定",
+    body,
+    actions: [
+      { label: "閉じる", onClick: () => {} },
+    ],
+  });
 }
