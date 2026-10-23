@@ -7,7 +7,7 @@
  * - 既存の曲の音源Blobやジャケット画像を破壊せず、変更されたメタデータ（曲名、メモ等）をスマートにマージ
  */
 
-import { getAllTracks, putTrack, getAllPlaylists, savePlaylist, updateTrack, deleteTrack } from "./library-db.js";
+import { getAllTracks, putTrack, bulkPutTracks, getAllPlaylists, savePlaylist, updateTrack, deleteTrack } from "./library-db.js";
 import { getPublic, setPublic } from "./settings.js";
 import {
   isDriveConnected,
@@ -128,6 +128,7 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
   let updatedCount = 0;
   let addedCount = 0;
   const incomingIds = new Set();
+  const tracksToPut = [];
 
   for (const incoming of data.tracks) {
     if (!incoming || !incoming.id) continue;
@@ -197,16 +198,21 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
       if (incoming.driveFileId) merged.driveFileId = incoming.driveFileId;
       if (incoming.source) merged.source = incoming.source;
 
-      await putTrack(merged, null);
+      tracksToPut.push({ track: merged });
       updatedCount++;
     } else {
       // 新規曲:
       // Google Drive 音源なら driveFileId を持つため、インポート先端末でもそのまま再生可能
       const newTrack = { ...incoming };
       delete newTrack.artworkBlob; // 破損した {} を除去
-      await putTrack(newTrack, null);
+      tracksToPut.push({ track: newTrack });
       addedCount++;
     }
+  }
+
+  // ★ 単一トランザクションで一括投入（N 回の個別トランザクションによる IndexedDB abort を完全防止）
+  if (tracksToPut.length > 0) {
+    await bulkPutTracks(tracksToPut);
   }
 
   // 削除の同期 (オプション)

@@ -78,6 +78,8 @@ let primePromise = null;
 const state = {
   userVolume: 1.0,        // ユーザー設定音量 (0.0〜1.0)
   currentObjectUrl: null,
+  isDirectStream: false,  // 現在再生中の URL が Google Drive HTTP Range などのストリーミング URL かどうか
+  streamFallbackInProgress: false, // ストリーミング失敗時の Blob ダウンロードフォールバック処理中フラグ
   // ※ artwork URL は artwork-cache モジュールが ID 単位で管理する。
   //   ここで個別に保持・revoke すると iOS ロック画面と競合するため持たない。
   sessionStartedAt: 0,
@@ -279,9 +281,42 @@ export function initAudioEngine({ onNowPlaying, onScrobble } = {}) {
     };
     el.addEventListener("loadedmetadata", syncRealAudioDuration);
     el.addEventListener("durationchange", syncRealAudioDuration);
-    el.addEventListener("error", (e) => {
-      if (e.target === audioEl) {
-        console.warn("[audio-engine] audio error", e, audioEl.error);
+    el.addEventListener("error", async (e) => {
+      if (e.target !== audioEl) return;
+      const cur = appState.get().currentTrack;
+      console.warn("[audio-engine] audio error", e, audioEl.error);
+
+      // ダイレクトストリーミング再生中（Google Drive HTTP Range等）でエラーが発生した場合、
+      // 停止したままにせず自動で Blob ダウンロード再生へフォールバック
+      if (state.isDirectStream && !state.streamFallbackInProgress && cur && cur.id) {
+        state.streamFallbackInProgress = true;
+        state.isDirectStream = false;
+        console.info("[audio-engine] ダイレクトストリームエラー検知のため、Blob ダウンロードへフォールバック試行:", cur.id);
+        try {
+          const fbBlob = await getBlob(cur.id);
+          if (fbBlob && appState.get().currentTrack?.id === cur.id && !state.userPausedExplicitly) {
+            const oldUrl = state.currentObjectUrl;
+            const fbUrl = URL.createObjectURL(fbBlob);
+            state.currentObjectUrl = fbUrl;
+            audioEl.src = fbUrl;
+            const resumePos = audioEl.currentTime || 0;
+            if (resumePos > 0) {
+              try { audioEl.currentTime = resumePos; } catch {}
+            }
+            await audioEl.play();
+            state.consecutiveSkips = 0;
+            if (oldUrl && oldUrl.startsWith("blob:")) {
+              try { URL.revokeObjectURL(oldUrl); } catch {}
+            }
+          } else {
+            appState.set({ isPlaying: false });
+          }
+        } catch (fbErr) {
+          console.warn("[audio-engine] error イベント発火時の Blob フォールバックも失敗:", fbErr);
+          appState.set({ isPlaying: false });
+        } finally {
+          state.streamFallbackInProgress = false;
+        }
       }
     });
     el.addEventListener("waiting", (e) => onStallOrWaiting(e.target));
@@ -790,6 +825,8 @@ function playPreloadedSync(index, track, url) {
   const oldUrl = state.currentObjectUrl;
   state.queueIndex = index;
   state.currentObjectUrl = url;
+  state.isDirectStream = false;
+  state.streamFallbackInProgress = false;
   // プリロード枠を消費 (URL は currentObjectUrl に移譲したので revoke しない)
   state.preloadUrl = null;
   state.preloadTrackId = null;
@@ -848,7 +885,7 @@ function playPreloadedSync(index, track, url) {
   };
 
   // 旧 URL は再生が新 URL に確実に移ってから遅延 revoke
-  if (oldUrl && oldUrl !== url) {
+  if (oldUrl && oldUrl !== url && oldUrl.startsWith("blob:")) {
     setTimeout(() => { try { URL.revokeObjectURL(oldUrl); } catch {} }, 2000);
   }
 
@@ -1313,9 +1350,13 @@ export function stopPlayback() {
   try { audioEl.pause(); } catch {}
   try { audioEl.removeAttribute("src"); audioEl.load(); } catch {}
   if (state.currentObjectUrl) {
-    try { URL.revokeObjectURL(state.currentObjectUrl); } catch {}
+    if (state.currentObjectUrl.startsWith("blob:")) {
+      try { URL.revokeObjectURL(state.currentObjectUrl); } catch {}
+    }
     state.currentObjectUrl = null;
   }
+  state.isDirectStream = false;
+  state.streamFallbackInProgress = false;
   // プリロード済み URL も破棄（リーク防止）
   clearPreload();
   // artwork URL は artwork-cache が ID 単位で管理しているため、ここでは
@@ -1368,7 +1409,7 @@ function isSupersededTransition(myToken, ownUrl) {
   if (myToken === state.transitionToken) return false;
   // stale: 新しい遷移が currentObjectUrl を別 URL (or null) に置換済みのはず。
   // 自分の URL がもう使われていなければ revoke (二重 revoke は無害)。
-  if (state.currentObjectUrl !== ownUrl) {
+  if (state.currentObjectUrl !== ownUrl && ownUrl && ownUrl.startsWith("blob:")) {
     try { URL.revokeObjectURL(ownUrl); } catch {}
   }
   return true;
@@ -1394,6 +1435,8 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
   const myToken = ++state.transitionToken;
   state.transitioning = true;
   state.userPausedExplicitly = false;
+  state.isDirectStream = false;
+  state.streamFallbackInProgress = false;
 
   appState.set({
     currentTrack: track,
@@ -1458,6 +1501,7 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
           if (streamUrl) {
             targetUrl = streamUrl;
             isDirectStream = true;
+            state.isDirectStream = true;
             // 再生開始と並行してバックグラウンドで IndexedDB キャッシュと完全メタデータ・再生時間補完を行う
             setTimeout(() => {
               cacheDriveTrackInBackground(track.id);
@@ -1636,7 +1680,7 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
     setTimeout(clearTransitioning, 1500);
 
     // 旧 URL は再生が新 URL に確実に移ってから遅延 revoke
-    if (oldUrl && oldUrl !== targetUrl) {
+    if (oldUrl && oldUrl !== targetUrl && oldUrl.startsWith("blob:")) {
       setTimeout(() => { try { URL.revokeObjectURL(oldUrl); } catch {} }, 2000);
     }
 

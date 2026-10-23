@@ -29,6 +29,7 @@ export function editTrackMetadata(track, onUpdated) {
   if (!track || !track.id) return Promise.resolve(null);
 
   return new Promise((resolve) => {
+    let isSaving = false;
     let pendingArtworkBlob = undefined;
     const initialArtUrl = getArtworkUrl(track);
     let localPreviewUrl = null;
@@ -385,73 +386,83 @@ export function editTrackMetadata(track, onUpdated) {
           label: "保存",
           primary: true,
           onClick: async () => {
-            const title = body.querySelector("#meta-title").value.trim() || "(無題)";
-            const artist = body.querySelector("#meta-artist").value.trim() || "(不明アーティスト)";
-            const album = body.querySelector("#meta-album").value.trim();
-            const albumArtist = body.querySelector("#meta-album-artist").value.trim();
-            const trackNo = body.querySelector("#meta-track-no").value.trim();
-            const discNo = body.querySelector("#meta-disc-no").value.trim();
-            const year = body.querySelector("#meta-year").value.trim();
-            const genre = body.querySelector("#meta-genre").value.trim();
-            const memo = body.querySelector("#meta-memo")?.value.trim() || "";
+            if (isSaving) return false;
+            isSaving = true;
+            try {
+              const title = body.querySelector("#meta-title").value.trim() || "(無題)";
+              const artist = body.querySelector("#meta-artist").value.trim() || "(不明アーティスト)";
+              const album = body.querySelector("#meta-album").value.trim();
+              const albumArtist = body.querySelector("#meta-album-artist").value.trim();
+              const trackNo = body.querySelector("#meta-track-no").value.trim();
+              const discNo = body.querySelector("#meta-disc-no").value.trim();
+              const year = body.querySelector("#meta-year").value.trim();
+              const genre = body.querySelector("#meta-genre").value.trim();
+              const memo = body.querySelector("#meta-memo")?.value.trim() || "";
 
-            const patch = {
-              title,
-              artist,
-              album,
-              albumArtist,
-              trackNo,
-              discNo,
-              year,
-              genre,
-              memo,
-              userEdited: true,
-            };
+              const patch = {
+                title,
+                artist,
+                album,
+                albumArtist,
+                trackNo,
+                discNo,
+                year,
+                genre,
+                memo,
+                userEdited: true,
+              };
 
-            if (pendingArtworkBlob !== undefined) {
-              if (pendingArtworkBlob instanceof Blob) {
-                try {
-                  patch.artworkDataUrl = await blobToDataUrl(pendingArtworkBlob, 500);
-                  patch.artworkBlob = null; // Base64 Data URL 化できた場合は生 Blob を null にして iOS WebKit の DataCloneError を防ぐ
-                } catch {
-                  patch.artworkBlob = pendingArtworkBlob;
+              if (pendingArtworkBlob !== undefined) {
+                if (pendingArtworkBlob instanceof Blob) {
+                  try {
+                    patch.artworkDataUrl = await blobToDataUrl(pendingArtworkBlob, 500);
+                    patch.artworkBlob = null; // Base64 Data URL 化できた場合は生 Blob を null にして iOS WebKit の DataCloneError を防ぐ
+                  } catch {
+                    patch.artworkBlob = pendingArtworkBlob;
+                    patch.artworkDataUrl = null;
+                  }
+                } else {
+                  patch.artworkBlob = null;
                   patch.artworkDataUrl = null;
                 }
-              } else {
-                patch.artworkBlob = null;
-                patch.artworkDataUrl = null;
               }
+
+              releaseArtwork(track.id);
+              await updateTrack(track.id, patch);
+              releaseArtwork(track.id);
+              recordLibraryModified();
+              const updatedTrack = { ...track, ...patch };
+              Object.assign(track, patch);
+
+              // 再生中の曲なら appState の currentTrack も更新
+              const cur = appState.get().currentTrack;
+              if (cur && cur.id === track.id) {
+                releaseArtwork(cur.id);
+                appState.set({ currentTrack: updatedTrack });
+              }
+
+              // 直近でスクロブル拒否された曲、または再生中の曲が拒否状態なら自動再スクロブルを試行
+              const rejectedTrack = appState.get().scrobbleRejectedTrack;
+              if (
+                (rejectedTrack && rejectedTrack.id === track.id) ||
+                (cur && cur.id === track.id && appState.get().scrobbleResult === "ignored")
+              ) {
+                retryScrobbleForTrack(updatedTrack).catch((err) => {
+                  console.warn("[meta-edit] 自動再スクロブルエラー:", err);
+                });
+              }
+
+              if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+              toast("メタデータを更新しました", "ok");
+              if (typeof onUpdated === "function") onUpdated(track);
+              resolve(track);
+              return true;
+            } catch (err) {
+              console.error("[metadata-editor] 保存エラー:", err);
+              toast("保存に失敗しました: " + (err.message || err), "err");
+              isSaving = false;
+              return false;
             }
-
-            releaseArtwork(track.id);
-            await updateTrack(track.id, patch);
-            releaseArtwork(track.id);
-            recordLibraryModified();
-            const updatedTrack = { ...track, ...patch };
-            Object.assign(track, patch);
-
-            // 再生中の曲なら appState の currentTrack も更新
-            const cur = appState.get().currentTrack;
-            if (cur && cur.id === track.id) {
-              releaseArtwork(cur.id);
-              appState.set({ currentTrack: updatedTrack });
-            }
-
-            // 直近でスクロブル拒否された曲、または再生中の曲が拒否状態なら自動再スクロブルを試行
-            const rejectedTrack = appState.get().scrobbleRejectedTrack;
-            if (
-              (rejectedTrack && rejectedTrack.id === track.id) ||
-              (cur && cur.id === track.id && appState.get().scrobbleResult === "ignored")
-            ) {
-              retryScrobbleForTrack(updatedTrack).catch((err) => {
-                console.warn("[meta-edit] 自動再スクロブルエラー:", err);
-              });
-            }
-
-            if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
-            toast("メタデータを更新しました", "ok");
-            if (typeof onUpdated === "function") onUpdated(track);
-            resolve(track);
           },
         },
       ],
@@ -469,6 +480,7 @@ export function editAlbumMetadata(album, onUpdated) {
   if (!album || !album.tracks || album.tracks.length === 0) return Promise.resolve(null);
 
   return new Promise((resolve) => {
+    let isSaving = false;
     let pendingArtworkBlob = undefined;
     const currentArtTrack = album.artworkTrack || album.tracks.find((t) => t.artworkBlob || t.artworkDataUrl);
     const initialArtUrl = currentArtTrack ? getArtworkUrl(currentArtTrack) : null;
@@ -813,94 +825,104 @@ export function editAlbumMetadata(album, onUpdated) {
           label: "全曲に一括保存",
           primary: true,
           onClick: async () => {
-            const albumName = body.querySelector("#meta-alb-title").value.trim() || "不明なアルバム";
-            const albumArtist = body.querySelector("#meta-alb-artist").value.trim() || "不明なアーティスト";
-            const trackArtist = body.querySelector("#meta-alb-track-artist").value.trim();
-            const year = body.querySelector("#meta-alb-year").value.trim();
-            const genre = body.querySelector("#meta-alb-genre").value.trim();
+            if (isSaving) return false;
+            isSaving = true;
+            try {
+              const albumName = body.querySelector("#meta-alb-title").value.trim() || "不明なアルバム";
+              const albumArtist = body.querySelector("#meta-alb-artist").value.trim() || "不明なアーティスト";
+              const trackArtist = body.querySelector("#meta-alb-track-artist").value.trim();
+              const year = body.querySelector("#meta-alb-year").value.trim();
+              const genre = body.querySelector("#meta-alb-genre").value.trim();
 
-            const trackRows = body.querySelectorAll(".meta-album-track-row");
-            const trackPatchMap = new Map();
-            trackRows.forEach((row) => {
-              const tid = row.dataset.trackId;
-              const noVal = row.querySelector(".meta-track-no-input")?.value.trim();
-              const titleVal = row.querySelector(".meta-track-title-input")?.value.trim();
-              const artistVal = row.querySelector(".meta-track-artist-input")?.value.trim();
-              const memoVal = row.querySelector(".meta-track-memo-input")?.value.trim();
-              trackPatchMap.set(tid, {
-                trackNo: noVal,
-                title: titleVal,
-                artist: artistVal,
-                memo: memoVal !== undefined ? memoVal : undefined,
+              const trackRows = body.querySelectorAll(".meta-album-track-row");
+              const trackPatchMap = new Map();
+              trackRows.forEach((row) => {
+                const tid = row.dataset.trackId;
+                const noVal = row.querySelector(".meta-track-no-input")?.value.trim();
+                const titleVal = row.querySelector(".meta-track-title-input")?.value.trim();
+                const artistVal = row.querySelector(".meta-track-artist-input")?.value.trim();
+                const memoVal = row.querySelector(".meta-track-memo-input")?.value.trim();
+                trackPatchMap.set(tid, {
+                  trackNo: noVal,
+                  title: titleVal,
+                  artist: artistVal,
+                  memo: memoVal !== undefined ? memoVal : undefined,
+                });
               });
-            });
 
-            const basePatch = {
-              album: albumName,
-              albumArtist,
-              year,
-              userEdited: true,
-            };
-            if (genre) basePatch.genre = genre;
-            if (pendingArtworkBlob !== undefined) {
-              if (pendingArtworkBlob instanceof Blob) {
-                try {
-                  basePatch.artworkDataUrl = await blobToDataUrl(pendingArtworkBlob, 500);
+              const basePatch = {
+                album: albumName,
+                albumArtist,
+                year,
+                userEdited: true,
+              };
+              if (genre) basePatch.genre = genre;
+              if (pendingArtworkBlob !== undefined) {
+                if (pendingArtworkBlob instanceof Blob) {
+                  try {
+                    basePatch.artworkDataUrl = await blobToDataUrl(pendingArtworkBlob, 500);
+                    basePatch.artworkBlob = null;
+                  } catch {
+                    basePatch.artworkBlob = pendingArtworkBlob;
+                    basePatch.artworkDataUrl = null;
+                  }
+                } else {
                   basePatch.artworkBlob = null;
-                } catch {
-                  basePatch.artworkBlob = pendingArtworkBlob;
                   basePatch.artworkDataUrl = null;
                 }
-              } else {
-                basePatch.artworkBlob = null;
-                basePatch.artworkDataUrl = null;
               }
-            }
 
-            const batchUpdates = [];
-            for (const t of album.tracks) {
-              const perTrack = trackPatchMap.get(t.id) || {};
-              const individualPatch = { ...basePatch };
-              if (perTrack.title) individualPatch.title = perTrack.title;
-              if (perTrack.trackNo !== undefined && perTrack.trackNo !== "") individualPatch.trackNo = perTrack.trackNo;
-              if (perTrack.artist) individualPatch.artist = perTrack.artist;
-              else if (trackArtist) individualPatch.artist = trackArtist;
-              if (perTrack.memo !== undefined) individualPatch.memo = perTrack.memo;
+              const batchUpdates = [];
+              for (const t of album.tracks) {
+                const perTrack = trackPatchMap.get(t.id) || {};
+                const individualPatch = { ...basePatch };
+                if (perTrack.title) individualPatch.title = perTrack.title;
+                if (perTrack.trackNo !== undefined) individualPatch.trackNo = perTrack.trackNo;
+                if (perTrack.artist) individualPatch.artist = perTrack.artist;
+                else if (trackArtist) individualPatch.artist = trackArtist;
+                if (perTrack.memo !== undefined) individualPatch.memo = perTrack.memo;
 
-              releaseArtwork(t.id);
-              batchUpdates.push({ id: t.id, patch: individualPatch });
-              Object.assign(t, individualPatch);
-            }
-            await bulkUpdateTracks(batchUpdates);
-            for (const t of album.tracks) {
-              releaseArtwork(t.id);
-            }
-            recordLibraryModified();
-
-            album.title = albumName;
-            album.albumArtist = albumArtist;
-            album.year = year;
-            if (genre) album.genre = genre;
-            if (pendingArtworkBlob !== undefined) {
-              if (pendingArtworkBlob) {
-                album.artworkTrack = { ...album.tracks[0], artworkBlob: pendingArtworkBlob, artworkDataUrl: basePatch.artworkDataUrl || null };
-              } else {
-                album.artworkTrack = null;
+                releaseArtwork(t.id);
+                batchUpdates.push({ id: t.id, patch: individualPatch });
+                Object.assign(t, individualPatch);
               }
-            }
+              await bulkUpdateTracks(batchUpdates);
+              for (const t of album.tracks) {
+                releaseArtwork(t.id);
+              }
+              recordLibraryModified();
 
-            // 再生中の曲が含まれていれば appState も同期
-            const cur = appState.get().currentTrack;
-            if (cur && album.tracks.some((t) => t.id === cur.id)) {
-              releaseArtwork(cur.id);
-              const curPatch = trackPatchMap.get(cur.id) || {};
-              appState.set({ currentTrack: { ...cur, ...basePatch, ...curPatch } });
-            }
+              album.title = albumName;
+              album.albumArtist = albumArtist;
+              album.year = year;
+              if (genre) album.genre = genre;
+              if (pendingArtworkBlob !== undefined) {
+                if (pendingArtworkBlob) {
+                  album.artworkTrack = { ...album.tracks[0], artworkBlob: pendingArtworkBlob, artworkDataUrl: basePatch.artworkDataUrl || null };
+                } else {
+                  album.artworkTrack = null;
+                }
+              }
 
-            if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
-            toast(`${album.tracks.length} 曲のアルバム情報と曲名を更新しました`, "ok");
-            if (typeof onUpdated === "function") onUpdated(album);
-            resolve(album);
+              // 再生中の曲が含まれていれば appState も同期
+              const cur = appState.get().currentTrack;
+              if (cur && album.tracks.some((t) => t.id === cur.id)) {
+                releaseArtwork(cur.id);
+                const curPatch = trackPatchMap.get(cur.id) || {};
+                appState.set({ currentTrack: { ...cur, ...basePatch, ...curPatch } });
+              }
+
+              if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+              toast(`${album.tracks.length} 曲のアルバム情報と曲名を更新しました`, "ok");
+              if (typeof onUpdated === "function") onUpdated(album);
+              resolve(album);
+              return true;
+            } catch (err) {
+              console.error("[metadata-editor] アルバム一括保存エラー:", err);
+              toast("保存に失敗しました: " + (err.message || err), "err");
+              isSaving = false;
+              return false;
+            }
           },
         },
       ],
@@ -919,6 +941,7 @@ export function editSelectedTracksMetadata(tracks, onUpdated) {
   if (!Array.isArray(tracks) || tracks.length === 0) return Promise.resolve(null);
 
   return new Promise((resolve) => {
+    let isSaving = false;
     let pendingArtworkBlob = undefined;
     const currentArtTrack = tracks.find((t) => t && (t.artworkBlob || t.artworkDataUrl));
     const initialArtUrl = currentArtTrack ? getArtworkUrl(currentArtTrack) : null;
@@ -1285,82 +1308,92 @@ export function editSelectedTracksMetadata(tracks, onUpdated) {
           label: `選択した ${tracks.length} 曲に一括保存`,
           primary: true,
           onClick: async () => {
-            const albumName = body.querySelector("#meta-sel-album").value.trim();
-            const albumArtist = body.querySelector("#meta-sel-album-artist").value.trim();
-            const trackArtist = body.querySelector("#meta-sel-track-artist").value.trim();
-            const year = body.querySelector("#meta-sel-year").value.trim();
-            const genre = body.querySelector("#meta-sel-genre").value.trim();
+            if (isSaving) return false;
+            isSaving = true;
+            try {
+              const albumName = body.querySelector("#meta-sel-album").value.trim();
+              const albumArtist = body.querySelector("#meta-sel-album-artist").value.trim();
+              const trackArtist = body.querySelector("#meta-sel-track-artist").value.trim();
+              const year = body.querySelector("#meta-sel-year").value.trim();
+              const genre = body.querySelector("#meta-sel-genre").value.trim();
 
-            const trackRows = body.querySelectorAll(".meta-album-track-row");
-            const trackPatchMap = new Map();
-            trackRows.forEach((row) => {
-              const tid = row.dataset.trackId;
-              const noVal = row.querySelector(".meta-track-no-input")?.value.trim();
-              const titleVal = row.querySelector(".meta-track-title-input")?.value.trim();
-              const artistVal = row.querySelector(".meta-track-artist-input")?.value.trim();
-              const memoVal = row.querySelector(".meta-track-memo-input")?.value.trim();
-              trackPatchMap.set(tid, {
-                trackNo: noVal,
-                title: titleVal,
-                artist: artistVal,
-                memo: memoVal !== undefined ? memoVal : undefined,
+              const trackRows = body.querySelectorAll(".meta-album-track-row");
+              const trackPatchMap = new Map();
+              trackRows.forEach((row) => {
+                const tid = row.dataset.trackId;
+                const noVal = row.querySelector(".meta-track-no-input")?.value.trim();
+                const titleVal = row.querySelector(".meta-track-title-input")?.value.trim();
+                const artistVal = row.querySelector(".meta-track-artist-input")?.value.trim();
+                const memoVal = row.querySelector(".meta-track-memo-input")?.value.trim();
+                trackPatchMap.set(tid, {
+                  trackNo: noVal,
+                  title: titleVal,
+                  artist: artistVal,
+                  memo: memoVal !== undefined ? memoVal : undefined,
+                });
               });
-            });
 
-            const basePatch = {
-              userEdited: true,
-            };
-            if (albumName || commonAlbum) basePatch.album = albumName;
-            if (albumArtist || commonAlbumArtist) basePatch.albumArtist = albumArtist;
-            if (year || commonYear) basePatch.year = year;
-            if (genre || commonGenre) basePatch.genre = genre;
+              const basePatch = {
+                userEdited: true,
+              };
+              if (albumName || commonAlbum) basePatch.album = albumName;
+              if (albumArtist || commonAlbumArtist) basePatch.albumArtist = albumArtist;
+              if (year || commonYear) basePatch.year = year;
+              if (genre || commonGenre) basePatch.genre = genre;
 
-            if (pendingArtworkBlob !== undefined) {
-              if (pendingArtworkBlob instanceof Blob) {
-                try {
-                  basePatch.artworkDataUrl = await blobToDataUrl(pendingArtworkBlob, 500);
+              if (pendingArtworkBlob !== undefined) {
+                if (pendingArtworkBlob instanceof Blob) {
+                  try {
+                    basePatch.artworkDataUrl = await blobToDataUrl(pendingArtworkBlob, 500);
+                    basePatch.artworkBlob = null;
+                  } catch {
+                    basePatch.artworkBlob = pendingArtworkBlob;
+                    basePatch.artworkDataUrl = null;
+                  }
+                } else {
                   basePatch.artworkBlob = null;
-                } catch {
-                  basePatch.artworkBlob = pendingArtworkBlob;
                   basePatch.artworkDataUrl = null;
                 }
-              } else {
-                basePatch.artworkBlob = null;
-                basePatch.artworkDataUrl = null;
               }
-            }
 
-            const batchUpdates = [];
-            for (const t of tracks) {
-              const perTrack = trackPatchMap.get(t.id) || {};
-              const individualPatch = { ...basePatch };
-              if (perTrack.title) individualPatch.title = perTrack.title;
-              if (perTrack.trackNo !== undefined && perTrack.trackNo !== "") individualPatch.trackNo = perTrack.trackNo;
-              if (trackArtist) individualPatch.artist = trackArtist;
-              else if (perTrack.artist) individualPatch.artist = perTrack.artist;
-              if (perTrack.memo !== undefined) individualPatch.memo = perTrack.memo;
+              const batchUpdates = [];
+              for (const t of tracks) {
+                const perTrack = trackPatchMap.get(t.id) || {};
+                const individualPatch = { ...basePatch };
+                if (perTrack.title) individualPatch.title = perTrack.title;
+                if (perTrack.trackNo !== undefined) individualPatch.trackNo = perTrack.trackNo;
+                if (trackArtist) individualPatch.artist = trackArtist;
+                else if (perTrack.artist) individualPatch.artist = perTrack.artist;
+                if (perTrack.memo !== undefined) individualPatch.memo = perTrack.memo;
 
-              releaseArtwork(t.id);
-              batchUpdates.push({ id: t.id, patch: individualPatch });
-              Object.assign(t, individualPatch);
-            }
-            await bulkUpdateTracks(batchUpdates);
-            for (const t of tracks) {
-              releaseArtwork(t.id);
-            }
-            recordLibraryModified();
+                releaseArtwork(t.id);
+                batchUpdates.push({ id: t.id, patch: individualPatch });
+                Object.assign(t, individualPatch);
+              }
+              await bulkUpdateTracks(batchUpdates);
+              for (const t of tracks) {
+                releaseArtwork(t.id);
+              }
+              recordLibraryModified();
 
-            const cur = appState.get().currentTrack;
-            if (cur && tracks.some((t) => t.id === cur.id)) {
-              releaseArtwork(cur.id);
-              const curPatch = trackPatchMap.get(cur.id) || {};
-              appState.set({ currentTrack: { ...cur, ...basePatch, ...curPatch } });
-            }
+              const cur = appState.get().currentTrack;
+              if (cur && tracks.some((t) => t.id === cur.id)) {
+                releaseArtwork(cur.id);
+                const curPatch = trackPatchMap.get(cur.id) || {};
+                appState.set({ currentTrack: { ...cur, ...basePatch, ...curPatch } });
+              }
 
-            if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
-            toast(`${tracks.length} 曲のメタデータを一括更新しました`, "ok");
-            if (typeof onUpdated === "function") onUpdated(tracks);
-            resolve(tracks);
+              if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+              toast(`${tracks.length} 曲のメタデータを一括更新しました`, "ok");
+              if (typeof onUpdated === "function") onUpdated(tracks);
+              resolve(tracks);
+              return true;
+            } catch (err) {
+              console.error("[metadata-editor] 選択曲一括保存エラー:", err);
+              toast("保存に失敗しました: " + (err.message || err), "err");
+              isSaving = false;
+              return false;
+            }
           },
         },
       ],

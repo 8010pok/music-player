@@ -283,6 +283,58 @@ export function putTrack(track, blob) {
 }
 
 /**
+ * 複数トラック（および付随Blob）を【単一トランザクション】で一括追加・更新（upsert）する。
+ * - 端末間同期 (sync-service.js) や Google Drive 一括追加時、N 回の個別トランザクションによる
+ *   iOS Safari の abort / QuotaExceeded / トランザクション詰まりを完全防止する。
+ * @param {Array<{ track: object, blob?: Blob }>} items
+ * @returns {Promise<Array<object>>}
+ */
+export function bulkPutTracks(items) {
+  if (!Array.isArray(items) || items.length === 0) return Promise.resolve([]);
+
+  const runBatch = (stripBlob) => openDb().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction(["tracks", "blobs"], "readwrite");
+    const trackStore = tx.objectStore("tracks");
+    const blobStore = tx.objectStore("blobs");
+    const savedTracks = [];
+
+    for (const item of items) {
+      if (!item || !item.track || !item.track.id) continue;
+      const clean = sanitizeRecordForIdb(item.track);
+      if (stripBlob) {
+        clean.artworkBlob = null;
+      }
+      try {
+        trackStore.put(clean);
+      } catch (_) {
+        clean.artworkBlob = null;
+        trackStore.put(clean);
+      }
+      if (item.blob) {
+        try {
+          blobStore.put({ id: clean.id, blob: item.blob });
+        } catch (_) {}
+      }
+      savedTracks.push(clean);
+    }
+
+    tx.oncomplete = () => {
+      for (const t of savedTracks) {
+        notifyTrackUpdated(t, t);
+      }
+      resolve(savedTracks);
+    };
+    tx.onerror = () => reject(tx.error || new Error("IndexedDB bulk put failed/aborted"));
+    tx.onabort = () => reject(tx.error || new Error("IndexedDB bulk put failed/aborted"));
+  }));
+
+  return withWriteRetry(() => runBatch(false)).catch((err) => {
+    console.warn("[library-db] bulkPutTracks 通常保存失敗、artworkBlob 除去フォールバックを実行:", err);
+    return withWriteRetry(() => runBatch(true));
+  });
+}
+
+/**
  * IndexedDB (特に iOS Safari / WebKit) での DataCloneError / InvalidStateError / QuotaExceeded を防ぐため、
  * トラックレコード内の artworkBlob を検証・正規化する。
  * - artworkDataUrl (Base64) がすでにある場合は、WebKit で失効しやすい生の artworkBlob を保持せず null に統一する。
