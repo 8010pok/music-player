@@ -201,6 +201,16 @@ if (typeof document !== "undefined" && typeof document.addEventListener === "fun
   });
 }
 
+// GIS スクリプト事前プリロード（Client ID が設定されている場合、初回認証のポップアップ遅延をゼロ化）
+if (typeof window !== "undefined") {
+  try {
+    const pub = getPublic();
+    if (pub && pub.gdriveClientId) {
+      ensureGisScript().catch(() => {});
+    }
+  } catch (_) {}
+}
+
 /**
  * Google Drive が接続中（有効なトークンがある）か判定
  * @returns {Promise<boolean>}
@@ -635,9 +645,33 @@ let _activeReconnectModalPromise = null;
  * @param {{ track?: object, reason?: string }} [opts]
  * @returns {Promise<string|null>} 再連携成功時は新しいアクセストークン、キャンセル時は null
  */
-export function promptDriveReconnectModal({ track = null, reason = "" } = {}) {
+export async function promptDriveReconnectModal({ track = null, reason = "", forceModal = false } = {}) {
   if (typeof document === "undefined") return Promise.resolve(null);
   if (_activeReconnectModalPromise) return _activeReconnectModalPromise;
+
+  const pub = getPublic() || {};
+  const savedClientId = pub.gdriveClientId || "";
+
+  // ★ ユーザー要望: 「google driveに接続できていなかったときに、再接続の画面に直接行けるようにしてほしい。（Googleの画面）」
+  // Client ID が保存されている場合、アプリの中間モーダルを挟まずにダイレクトに Google の認証画面（GIS ポップアップ）を開く
+  if (savedClientId && !forceModal) {
+    try {
+      toast("☁ Google 認証画面を開いています…", "info", 1800);
+      const newToken = await requestGisToken(savedClientId);
+      if (newToken) {
+        toast("☁ Google Drive に再連携しました！再生を開始します", "ok");
+        return newToken;
+      }
+    } catch (err) {
+      console.warn("[drive-service] 直接認証失敗/キャンセル、モーダルへフォールバック:", err);
+      const msg = err && err.message ? err.message : "";
+      // ユーザーが明示的にポップアップを閉じた・キャンセルした場合は、モーダルを押し付けずに中断
+      if (/closed|dismissed|キャンセル|閉じられた/i.test(msg)) {
+        return null;
+      }
+      // ポップアップブロッカーでブロックされた場合やエラー時は手動モーダルへフォールバック
+    }
+  }
 
   _activeReconnectModalPromise = new Promise((resolve) => {
     let settled = false;
@@ -648,8 +682,6 @@ export function promptDriveReconnectModal({ track = null, reason = "" } = {}) {
       resolve(tokenVal || null);
     };
 
-    const pub = getPublic() || {};
-    const savedClientId = pub.gdriveClientId || "";
     const savedEmail = pub.gdriveUserEmail || "";
     const trackTitle = (track && track.title) ? track.title : "Google Drive の曲";
 

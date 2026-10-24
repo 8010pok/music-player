@@ -21,7 +21,7 @@
  */
 
 import { appState } from "../state.js";
-import { getBlob, getTrack, hasCachedBlob, cacheDriveTrackInBackground, isSuspectPartialHeaderDuration, recordHistory, updateTrack, getAllTracks } from "../store/library-db.js";
+import { getBlob, getTrack, getMemoryBlob, hasCachedBlob, cacheDriveTrackInBackground, isSuspectPartialHeaderDuration, recordHistory, updateTrack, getAllTracks } from "../store/library-db.js";
 import {
   applyEffectsSetting,
   applyEqGains,
@@ -175,13 +175,43 @@ export function prewarmTrack(trackId, { onlyIfCached = false } = {}) {
 
   entry.promise = (async () => {
     try {
-      if (onlyIfCached && typeof trackId === "string" && trackId.startsWith("gd-")) {
+      const isDrive = typeof trackId === "string" && trackId.startsWith("gd-");
+
+      // 1. インメモリ Blob キャッシュにある場合は 0ms で即座に Object URL を生成
+      const memBlob = getMemoryBlob(trackId);
+      if (memBlob) {
+        const url = URL.createObjectURL(memBlob);
+        entry.objectUrl = url;
+        entry.isStream = false;
+        return url;
+      }
+
+      // 2. Google Drive 曲の事前準備
+      if (isDrive) {
         const cached = await hasCachedBlob(trackId);
         if (!cached) {
-          prewarmCache.delete(trackId);
-          return null;
+          // 未キャッシュでも、EQ 無効時はダイレクトストリーム URL を事前生成して即時再生可能にする
+          if (!getPublic().enableAudioEffects) {
+            try {
+              const { getDriveToken, getDriveStreamUrl } = await import("../gdrive/drive-service.js");
+              const token = await getDriveToken();
+              if (token) {
+                const streamUrl = await getDriveStreamUrl(trackId, token);
+                if (streamUrl) {
+                  entry.objectUrl = streamUrl;
+                  entry.isStream = true;
+                  return streamUrl;
+                }
+              }
+            } catch (_) {}
+          }
+          if (onlyIfCached) {
+            prewarmCache.delete(trackId);
+            return null;
+          }
         }
       }
+
       const blob = await getBlob(trackId);
       if (!blob) {
         prewarmCache.delete(trackId);
@@ -653,6 +683,21 @@ function primeAudioElement() {
 
 export async function playTrackImmediate(track) {
   if (!track) return;
+  const memBlob = getMemoryBlob(track.id);
+  if (memBlob) {
+    const objectUrl = URL.createObjectURL(memBlob);
+    playPreloadedSync(state.queueIndex, track, objectUrl);
+    return;
+  }
+  const prewarmed = prewarmCache.get(track.id);
+  if (prewarmed && prewarmed.objectUrl) {
+    prewarmCache.delete(track.id);
+    playPreloadedSync(state.queueIndex, track, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
+    if (prewarmed.isStream) {
+      setTimeout(() => { cacheDriveTrackInBackground(track.id); }, 1200);
+    }
+    return;
+  }
   primeAudioElement();
   await loadAndPlay(track);
 }
@@ -674,15 +719,26 @@ export async function setQueueAndPlay(tracks, startIndex = 0) {
   if (!cur) return;
 
   // ★ ユーザー操作（タップ）の同期コールスタックで即座に再生を開始（再生ボタンを押さずに即再生）
-  // 1. もし prewarmCache に既に Object URL があれば完全同期で即座に再生 (User Gesture 100% 保持・ラグ 0ms)
-  const prewarmed = prewarmCache.get(cur.id);
-  if (prewarmed && prewarmed.objectUrl) {
-    prewarmCache.delete(cur.id);
-    playPreloadedSync(state.queueIndex, cur, prewarmed.objectUrl);
+  // 1. インメモリ Blob キャッシュにある場合は 0ms で即座に再生 (User Gesture 100% 保持・ラグ 0ms)
+  const memBlob = getMemoryBlob(cur.id);
+  if (memBlob) {
+    const objectUrl = URL.createObjectURL(memBlob);
+    playPreloadedSync(state.queueIndex, cur, objectUrl);
     return;
   }
 
-  // 2. まだメモリにない場合: ユーザー操作コンテキスト内で同期プライミングを行い
+  // 2. もし prewarmCache に既に URL (Object URL または ダイレクトストリーム URL) があれば完全同期で即座に再生 (ラグ 0ms)
+  const prewarmed = prewarmCache.get(cur.id);
+  if (prewarmed && prewarmed.objectUrl) {
+    prewarmCache.delete(cur.id);
+    playPreloadedSync(state.queueIndex, cur, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
+    if (prewarmed.isStream) {
+      setTimeout(() => { cacheDriveTrackInBackground(cur.id); }, 1200);
+    }
+    return;
+  }
+
+  // 3. まだメモリにない場合: ユーザー操作コンテキスト内で同期プライミングを行い
   //    ブラウザの User Gesture 失効を防ぎ、ワンタップで即座に再生させる
   primeAudioElement();
 
@@ -722,6 +778,21 @@ export async function playNext() {
   // 音が途切れないように)。それ以外は通常の loadAndPlay。
   if (state.preloadUrl && state.preloadTrackId === t.id) {
     playPreloadedSync(next, t, state.preloadUrl);
+    return;
+  }
+  const memBlob = getMemoryBlob(t.id);
+  if (memBlob) {
+    const objectUrl = URL.createObjectURL(memBlob);
+    playPreloadedSync(next, t, objectUrl);
+    return;
+  }
+  const prewarmed = prewarmCache.get(t.id);
+  if (prewarmed && prewarmed.objectUrl) {
+    prewarmCache.delete(t.id);
+    playPreloadedSync(next, t, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
+    if (prewarmed.isStream) {
+      setTimeout(() => { cacheDriveTrackInBackground(t.id); }, 1200);
+    }
     return;
   }
   state.queueIndex = next;
@@ -832,7 +903,7 @@ function schedulePreload() {
  *   必要でバックグラウンドで遅延するため)。duration はパース済みの
  *   track.duration を使って MediaSession に渡すので loadedmetadata 待ちは不要。
  */
-function playPreloadedSync(index, track, url) {
+function playPreloadedSync(index, track, url, { isDirectStream = false } = {}) {
   // 防御: url が無い場合は同期再生できないので通常パスへフォールバック。
   // (呼び出し側は state.preloadUrl を真偽判定済みだが、念のため)
   if (!url) {
@@ -852,7 +923,7 @@ function playPreloadedSync(index, track, url) {
   const oldUrl = state.currentObjectUrl;
   state.queueIndex = index;
   state.currentObjectUrl = url;
-  state.isDirectStream = false;
+  state.isDirectStream = !!isDirectStream;
   state.streamFallbackInProgress = false;
   // プリロード枠を消費 (URL は currentObjectUrl に移譲したので revoke しない)
   state.preloadUrl = null;
@@ -1020,6 +1091,21 @@ function advanceFromEnded() {
     playPreloadedSync(next, track, state.preloadUrl);
     return;
   }
+  const memBlob = getMemoryBlob(track.id);
+  if (memBlob) {
+    const objectUrl = URL.createObjectURL(memBlob);
+    playPreloadedSync(next, track, objectUrl);
+    return;
+  }
+  const prewarmed = prewarmCache.get(track.id);
+  if (prewarmed && prewarmed.objectUrl) {
+    prewarmCache.delete(track.id);
+    playPreloadedSync(next, track, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
+    if (prewarmed.isStream) {
+      setTimeout(() => { cacheDriveTrackInBackground(track.id); }, 1200);
+    }
+    return;
+  }
 
   // フォールバック: プリロード未完了 (プリロードが間に合わなかった / blob 無し等)。
   // フォアグラウンドなら問題なく動作する。バックグラウンドで間に合わなかった
@@ -1056,6 +1142,21 @@ export async function playPrev() {
   appState.set({ queueIndex: prev });
   const t = state.queue[prev];
   if (t) {
+    const memBlob = getMemoryBlob(t.id);
+    if (memBlob) {
+      const objectUrl = URL.createObjectURL(memBlob);
+      playPreloadedSync(prev, t, objectUrl);
+      return;
+    }
+    const prewarmed = prewarmCache.get(t.id);
+    if (prewarmed && prewarmed.objectUrl) {
+      prewarmCache.delete(t.id);
+      playPreloadedSync(prev, t, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
+      if (prewarmed.isStream) {
+        setTimeout(() => { cacheDriveTrackInBackground(t.id); }, 1200);
+      }
+      return;
+    }
     primeAudioElement();
     await loadAndPlay(t);
   }
@@ -1194,6 +1295,21 @@ export async function jumpToQueueIndex(index) {
   appState.set({ queueIndex: index });
   const track = state.queue[index];
   if (track) {
+    const memBlob = getMemoryBlob(track.id);
+    if (memBlob) {
+      const objectUrl = URL.createObjectURL(memBlob);
+      playPreloadedSync(index, track, objectUrl);
+      return;
+    }
+    const prewarmed = prewarmCache.get(track.id);
+    if (prewarmed && prewarmed.objectUrl) {
+      prewarmCache.delete(track.id);
+      playPreloadedSync(index, track, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
+      if (prewarmed.isStream) {
+        setTimeout(() => { cacheDriveTrackInBackground(track.id); }, 1200);
+      }
+      return;
+    }
     primeAudioElement();
     await loadAndPlay(track);
   }
@@ -1508,6 +1624,13 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
       targetUrl = prewarmed.objectUrl;
     } else if (prewarmed.promise) {
       targetUrl = await prewarmed.promise;
+    }
+    if (prewarmed.isStream) {
+      isDirectStream = true;
+      state.isDirectStream = true;
+      setTimeout(() => {
+        cacheDriveTrackInBackground(track.id);
+      }, 1200);
     }
   }
 

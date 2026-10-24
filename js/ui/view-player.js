@@ -10,7 +10,7 @@
  */
 
 import { appState } from "../state.js";
-import { getAudioElement, togglePlay, playNext, playPrev, seekTo, setShuffleMode, setRepeatMode, setPlaybackRate, setKeyShift, getKeyShift, getQueue, jumpToQueueIndex, removeFromQueue, setSleepTimer, getSleepTimerState, resolveTrackArtworkFromQueue, toAbsoluteUrl } from "../player/audio-engine.js";
+import { getAudioElement, togglePlay, playNext, playPrev, seekTo, setShuffleMode, setRepeatMode, setPlaybackRate, setKeyShift, getKeyShift, getQueue, jumpToQueueIndex, removeFromQueue, setSleepTimer, getSleepTimerState, resolveTrackArtworkFromQueue, toAbsoluteUrl, prewarmTrack } from "../player/audio-engine.js";
 import { getPublic, setPublic } from "../store/settings.js";
 import { extractMetadata } from "../metadata/index.js";
 import { initVisualizer, startVisualizer, stopVisualizer, decodePcmForVisualization } from "../player/visualizer.js";
@@ -897,7 +897,7 @@ export async function mount(root) {
         ? `<div class="queue-eq-anim"><span class="eq-bar b1"></span><span class="eq-bar b2"></span><span class="eq-bar b3"></span></div>`
         : `<span class="queue-idx">${idx + 1}</span>`;
       return `
-        <li class="player-queue-item ${isCur ? "is-current" : ""}" data-idx="${idx}">
+        <li class="player-queue-item ${isCur ? "is-current" : ""}" data-idx="${idx}" data-id="${escapeAttr(t.id)}">
           <div class="player-queue-idx-slot">${eq}</div>
           <div class="player-queue-item-info">
             <div class="player-queue-item-title"><span class="track-title-text">${escapeHtml(t.title || "(無題)")}</span>${t.memo ? `<span class="track-memo-badge" title="${escapeAttr(t.memo)}">${escapeHtml(t.memo)}</span>` : ""}</div>
@@ -942,6 +942,12 @@ export async function mount(root) {
     setQueueDrawerVisible(false);
   });
   if (refs.queueList) {
+    refs.queueList.addEventListener("pointerdown", (e) => {
+      const item = e.target.closest(".player-queue-item");
+      if (item && item.dataset.id) {
+        prewarmTrack(item.dataset.id);
+      }
+    }, { passive: true });
     refs.queueList.addEventListener("click", async (e) => {
       const removeBtn = e.target.closest('button[data-act="remove"]');
       if (removeBtn) {

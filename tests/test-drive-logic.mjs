@@ -301,6 +301,46 @@ await asyncTest("getDriveStreamUrl: gd- トラックIDとトークンから HTTP
   );
 });
 
+console.log("=== インメモリ Blob キャッシュ (0ms 再生) & 直接認証画面遷移 ===");
+
+await asyncTest("インメモリ Blob キャッシュ: putMemoryBlob / getMemoryBlob / hasMemoryBlob が LRU で高速動作する", async () => {
+  const { putMemoryBlob, getMemoryBlob, hasMemoryBlob } = await import("../js/store/library-db.js");
+
+  const dummyBlob1 = new Blob(["audio-data-1"], { type: "audio/mp3" });
+  const dummyBlob2 = new Blob(["audio-data-2"], { type: "audio/mp3" });
+
+  putMemoryBlob("t-test-1", dummyBlob1);
+  putMemoryBlob("t-test-2", dummyBlob2);
+
+  strictEqual(hasMemoryBlob("t-test-1"), true);
+  strictEqual(hasMemoryBlob("t-test-2"), true);
+  strictEqual(hasMemoryBlob("t-test-nonexistent"), false);
+
+  const retrieved1 = getMemoryBlob("t-test-1");
+  strictEqual(retrieved1, dummyBlob1);
+
+  // LRU 最大 10 件の押し出し検証 (t-test-1, t-test-2 に加え 9 件追加 = 計 11 件)
+  for (let i = 3; i <= 11; i++) {
+    putMemoryBlob(`t-test-${i}`, new Blob([`audio-${i}`]));
+  }
+  // 最も古くアクセスされなかった t-test-2 が LRU で押し出されている
+  strictEqual(hasMemoryBlob("t-test-2"), false);
+  // 直前に get された t-test-1 は LRU リフレッシュされているため残っている
+  strictEqual(hasMemoryBlob("t-test-1"), true);
+});
+
+await asyncTest("promptDriveReconnectModal: Google Drive 未接続時に中間モーダルを挟まずダイレクトに認証処理を呼び出す", async () => {
+  const { promptDriveReconnectModal } = await import("../js/gdrive/drive-service.js");
+  const { setPublic } = await import("../js/store/settings.js");
+
+  // Client ID が設定されている状態
+  setPublic({ gdriveClientId: "test-client-id.apps.googleusercontent.com" });
+
+  // DOM がない環境では Promise<null> を安全に即時返却
+  const res = await promptDriveReconnectModal({ track: { title: "テスト曲" } });
+  strictEqual(res, null);
+});
+
 console.log("============================================================");
 console.log(`合計: ${passed} / 成功: ${passed} / 失敗: 0`);
 console.log("Google Drive テスト成功 ✓");

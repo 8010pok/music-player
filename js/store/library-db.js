@@ -244,6 +244,9 @@ function ensureTrackMetadataInBackground(id, blob, extraPatch = null) {
  */
 export function putTrack(track, blob) {
   const cleanTrack = sanitizeRecordForIdb(track);
+  if (cleanTrack && cleanTrack.id && blob) {
+    putMemoryBlob(cleanTrack.id, blob);
+  }
   return withWriteRetry(async () => {
     const db = await openDb();
     const tx = db.transaction(["tracks", "blobs"], "readwrite");
@@ -319,6 +322,11 @@ export function bulkPutTracks(items) {
     }
 
     tx.oncomplete = () => {
+      for (const item of items) {
+        if (item && item.track && item.track.id && item.blob) {
+          putMemoryBlob(item.track.id, item.blob);
+        }
+      }
       for (const t of savedTracks) {
         notifyTrackUpdated(t, t);
       }
@@ -472,10 +480,44 @@ export async function getTrack(id) {
   return t;
 }
 
+// インメモリ Blob LRU キャッシュ (最大 10 曲)
+// 直近再生・プリウォームされた曲をメモリ保持し、重複 IndexedDB トランザクションを 0ms に短縮
+const _memoryBlobCache = new Map();
+const MAX_MEMORY_BLOB_CACHE = 10;
+
+export function putMemoryBlob(id, blob) {
+  if (!id || !blob) return;
+  if (_memoryBlobCache.has(id)) {
+    _memoryBlobCache.delete(id);
+  } else if (_memoryBlobCache.size >= MAX_MEMORY_BLOB_CACHE) {
+    const oldestKey = _memoryBlobCache.keys().next().value;
+    _memoryBlobCache.delete(oldestKey);
+  }
+  _memoryBlobCache.set(id, blob);
+}
+
+export function getMemoryBlob(id) {
+  if (!id || !_memoryBlobCache.has(id)) return null;
+  const blob = _memoryBlobCache.get(id);
+  _memoryBlobCache.delete(id);
+  _memoryBlobCache.set(id, blob);
+  return blob;
+}
+
+export function hasMemoryBlob(id) {
+  return !id ? false : _memoryBlobCache.has(id);
+}
+
 /**
  * トラック本体（Blob）取得
  */
 export async function getBlob(id) {
+  const mem = getMemoryBlob(id);
+  if (mem) {
+    ensureTrackMetadataInBackground(id, mem);
+    return mem;
+  }
+
   let row = null;
   try {
     const db = await openDb();
@@ -491,6 +533,7 @@ export async function getBlob(id) {
     }
   }
   if (row && row.blob) {
+    putMemoryBlob(id, row.blob);
     ensureTrackMetadataInBackground(id, row.blob);
     return row.blob;
   }
@@ -502,6 +545,7 @@ export async function getBlob(id) {
       const { fetchDriveAudioBlob } = await import("../gdrive/drive-service.js");
       const blob = await fetchDriveAudioBlob(driveFileId);
       if (blob) {
+        putMemoryBlob(id, blob);
         let shouldCache = true;
         try {
           const pub = getPublic();
@@ -543,6 +587,7 @@ export async function getBlob(id) {
  */
 export async function hasCachedBlob(id) {
   if (!id) return false;
+  if (hasMemoryBlob(id)) return true;
   // 非Drive曲はローカル保存済み
   if (typeof id === "string" && !id.startsWith("gd-")) return true;
   try {
@@ -771,6 +816,7 @@ export function setPlaylistsOrder(entries) {
  * トラック削除（blobも）
  */
 export function deleteTrack(id) {
+  if (id) _memoryBlobCache.delete(id);
   return withWriteRetry(async () => {
     const db = await openDb();
     const tx = db.transaction(["tracks", "blobs"], "readwrite");
@@ -990,6 +1036,7 @@ export function removeTrackFromAllPlaylists(trackId) {
  * すべてのライブラリデータを消去（設定 → 全消去用）
  */
 export function wipeLibrary() {
+  _memoryBlobCache.clear();
   return withWriteRetry(async () => {
     const db = await openDb();
     const tx = db.transaction(["tracks", "blobs", "playlists", "history"], "readwrite");
@@ -1023,6 +1070,11 @@ export async function getStorageEstimate() {
  * @returns {Promise<{ clearedCount: number }>}
  */
 export async function clearDriveBlobCache() {
+  for (const k of _memoryBlobCache.keys()) {
+    if (typeof k === "string" && k.startsWith("gd-")) {
+      _memoryBlobCache.delete(k);
+    }
+  }
   const db = await openDb();
   const allTracks = await getAllTracks();
   const driveTracks = allTracks.filter((t) => typeof t.id === "string" && t.id.startsWith("gd-"));

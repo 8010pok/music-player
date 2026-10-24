@@ -56,6 +56,7 @@ const SECRET_KEYS = ["apiKey", "apiSecret", "sessionKey", "gdriveAccessToken"];
  * 同じパースエラーが発生し続けるのを防ぐため。
  */
 export function getPublic() {
+  if (typeof localStorage === "undefined") return { ...PUBLIC_DEFAULTS };
   const raw = localStorage.getItem(KEY_PUBLIC);
   if (!raw) return { ...PUBLIC_DEFAULTS };
   try {
@@ -73,7 +74,9 @@ export function getPublic() {
 export function setPublic(patch) {
   const cur = getPublic();
   const next = { ...cur, ...patch };
-  localStorage.setItem(KEY_PUBLIC, JSON.stringify(next));
+  if (typeof localStorage !== "undefined") {
+    localStorage.setItem(KEY_PUBLIC, JSON.stringify(next));
+  }
   return next;
 }
 
@@ -82,6 +85,7 @@ export function setPublic(patch) {
  * 端末固有鍵で復号できない場合は null
  */
 export async function getSecret() {
+  if (typeof localStorage === "undefined") return null;
   const raw = localStorage.getItem(KEY_SECRET);
   if (!raw) return null;
   try {
