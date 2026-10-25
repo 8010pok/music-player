@@ -68,8 +68,20 @@ export function areTracksDuplicate(trackA, trackB) {
   if (!trackA || !trackB) return false;
   if (trackA.id === trackB.id) return true;
 
+  // ★ 必須条件: memoが異なるだけの曲は、別バージョン・別管理の意図があるため自動重複・自動統合しない
+  const memoA = (trackA.memo || "").trim();
+  const memoB = (trackB.memo || "").trim();
+  if (memoA && memoB && memoA !== memoB) {
+    return false;
+  }
+
   // Google Drive 同一ファイル
   if (trackA.driveFileId && trackB.driveFileId && trackA.driveFileId === trackB.driveFileId) {
+    return true;
+  }
+
+  // 音源ハッシュ同一
+  if (trackA.hash && trackB.hash && trackA.hash === trackB.hash) {
     return true;
   }
 
@@ -253,10 +265,26 @@ export async function mergeAndDeduplicate(primary, duplicate, playlists = null) 
   if (!primary.memo && duplicate.memo) {
     patch.memo = duplicate.memo;
     primary.memo = duplicate.memo;
+  } else if (primary.memo && duplicate.memo && primary.memo !== duplicate.memo) {
+    // 異なるメモが双方にある手動マージ時は両方の意図を保護
+    patch.memo = `${primary.memo} / ${duplicate.memo}`;
+    primary.memo = patch.memo;
   }
   if (!primary.loved && duplicate.loved) {
     patch.loved = true;
     primary.loved = true;
+  }
+  if (primary.enabled === undefined && duplicate.enabled !== undefined) {
+    patch.enabled = duplicate.enabled;
+    primary.enabled = duplicate.enabled;
+  }
+  if (primary.keyShift === undefined && duplicate.keyShift !== undefined) {
+    patch.keyShift = duplicate.keyShift;
+    primary.keyShift = duplicate.keyShift;
+  }
+  if (primary.gainDb === undefined && duplicate.gainDb !== undefined) {
+    patch.gainDb = duplicate.gainDb;
+    primary.gainDb = duplicate.gainDb;
   }
   if (!primary.lyrics && duplicate.lyrics) {
     patch.lyrics = duplicate.lyrics;

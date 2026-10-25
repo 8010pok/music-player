@@ -11,6 +11,7 @@
  */
 
 import { getPublic } from "./settings.js";
+import { recordTombstone, clearTombstones } from "./tombstone.js";
 
 const DB_NAME = "music-player-library";
 const DB_VERSION = 1;
@@ -350,6 +351,9 @@ export function bulkPutTracks(items) {
 function sanitizeRecordForIdb(rec) {
   if (!rec || typeof rec !== "object") return rec;
   const copy = { ...rec };
+  if (!copy.updatedAt) {
+    copy.updatedAt = copy.addedAt || Date.now();
+  }
   if (copy.artworkDataUrl && typeof copy.artworkDataUrl === "string" && copy.artworkDataUrl.startsWith("data:")) {
     // Base64 Data URL がある場合は生の Blob を IndexedDB に重複保存しない（iOS WebKit の stale Blob DataCloneError を完全防止）
     copy.artworkBlob = null;
@@ -680,6 +684,7 @@ export function updateTrack(id, patch) {
       const cur = req.result;
       if (!cur) { resolve(undefined); return; }
       Object.assign(cur, patch);
+      cur.updatedAt = patch.updatedAt || Date.now();
       const clean = sanitizeRecordForIdb(cur);
       if (stripBlob) {
         clean.artworkBlob = null;
@@ -736,6 +741,7 @@ export function bulkUpdateTracks(updates) {
           return;
         }
         Object.assign(cur, item.patch);
+        cur.updatedAt = item.patch.updatedAt || Date.now();
         const clean = sanitizeRecordForIdb(cur);
         if (stripBlob) {
           clean.artworkBlob = null;
@@ -813,10 +819,13 @@ export function setPlaylistsOrder(entries) {
 }
 
 /**
- * トラック削除（blobも）
+ * トラック削除（blobも削除し、端末間同期用Tombstoneを記録）
  */
 export function deleteTrack(id) {
-  if (id) _memoryBlobCache.delete(id);
+  if (id) {
+    _memoryBlobCache.delete(id);
+    recordTombstone(id, "track");
+  }
   return withWriteRetry(async () => {
     const db = await openDb();
     const tx = db.transaction(["tracks", "blobs"], "readwrite");
@@ -826,6 +835,38 @@ export function deleteTrack(id) {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
       tx.onabort = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
+    });
+  });
+}
+
+/**
+ * 複数トラックを一括削除（単一トランザクションで確実に削除しTombstone記録）
+ * @param {string[]} ids
+ * @returns {Promise<void>}
+ */
+export function bulkDeleteTracks(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return Promise.resolve();
+  for (const id of ids) {
+    if (id) {
+      _memoryBlobCache.delete(id);
+      recordTombstone(id, "track");
+    }
+  }
+  return withWriteRetry(async () => {
+    const db = await openDb();
+    const tx = db.transaction(["tracks", "blobs"], "readwrite");
+    const trackStore = tx.objectStore("tracks");
+    const blobStore = tx.objectStore("blobs");
+    for (const id of ids) {
+      if (id) {
+        trackStore.delete(id);
+        blobStore.delete(id);
+      }
+    }
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error("IndexedDB bulk delete tracks failed/aborted"));
+      tx.onabort = () => reject(tx.error || new Error("IndexedDB bulk delete tracks failed/aborted"));
     });
   });
 }
@@ -982,6 +1023,9 @@ export function removeTracksFromPlaylist(id, trackIdsToRemove) {
 }
 
 export function deletePlaylist(id) {
+  if (id) {
+    recordTombstone(id, "playlist");
+  }
   return withWriteRetry(async () => {
     const db = await openDb();
     const tx = db.transaction("playlists", "readwrite");
@@ -1037,6 +1081,7 @@ export function removeTrackFromAllPlaylists(trackId) {
  */
 export function wipeLibrary() {
   _memoryBlobCache.clear();
+  clearTombstones();
   return withWriteRetry(async () => {
     const db = await openDb();
     const tx = db.transaction(["tracks", "blobs", "playlists", "history"], "readwrite");

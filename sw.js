@@ -7,7 +7,7 @@
  * バージョンを上げると古いキャッシュは破棄される。
  */
 
-const CACHE_VERSION = "v1.9.1";
+const CACHE_VERSION = "v1.10.0";
 const STATIC_CACHE = `static-${CACHE_VERSION}`;
 const API_CACHE = `api-${CACHE_VERSION}`;
 const IMG_CACHE = `img-${CACHE_VERSION}`;
@@ -24,6 +24,7 @@ const PRECACHE_URLS = [
   "./js/router.js",
   "./js/state.js",
   "./js/store/crypto.js",
+  "./js/store/tombstone.js",
   "./js/store/library-db.js",
   "./js/store/queue-db.js",
   "./js/store/settings.js",
@@ -67,6 +68,7 @@ const PRECACHE_URLS = [
   "./js/workers/stats-worker.js",
   "./js/ui/components.js",
   "./js/ui/artwork-cache.js",
+  "./js/ui/artwork-fetcher-modal.js",
   "./js/ui/virtual-scroll.js",
   "./js/ui/metadata-editor.js",
   "./js/ui/normalize-modal.js",

@@ -73,6 +73,24 @@ export function toAbsoluteUrl(url) {
   return url;
 }
 
+/**
+ * 再生パフォーマンス計測用ヘルパー（開発・デバッグ用）
+ */
+function isPerfDebugEnabled() {
+  try {
+    if (typeof localStorage !== "undefined" && localStorage.getItem("debug_audio_perf") === "true") {
+      return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
+function logPerfMark(trackId, markName, startTime) {
+  if (!isPerfDebugEnabled()) return;
+  const elapsed = (performance.now() - startTime).toFixed(1);
+  console.log(`[AudioPerf] [${trackId}] ${markName}: +${elapsed}ms`);
+}
+
 // primeAudioElement の play() プロミス追跡用（AbortError 防止）
 let primePromise = null;
 
@@ -1567,6 +1585,8 @@ function isSupersededTransition(myToken, ownUrl) {
 
 async function loadAndPlay(track, { startTime = 0 } = {}) {
   if (!track) return;
+  const t0 = (typeof performance !== "undefined" && typeof performance.now === "function") ? performance.now() : Date.now();
+  logPerfMark(track.id, "start", t0);
 
   // ★ iOS: 再生開始のたびに(ユーザー操作起点で)audioSession.type="playback" を
   //   再宣言する。init 時の一度きり設定だけだと、コールド起動でメディアプレイヤー
@@ -1610,7 +1630,7 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
   applyKeyShift(trackKeyShift, audioEl);
   appState.set({ currentKeyShift: trackKeyShift });
 
-  // ★ Phase 0: 音源 URL / Blob の取得
+  // ★ Phase 0: 音源 URL / Blob の取得（FLAC・大容量ファイル高速化）
   let targetUrl = null;
   let blobErr = null;
   let isDirectStream = false;
@@ -1632,11 +1652,21 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
         cacheDriveTrackInBackground(track.id);
       }, 1200);
     }
+    if (targetUrl) logPerfMark(track.id, "prewarm_hit", t0);
+  }
+
+  // 1.5. インメモリ LRU Blob キャッシュ確認 (キャッシュ済み FLAC/MP3 を 0ms で URL 化)
+  if (!targetUrl) {
+    const memBlob = getMemoryBlob(track.id);
+    if (memBlob) {
+      targetUrl = URL.createObjectURL(memBlob);
+      logPerfMark(track.id, "memory_lru_hit", t0);
+    }
   }
 
   // 2. 未キャッシュの Google Drive 曲:
   //    - 未連携/期限切れならスキップせず「その場で再連携モーダル」を出して再連携後にそのまま再生
-  //    - 外出時（モバイル回線）でも待ち時間なく即再生できるよう、ダイレクトストリーミングURLを使用しつつ裏でキャッシュ
+  //    - FLAC や MP3 の巨大ダウンロード待ち（十数秒〜数十秒）を完全回避し、Range ストリーミングで即座に再生開始
   if (!targetUrl && isDriveTrack) {
     const cached = await hasCachedBlob(track.id).catch(() => false);
     if (!cached) {
@@ -1657,18 +1687,17 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
           }
           primeAudioElement();
         }
-        // WebAudio EQ エフェクト無効時は HTTP Range ダイレクトストリーミングで即座に再生開始（外出時でも約1秒で再生）
-        if (!getPublic().enableAudioEffects) {
-          const streamUrl = await getDriveStreamUrl(track.id, token);
-          if (streamUrl) {
-            targetUrl = streamUrl;
-            isDirectStream = true;
-            state.isDirectStream = true;
-            // 再生開始と並行してバックグラウンドで IndexedDB キャッシュと完全メタデータ・再生時間補完を行う
-            setTimeout(() => {
-              cacheDriveTrackInBackground(track.id);
-            }, 1200);
-          }
+        // ダイレクトストリーミング URL を取得して即座に再生開始（FLAC 全量 DL を待たない）
+        const streamUrl = await getDriveStreamUrl(track.id, token);
+        if (streamUrl) {
+          targetUrl = streamUrl;
+          isDirectStream = true;
+          state.isDirectStream = true;
+          logPerfMark(track.id, "stream_url_ready", t0);
+          // 再生開始と並行してバックグラウンドで IndexedDB キャッシュと完全メタデータ補完を行う
+          setTimeout(() => {
+            cacheDriveTrackInBackground(track.id);
+          }, 1200);
         }
       } catch (driveErr) {
         console.warn("[audio-engine] Drive ストリーム準備警告、通常取得へフォールバック:", driveErr);
@@ -1676,13 +1705,15 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
     }
   }
 
-  // 3. 音源 Blob 取得 (ローカル曲、キャッシュ済み Drive 曲、または EQ 有効時 / ストリームフォールバック)
+  // 3. 音源 Blob 取得 (ローカル曲、キャッシュ済み Drive 曲、またはストリームフォールバック)
   if (!targetUrl) {
+    logPerfMark(track.id, "getBlob_start", t0);
     let blob = await getBlob(track.id).catch((e) => {
       console.warn("[audio-engine] getBlob 失敗", track.id, e);
       blobErr = e;
       return null;
     });
+    logPerfMark(track.id, "getBlob_done", t0);
     // Drive 曲で 401 / 未接続エラーだった場合は、スキップせずその場で再連携モーダルを出して再試行
     if (!blob && isDriveTrack && blobErr && /401|接続されていません|期限/.test(blobErr.message || "")) {
       try {
@@ -1754,6 +1785,16 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
     const oldUrl = state.currentObjectUrl;
     state.currentObjectUrl = targetUrl;
     audioEl.src = targetUrl;
+    logPerfMark(track.id, "url_set", t0);
+
+    if (isPerfDebugEnabled()) {
+      const onMeta = () => { logPerfMark(track.id, "loadedmetadata", t0); audioEl.removeEventListener("loadedmetadata", onMeta); };
+      const onCanPlay = () => { logPerfMark(track.id, "canplay", t0); audioEl.removeEventListener("canplay", onCanPlay); };
+      const onPlaying = () => { logPerfMark(track.id, "playing", t0); audioEl.removeEventListener("playing", onPlaying); };
+      audioEl.addEventListener("loadedmetadata", onMeta);
+      audioEl.addEventListener("canplay", onCanPlay);
+      audioEl.addEventListener("playing", onPlaying);
+    }
     audioEl.loop = false;
     audioEl.playbackRate = getEffectivePlaybackRate();
     applyTrackVolume(audioEl, track);

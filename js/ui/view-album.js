@@ -15,6 +15,7 @@ import { go } from "../router.js";
 import { escapeHtml, escapeAttr, toast, confirm, openModal, dismissActiveModal, closeActiveModalSync, promptForm } from "./components.js";
 import { editTrackMetadata, editAlbumMetadata, editSelectedTracksMetadata } from "./metadata-editor.js";
 import { openPlayerSoundModal } from "./view-player.js";
+import { openArtworkFetcherModal } from "./artwork-fetcher-modal.js";
 
 let album = null;
 let unsubState = null;
@@ -163,6 +164,17 @@ export async function mount(root, options = {}) {
   }
   if (refs.artWrapBtn) {
     refs.artWrapBtn.addEventListener("click", openAlbumEditor);
+  }
+  if (refs.fetchArtBtn) {
+    refs.fetchArtBtn.addEventListener("click", () => {
+      if (!album || !Array.isArray(album.tracks) || album.tracks.length === 0) return;
+      openArtworkFetcherModal({
+        tracks: album.tracks,
+        albumName: album.title,
+        artistName: album.albumArtist,
+        onUpdated: () => mount(root),
+      });
+    });
   }
   if (refs.cacheAllBtn) {
     refs.cacheAllBtn.addEventListener("click", async () => {
@@ -315,6 +327,9 @@ function render(alb) {
           <svg class="ic" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
           <span>一括編集</span>
         </button>
+        <button class="album-action-btn secondary" id="btn-album-fetch-art" title="アルバムのジャケット画像のみを高画質検索・差し替え">
+          <span>🖼️ 画像変更</span>
+        </button>
         <button class="album-action-btn secondary ${isSelectMode ? "is-active" : ""}" id="btn-album-select-mode" title="アルバム内の任意の曲を選択して一括編集（別アルバムへ分割など）">
           <span>${isSelectMode ? "✕ 選択終了" : "☑️ 曲を選択"}</span>
         </button>
@@ -413,6 +428,7 @@ function collectRefs(root) {
     cacheAllBtn: root.querySelector("#btn-album-cache-all"),
     cacheBtnText: root.querySelector("#album-cache-btn-text"),
     editAlbumBtn: root.querySelector("#btn-album-edit"),
+    fetchArtBtn: root.querySelector("#btn-album-fetch-art"),
     selectModeBtn: root.querySelector("#btn-album-select-mode"),
     bulkBar: root.querySelector("#album-bulk-bar"),
     bulkCount: root.querySelector("#album-bulk-count"),
@@ -702,7 +718,11 @@ function openTrackActionsModal(track, root) {
       await updateTrack(track.id, { loved: nextLoved });
       track.loved = nextLoved;
       toast(nextLoved ? "お気に入りに追加しました" : "お気に入りを解除しました", "ok");
-      mount(root);
+      const savedY = typeof window !== "undefined" ? window.scrollY : 0;
+      await mount(root);
+      if (typeof window !== "undefined") {
+        window.scrollTo({ top: savedY, behavior: "instant" });
+      }
     } else if (act === "delete") {
       closeMenu();
       const yes = await confirm(`「${track.title || "(無題)"}」を削除しますか？\n（曲データは完全に削除されます）`, { danger: true, okLabel: "削除" });
@@ -722,10 +742,14 @@ function openTrackActionsModal(track, root) {
         album.tracks = album.tracks.filter((x) => x.id !== track.id);
         if (album.tracks.length === 0) {
           toast("アルバムの全曲が削除されました", "ok");
-          go("albums");
+          go("library", { tab: "albums" });
         } else {
           toast("削除しました", "ok");
-          mount(root);
+          const savedY = typeof window !== "undefined" ? window.scrollY : 0;
+          await mount(root);
+          if (typeof window !== "undefined") {
+            window.scrollTo({ top: savedY, behavior: "instant" });
+          }
         }
       }
     }

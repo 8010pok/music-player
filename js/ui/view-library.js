@@ -11,7 +11,7 @@
 
 import { extractMetadata, readDurationViaAudio } from "../metadata/index.js";
 import { mimeFromName, formatFromName } from "../metadata/util.js";
-import { putTrack, getTrack, getAllTracks, updateTrack, setTracksOrder, deleteTrack, getStorageEstimate, getBlob, removeTrackFromAllPlaylists, getAllPlaylists, savePlaylist, addTracksToPlaylist } from "../store/library-db.js";
+import { putTrack, getTrack, getAllTracks, updateTrack, setTracksOrder, deleteTrack, bulkDeleteTracks, getStorageEstimate, getBlob, removeTrackFromAllPlaylists, getAllPlaylists, savePlaylist, addTracksToPlaylist } from "../store/library-db.js";
 import { setQueueAndPlay, stopPlayback, prewarmTrack, prewarmTracks, playNextTrack, addToQueueEnd } from "../player/audio-engine.js";
 import { toast, confirm, openModal, dismissActiveModal, closeActiveModalSync, promptForm, escapeHtml, escapeAttr } from "./components.js";
 import { appState } from "../state.js";
@@ -22,6 +22,7 @@ import { openPlayerSoundModal } from "./view-player.js";
 import { openDriveImportModal, isDriveConnected } from "../gdrive/drive-service.js";
 import { openYouTubeDownloadModal } from "./youtube-modal.js";
 import { openVideoExtractModal } from "./video-extract-modal.js";
+import { openArtworkFetcherModal } from "./artwork-fetcher-modal.js";
 import { exportLibraryToDrive, importLibraryFromDrive, getDriveSyncFileInfo, syncLibraryWithDrive, recordLibraryModified } from "../store/sync-service.js";
 import { groupTracksIntoAlbums, sortAlbums } from "../metadata/album-util.js";
 import { groupTracksIntoArtists, sortArtists, getIndexChar, JAPANESE_INDEX_CHARS } from "../metadata/artist-util.js";
@@ -414,6 +415,11 @@ export async function mount(root) {
       openAddSelectedTracksToPlaylistModal(selected, refs);
     });
   }
+  if (refs.bulkDeleteBtn) {
+    refs.bulkDeleteBtn.addEventListener("click", () => {
+      bulkDeleteSelectedTracks(refs);
+    });
+  }
 
   // クイックフィルタ（Spotify風チップバー）
   if (refs.quickFilterBar) {
@@ -430,14 +436,67 @@ export async function mount(root) {
     });
   }
 
-  // 一覧クリック委譲
-  refs.list.addEventListener("click", (e) => onListClick(e, refs));
+  // 長押し（Long Press）による複数選択モード移行 ＆ クリック委譲
+  let longPressTimer = null;
+  let longPressStartPos = null;
+  let suppressClickForLongPress = false;
+
+  const cancelLongPress = () => {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+    longPressStartPos = null;
+  };
+
   refs.list.addEventListener("pointerdown", (e) => {
     const row = e.target.closest(".track-row");
     if (row && row.dataset.id) {
       prewarmTrack(row.dataset.id, { onlyIfCached: true });
     }
-  }, { passive: true });
+    if (e.target.closest("button, [data-act], .drag-handle")) return;
+    if (!row || !row.dataset.id) return;
+    if (isSelectMode) return;
+
+    longPressStartPos = { x: e.clientX, y: e.clientY };
+    longPressTimer = setTimeout(() => {
+      longPressTimer = null;
+      suppressClickForLongPress = true;
+      toggleSelectMode(refs, true);
+      toggleTrackSelectionInList(row.dataset.id, row, refs);
+      if (typeof navigator !== "undefined" && navigator.vibrate) {
+        try { navigator.vibrate(40); } catch (_) {}
+      }
+    }, 450);
+  });
+
+  refs.list.addEventListener("pointermove", (e) => {
+    if (!longPressTimer || !longPressStartPos) return;
+    const dx = Math.abs(e.clientX - longPressStartPos.x);
+    const dy = Math.abs(e.clientY - longPressStartPos.y);
+    if (dx > 10 || dy > 10) {
+      cancelLongPress();
+    }
+  });
+
+  refs.list.addEventListener("pointerup", cancelLongPress);
+  refs.list.addEventListener("pointercancel", cancelLongPress);
+  refs.list.addEventListener("contextmenu", (e) => {
+    if (isSelectMode || longPressTimer) {
+      e.preventDefault();
+    }
+  });
+
+  // 一覧クリック委譲
+  refs.list.addEventListener("click", (e) => {
+    if (suppressClickForLongPress) {
+      suppressClickForLongPress = false;
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    onListClick(e, refs);
+  });
 
   // 並び替え（手動ソート時のみ動作）
   const cleanupReorder = installReorder(refs);
@@ -697,6 +756,7 @@ function render() {
           <div class="bulk-edit-bar-actions">
             <button type="button" class="btn primary bulk-action-btn" id="btn-lib-bulk-edit" disabled>✏️ 一括編集 (アルバム変更等)</button>
             <button type="button" class="btn bulk-action-btn" id="btn-lib-bulk-playlist" disabled>📑 プレイリストへ追加</button>
+            <button type="button" class="btn danger bulk-action-btn" id="btn-lib-bulk-delete" disabled>🗑️ 一括削除</button>
             <button type="button" class="btn bulk-action-btn" id="btn-lib-select-done">✕ 完了</button>
           </div>
         </div>
@@ -738,6 +798,7 @@ function collectRefs(root) {
     selectClearBtn: root.querySelector("#btn-lib-select-clear"),
     bulkEditBtn: root.querySelector("#btn-lib-bulk-edit"),
     bulkPlaylistBtn: root.querySelector("#btn-lib-bulk-playlist"),
+    bulkDeleteBtn: root.querySelector("#btn-lib-bulk-delete"),
     selectDoneBtn: root.querySelector("#btn-lib-select-done"),
     quickFilterBar: root.querySelector("#track-quick-filter-bar"),
     libStats: root.querySelector("#lib-stats"),
@@ -1112,6 +1173,9 @@ function updateBulkBarUI(refs) {
   if (refs.bulkPlaylistBtn) {
     refs.bulkPlaylistBtn.disabled = count === 0;
   }
+  if (refs.bulkDeleteBtn) {
+    refs.bulkDeleteBtn.disabled = count === 0;
+  }
 }
 
 function toggleTrackSelectionInList(id, row, refs) {
@@ -1138,6 +1202,19 @@ function toggleTrackSelectionInList(id, row, refs) {
  * クリック委譲
  */
 async function onListClick(e, refs) {
+  // PC での Shift / Ctrl / Command クリックで即座に複数選択モード＆トグル
+  if (e.shiftKey || e.ctrlKey || e.metaKey) {
+    const row = e.target.closest(".track-row");
+    if (row && row.dataset.id && !e.target.closest("button[data-act]")) {
+      e.preventDefault();
+      if (!isSelectMode) {
+        toggleSelectMode(refs, true);
+      }
+      toggleTrackSelectionInList(row.dataset.id, row, refs);
+      return;
+    }
+  }
+
   // 選択モード中はチェックボックスまたは行全体のクリックで選択トグル（アクションボタン以外）
   const btn = e.target.closest("button[data-act]");
   if (!btn) {
@@ -1262,7 +1339,7 @@ function toggleTrackEnabled(t, refs, btn = null) {
 }
 
 /**
- * 曲削除（確認ダイアログ付き）
+ * 曲削除（確認ダイアログ付き、削除前のスクロール・画面位置維持）
  */
 async function deleteTrackWithConfirm(t, refs) {
   const id = t.id;
@@ -1271,6 +1348,7 @@ async function deleteTrackWithConfirm(t, refs) {
   if (appState.get().currentTrack?.id === id) {
     stopPlayback();
   }
+  const savedScrollY = typeof window !== "undefined" ? window.scrollY : 0;
   try {
     await deleteTrack(id);
   } catch (e) {
@@ -1284,8 +1362,61 @@ async function deleteTrackWithConfirm(t, refs) {
   recordLibraryModified();
   tracksCache = tracksCache.filter((x) => x.id !== id);
   renderList(refs);
+  if (typeof window !== "undefined") {
+    window.scrollTo({ top: savedScrollY, behavior: "instant" });
+  }
   try { await refreshStorage(refs); } catch (e) { console.warn("削除後のストレージ表示更新に失敗", e); }
   toast("削除しました", "ok");
+}
+
+/**
+ * 複数選択した曲を一括削除（単一トランザクション、スクロール・状態維持）
+ */
+async function bulkDeleteSelectedTracks(refs) {
+  const selectedIds = Array.from(selectedTrackIds);
+  if (selectedIds.length === 0) return;
+
+  const yes = await confirm(
+    `選択した ${selectedIds.length} 曲を一括削除しますか？\n（ライブラリおよびローカル音源データが完全に削除されます。Google Drive上の元ファイルは削除されません）`,
+    { danger: true, okLabel: "一括削除" }
+  );
+  if (!yes) return;
+
+  const current = appState.get().currentTrack;
+  if (current && selectedIds.includes(current.id)) {
+    stopPlayback();
+  }
+
+  const savedScrollY = typeof window !== "undefined" ? window.scrollY : 0;
+
+  try {
+    await bulkDeleteTracks(selectedIds);
+  } catch (err) {
+    console.warn("一括削除エラー:", err);
+    toast("一部またはすべての曲の削除に失敗しました", "err");
+    return;
+  }
+
+  // 関連データ（プレイリスト所属・アートワークキャッシュ等）の後処理
+  for (const id of selectedIds) {
+    enabledWriteChains.delete(id);
+    removeTrackFromAllPlaylists(id).catch(() => {});
+    releaseArtwork(id);
+  }
+
+  recordLibraryModified();
+  const selectedSet = new Set(selectedIds);
+  tracksCache = tracksCache.filter((t) => !selectedSet.has(t.id));
+
+  toggleSelectMode(refs, false);
+  renderList(refs);
+
+  if (typeof window !== "undefined") {
+    window.scrollTo({ top: savedScrollY, behavior: "instant" });
+  }
+
+  try { await refreshStorage(refs); } catch (e) { console.warn("削除後のストレージ表示更新に失敗", e); }
+  toast(`${selectedIds.length} 曲を一括削除しました`, "ok");
 }
 
 /**
@@ -1333,6 +1464,10 @@ function openLibraryTrackActionsModal(track, refs) {
         <span class="track-menu-btn-icon">🎵</span>
         <span class="track-menu-btn-label">${track.keyShift && track.keyShift !== 0 ? `キー (${track.keyShift > 0 ? "+" : ""}${track.keyShift})` : "キー変更"}</span>
       </button>
+      <button type="button" class="track-menu-btn" data-act="fetch-art">
+        <span class="track-menu-btn-icon">🖼️</span>
+        <span class="track-menu-btn-label">画像のみ変更</span>
+      </button>
       <button type="button" class="track-menu-btn" data-act="love">
         <span class="track-menu-btn-icon">${isLoved ? "💔" : "❤️"}</span>
         <span class="track-menu-btn-label">${isLoved ? "お気に入り解除" : "お気に入り"}</span>
@@ -1379,6 +1514,16 @@ function openLibraryTrackActionsModal(track, refs) {
     if (act === "key-change") {
       closeMenu();
       openPlayerSoundModal(track);
+      return;
+    }
+    if (act === "fetch-art") {
+      closeMenu();
+      openArtworkFetcherModal({
+        tracks: [track],
+        onUpdated: () => {
+          reloadTracks(refs);
+        },
+      });
       return;
     }
     if (act === "add-queue") {
