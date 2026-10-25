@@ -215,6 +215,21 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
         conflictsCount++;
       }
 
+      const isIncomingNewer = (incoming.updatedAt || incoming.addedAt || 0) >= (existing.updatedAt || existing.addedAt || 0);
+
+      // memo のスマートマージ: 片方に値がある場合は値がある方を優先。双方に値があり異なる場合は更新時刻が新しい方を優先
+      let mergedMemo = existing.memo || "";
+      if (incoming.memo && !existing.memo) {
+        mergedMemo = incoming.memo;
+      } else if (existing.memo && !incoming.memo) {
+        mergedMemo = existing.memo;
+      } else if (incoming.memo !== undefined) {
+        mergedMemo = isIncomingNewer ? incoming.memo : (existing.memo || "");
+      }
+
+      // loved のスマートマージ: どちらかの端末でお気に入りにされた場合は維持
+      const mergedLoved = (incoming.loved || existing.loved) ? true : (isIncomingNewer ? !!incoming.loved : !!existing.loved);
+
       // 既存曲がある場合: メタデータを安全にマージ
       // 既存の音源 Blob や artworkBlob は絶対に破壊しない！
       const merged = {
@@ -223,13 +238,13 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
         artist: incoming.artist || existing.artist,
         album: incoming.album || existing.album,
         albumArtist: incoming.albumArtist !== undefined ? incoming.albumArtist : existing.albumArtist,
-        memo: incoming.memo !== undefined ? incoming.memo : (existing.memo || ""),
+        memo: mergedMemo,
         trackNo: incoming.trackNo || existing.trackNo,
         discNo: incoming.discNo || existing.discNo,
         year: incoming.year || existing.year,
         genre: incoming.genre || existing.genre,
         userEdited: incoming.userEdited !== undefined ? incoming.userEdited : existing.userEdited,
-        loved: incoming.loved !== undefined ? incoming.loved : existing.loved,
+        loved: mergedLoved,
         order: typeof incoming.order === "number" ? incoming.order : existing.order,
         enabled: incoming.enabled !== undefined ? incoming.enabled : (existing.enabled !== undefined ? existing.enabled : true),
         playCount: Math.max(existing.playCount || 0, incoming.playCount || 0),
@@ -238,12 +253,24 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
       };
 
       // キーチェンジ & ノーマライズ情報の完全同期
-      if (incoming.keyShift !== undefined) merged.keyShift = incoming.keyShift;
-      if (incoming.gainDb !== undefined) merged.gainDb = incoming.gainDb;
+      if (incoming.keyShift !== undefined) {
+        if (incoming.keyShift !== 0 && (!existing.keyShift || existing.keyShift === 0)) {
+          merged.keyShift = incoming.keyShift;
+        } else if (isIncomingNewer) {
+          merged.keyShift = incoming.keyShift;
+        }
+      }
+      if (incoming.gainDb !== undefined) {
+        if (incoming.gainDb !== 0 && (!existing.gainDb || existing.gainDb === 0)) {
+          merged.gainDb = incoming.gainDb;
+        } else if (isIncomingNewer) {
+          merged.gainDb = incoming.gainDb;
+        }
+      }
       if (incoming.hasArtwork !== undefined) merged.hasArtwork = incoming.hasArtwork;
 
       // 歌詞も同期
-      if (incoming.lyrics) {
+      if (incoming.lyrics && (!existing.lyrics || isIncomingNewer)) {
         merged.lyrics = incoming.lyrics;
       }
 
@@ -255,8 +282,16 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
       if (incoming.originalPeakDb !== undefined) merged.originalPeakDb = incoming.originalPeakDb;
 
       // 評価・コメント・更新時刻
-      if (incoming.rating !== undefined) merged.rating = incoming.rating;
-      if (incoming.comments !== undefined) merged.comments = incoming.comments;
+      if (incoming.rating !== undefined) {
+        if (incoming.rating > 0 && (!existing.rating || existing.rating === 0)) {
+          merged.rating = incoming.rating;
+        } else if (isIncomingNewer) {
+          merged.rating = incoming.rating;
+        }
+      }
+      if (incoming.comments !== undefined) {
+        merged.comments = isIncomingNewer ? incoming.comments : (existing.comments || incoming.comments);
+      }
       if (incoming.userEditedAt) {
         merged.userEditedAt = Math.max(existing.userEditedAt || 0, incoming.userEditedAt || 0);
       }

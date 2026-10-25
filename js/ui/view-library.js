@@ -1408,6 +1408,14 @@ async function bulkDeleteSelectedTracks(refs) {
   const selectedSet = new Set(selectedIds);
   tracksCache = tracksCache.filter((t) => !selectedSet.has(t.id));
 
+  // 現在の再生キューからも削除対象を除去
+  try {
+    const { queue } = appState.get();
+    if (Array.isArray(queue) && queue.some((t) => selectedSet.has(t.id))) {
+      appState.set({ queue: queue.filter((t) => !selectedSet.has(t.id)) });
+    }
+  } catch (_) {}
+
   toggleSelectMode(refs, false);
   renderList(refs);
 
