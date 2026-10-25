@@ -137,17 +137,38 @@ test("端末IDが生成され永続化されること", () => {
   strictEqual(devId1, devId2, "同一端末では同一IDが返ること");
 });
 
-test("Tombstoneの記録と期限切れ自動パージ", () => {
+test("Tombstoneの記録と365日期限切れ自動パージ", () => {
   clearTombstones();
   const now = Date.now();
   recordTombstone("track-del-1", "track", now);
-  recordTombstone("track-old", "track", now - 35 * 24 * 3600 * 1000); // 35日前（期限切れ）
+  recordTombstone("track-valid-300d", "track", now - 300 * 24 * 3600 * 1000); // 300日前 (365日以内で有効保持)
+  recordTombstone("track-ancient-400d", "track", now - 400 * 24 * 3600 * 1000); // 400日前（365日超で期限切れパージ）
 
   const list = getTombstones();
-  strictEqual(list.length, 1, "期限切れの古い項目は自動パージされ、有効な1件のみ残ること");
-  strictEqual(list[0].id, "track-del-1");
-  ok(isTombstoned("track-del-1", now - 1000), "削除日時より前のエンティティは削除済みと判定されること");
-  strictEqual(isTombstoned("track-del-1", now + 10000), false, "削除日時より後に再作成されたものは削除済みと判定されないこと");
+  strictEqual(list.length, 2, "365日以内の2件は残り、400日前の項目のみ自動パージされること");
+  ok(list.some(t => t.id === "track-del-1"));
+  ok(list.some(t => t.id === "track-valid-300d"));
+  ok(!list.some(t => t.id === "track-ancient-400d"));
+
+  ok(isTombstoned("track-del-1", now - 1000, "track"), "削除日時より前のエンティティは削除済みと判定されること");
+  strictEqual(isTombstoned("track-del-1", now + 10000, "track"), false, "削除日時より後に再作成されたものは削除済みと判定されないこと");
+});
+
+test("Track と Playlist で同一IDが存在しても複合キーで衝突しないこと", () => {
+  clearTombstones();
+  const now = Date.now();
+  const sameId = "shared-id-12345";
+
+  recordTombstone(sameId, "track", now);
+  recordTombstone(sameId, "playlist", now);
+
+  const list = getTombstones();
+  strictEqual(list.length, 2, "同一IDでもtrackとplaylistの双方が保持されること");
+  ok(list.some(t => t.id === sameId && t.type === "track"));
+  ok(list.some(t => t.id === sameId && t.type === "playlist"));
+
+  strictEqual(isTombstoned(sameId, now - 1000, "track"), true, "trackとして削除判定");
+  strictEqual(isTombstoned(sameId, now - 1000, "playlist"), true, "playlistとして削除判定");
 });
 
 test("リモートTombstoneのマージ", () => {

@@ -17,6 +17,54 @@ const DB_NAME = "music-player-library";
 const DB_VERSION = 1;
 
 let _dbPromise = null;
+let _mutationListeners = [];
+let _syncScopeActive = false;
+
+/**
+ * 同期インポート処理中のスコープを設定（同期由来の書き込みでは dirty 通知を抑止）
+ * @param {boolean} active
+ */
+export function setSyncScope(active) {
+  _syncScopeActive = !!active;
+}
+
+/**
+ * 現在同期スコープ内（インポート中）かどうかを判定
+ * @returns {boolean}
+ */
+export function isSyncScopeActive() {
+  return _syncScopeActive;
+}
+
+/**
+ * ライブラリ変更通知リスナーを登録
+ * @param {Function} cb
+ * @returns {Function} 登録解除関数
+ */
+export function onLibraryMutated(cb) {
+  if (typeof cb === "function") {
+    _mutationListeners.push(cb);
+  }
+  return () => {
+    _mutationListeners = _mutationListeners.filter((fn) => fn !== cb);
+  };
+}
+
+/**
+ * ライブラリ変更が発生したことを購読者へ通知
+ * @param {string} mutationType 変更種別
+ * @param {any} [details]
+ */
+export function notifyLibraryMutated(mutationType, details) {
+  if (_syncScopeActive) return; // 同期インポート中は dirty 通知を抑止
+  for (const cb of _mutationListeners) {
+    try {
+      cb(mutationType, details);
+    } catch (e) {
+      console.warn("[library-db] onLibraryMutated リスナーエラー:", e);
+    }
+  }
+}
 
 function openDb() {
   if (_dbPromise) return _dbPromise;
@@ -258,6 +306,7 @@ export function putTrack(track, blob) {
     return new Promise((resolve, reject) => {
       tx.oncomplete = () => {
         if (cleanTrack) notifyTrackUpdated(cleanTrack, cleanTrack);
+        notifyLibraryMutated("track:put", cleanTrack);
         resolve();
       };
       tx.onerror = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
@@ -275,6 +324,7 @@ export function putTrack(track, blob) {
         return new Promise((resolve, reject) => {
           tx.oncomplete = () => {
             notifyTrackUpdated(stripped, stripped);
+            notifyLibraryMutated("track:put", stripped);
             resolve();
           };
           tx.onerror = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
@@ -331,6 +381,7 @@ export function bulkPutTracks(items) {
       for (const t of savedTracks) {
         notifyTrackUpdated(t, t);
       }
+      notifyLibraryMutated("track:bulkPut", savedTracks);
       resolve(savedTracks);
     };
     tx.onerror = () => reject(tx.error || new Error("IndexedDB bulk put failed/aborted"));
@@ -701,6 +752,7 @@ export function updateTrack(id, patch) {
     req.onerror = () => reject(req.error);
     tx.oncomplete = () => {
       if (updated) notifyTrackUpdated(updated, patch);
+      notifyLibraryMutated("track:update", { id, patch });
       resolve(updated);
     };
     tx.onerror  = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
@@ -760,6 +812,7 @@ export function bulkUpdateTracks(updates) {
       for (const u of updatedList) {
         notifyTrackUpdated(u.track, u.patch);
       }
+      notifyLibraryMutated("track:bulkUpdate", updates);
       resolve(updatedList.map((u) => u.track));
     };
     tx.onerror = () => reject(tx.error || new Error("IndexedDB bulk track write failed/aborted"));
@@ -802,7 +855,10 @@ function bulkSetOrder(storeName, entries, { bumpUpdatedAt = false } = {}) {
       };
       // 個別 get のエラーは tx を abort させ、下の onabort/onerror で reject される。
     }
-    tx.oncomplete = () => resolve();
+    tx.oncomplete = () => {
+      notifyLibraryMutated("order:update", { storeName, entries });
+      resolve();
+    };
     tx.onerror = () => reject(tx.error || new Error("IndexedDB bulk order write failed/aborted"));
     tx.onabort = () => reject(tx.error || new Error("IndexedDB bulk order write failed/aborted"));
   })));
@@ -824,7 +880,10 @@ export function setPlaylistsOrder(entries) {
 export function deleteTrack(id) {
   if (id) {
     _memoryBlobCache.delete(id);
-    recordTombstone(id, "track");
+    const tombRes = recordTombstone(id, "track");
+    if (tombRes && !tombRes.ok) {
+      console.warn(`[library-db] ⚠️ 曲 ${id} の Tombstone 記録に失敗しました:`, tombRes.error);
+    }
   }
   return withWriteRetry(async () => {
     const db = await openDb();
@@ -832,7 +891,10 @@ export function deleteTrack(id) {
     tx.objectStore("tracks").delete(id);
     tx.objectStore("blobs").delete(id);
     return new Promise((resolve, reject) => {
-      tx.oncomplete = () => resolve();
+      tx.oncomplete = () => {
+        notifyLibraryMutated("track:delete", { id });
+        resolve();
+      };
       tx.onerror = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
       tx.onabort = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
     });
@@ -849,7 +911,10 @@ export function bulkDeleteTracks(ids) {
   for (const id of ids) {
     if (id) {
       _memoryBlobCache.delete(id);
-      recordTombstone(id, "track");
+      const tombRes = recordTombstone(id, "track");
+      if (tombRes && !tombRes.ok) {
+        console.warn(`[library-db] ⚠️ 曲 ${id} の一括削除 Tombstone 記録に失敗:`, tombRes.error);
+      }
     }
   }
   return withWriteRetry(async () => {
@@ -864,7 +929,10 @@ export function bulkDeleteTracks(ids) {
       }
     }
     return new Promise((resolve, reject) => {
-      tx.oncomplete = () => resolve();
+      tx.oncomplete = () => {
+        notifyLibraryMutated("track:bulkDelete", { ids });
+        resolve();
+      };
       tx.onerror = () => reject(tx.error || new Error("IndexedDB bulk delete tracks failed/aborted"));
       tx.onabort = () => reject(tx.error || new Error("IndexedDB bulk delete tracks failed/aborted"));
     });
@@ -906,11 +974,11 @@ export function savePlaylist(pl) {
     const tx = db.transaction("playlists", "readwrite");
     tx.objectStore("playlists").put(pl);
     return new Promise((resolve, reject) => {
-      tx.oncomplete = () => resolve();
+      tx.oncomplete = () => {
+        notifyLibraryMutated("playlist:save", pl);
+        resolve();
+      };
       tx.onerror = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
-      // クォータ超過や OS のストレージ退避で onerror を伴わず abort した場合に
-      // Promise が永久に未解決(ハング)にならないよう、onabort でも reject する。
-      // (updatePlaylist/addTracksToPlaylist 等と同じ防御パターンに統一)
       tx.onabort = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
     });
   });
@@ -948,7 +1016,10 @@ export function updatePlaylist(id, patch) {
       store.put(cur);
     };
     req.onerror = () => reject(req.error);
-    tx.oncomplete = () => resolve(result);
+    tx.oncomplete = () => {
+      notifyLibraryMutated("playlist:update", { id, patch });
+      resolve(result);
+    };
     tx.onerror  = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
     tx.onabort  = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
   })));
@@ -957,11 +1028,6 @@ export function updatePlaylist(id, patch) {
 /**
  * 曲をプレイリスト末尾に追加（重複は除外）
  * （transaction 内 await を避ける統一パターン）
- *
- * 戻り値契約(呼び出し側が依存): プレイリストが存在すれば
- *   { playlist: <更新後 playlist(trackIds 含む)>, addedCount: <実際に追加した件数> }
- * を resolve、存在しなければ null。
- * ※ removeTracksFromPlaylist は playlist を直接返す(形が非対称)点に注意。
  */
 export function addTracksToPlaylist(id, trackIdsToAdd) {
   return withWriteRetry(() => openDb().then((db) => new Promise((resolve, reject) => {
@@ -986,7 +1052,10 @@ export function addTracksToPlaylist(id, trackIdsToAdd) {
       store.put(cur);
     };
     req.onerror = () => reject(req.error);
-    tx.oncomplete = () => resolve(result);
+    tx.oncomplete = () => {
+      notifyLibraryMutated("playlist:addTracks", { id, trackIdsToAdd });
+      resolve(result);
+    };
     tx.onerror  = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
     tx.onabort  = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
   })));
@@ -995,10 +1064,6 @@ export function addTracksToPlaylist(id, trackIdsToAdd) {
 /**
  * プレイリストから指定曲を削除
  * （transaction 内 await を避ける統一パターン）
- *
- * 戻り値契約(呼び出し側が依存): プレイリストが存在すれば <更新後 playlist(trackIds 含む)>
- * を直接 resolve、存在しなければ null。
- * ※ addTracksToPlaylist は { playlist, addedCount } を返す(形が非対称)点に注意。
  */
 export function removeTracksFromPlaylist(id, trackIdsToRemove) {
   return withWriteRetry(() => openDb().then((db) => new Promise((resolve, reject) => {
@@ -1016,7 +1081,10 @@ export function removeTracksFromPlaylist(id, trackIdsToRemove) {
       store.put(cur);
     };
     req.onerror = () => reject(req.error);
-    tx.oncomplete = () => resolve(result);
+    tx.oncomplete = () => {
+      notifyLibraryMutated("playlist:removeTracks", { id, trackIdsToRemove });
+      resolve(result);
+    };
     tx.onerror  = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
     tx.onabort  = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
   })));
@@ -1024,14 +1092,20 @@ export function removeTracksFromPlaylist(id, trackIdsToRemove) {
 
 export function deletePlaylist(id) {
   if (id) {
-    recordTombstone(id, "playlist");
+    const tombRes = recordTombstone(id, "playlist");
+    if (tombRes && !tombRes.ok) {
+      console.warn(`[library-db] ⚠️ プレイリスト ${id} の Tombstone 記録に失敗しました:`, tombRes.error);
+    }
   }
   return withWriteRetry(async () => {
     const db = await openDb();
     const tx = db.transaction("playlists", "readwrite");
     tx.objectStore("playlists").delete(id);
     return new Promise((resolve, reject) => {
-      tx.oncomplete = () => resolve();
+      tx.oncomplete = () => {
+        notifyLibraryMutated("playlist:delete", { id });
+        resolve();
+      };
       tx.onerror = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
       // abort 時もハングしないよう reject（savePlaylist と同じ防御）。
       tx.onabort = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
@@ -1041,19 +1115,10 @@ export function deletePlaylist(id) {
 
 /**
  * 指定トラックを全プレイリストの trackIds から取り除く（ライブラリ削除のカスケード用）。
- *   - deleteTrack は tracks/blobs しか消さないため、これを併用しないと
- *     プレイリストに存在しない曲の孤児 id が残り、曲数表示の水増しや DB 肥大を招く。
- *   - 対象 id を含むプレイリストだけを 1 トランザクションでまとめて更新する。
- *   - 該当が無ければ即 resolve（無駄な書き込みをしない）。
  */
 export function removeTrackFromAllPlaylists(trackId) {
   return withWriteRetry(async () => {
     const db = await openDb();
-    // ★ 読み取りと書き込みを 1 つの readwrite transaction に収める(原子性)。
-    //   getAll を別の readonly tx で先に取ると、その後の readwrite tx との間に
-    //   別コンテキスト(別タブ等)が同じプレイリストを編集した分を上書きで失う
-    //   (lost update)。getAll も readwrite tx 内で行い、onsuccess の中で同期的に
-    //   put する(updateTrack 等と同じ「tx 内 await を挟まない」方針)。
     return new Promise((resolve, reject) => {
       const tx = db.transaction("playlists", "readwrite");
       const store = tx.objectStore("playlists");
@@ -1069,7 +1134,10 @@ export function removeTrackFromAllPlaylists(trackId) {
         }
       };
       req.onerror = () => reject(req.error || new Error("removeTrackFromAllPlaylists read failed"));
-      tx.oncomplete = () => resolve();
+      tx.oncomplete = () => {
+        notifyLibraryMutated("playlist:removeTrackCascade", { trackId });
+        resolve();
+      };
       tx.onerror = () => reject(tx.error || new Error("removeTrackFromAllPlaylists failed"));
       tx.onabort = () => reject(tx.error || new Error("removeTrackFromAllPlaylists aborted"));
     });
@@ -1090,7 +1158,10 @@ export function wipeLibrary() {
     tx.objectStore("playlists").clear();
     tx.objectStore("history").clear();
     return new Promise((resolve, reject) => {
-      tx.oncomplete = () => resolve();
+      tx.oncomplete = () => {
+        notifyLibraryMutated("library:wipe", {});
+        resolve();
+      };
       tx.onerror = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
       // 4ストア同時クリアは制約/クォータ起因の abort が起きやすい。onerror を
       // 伴わず abort した場合に await wipeLibrary() がハングしないよう reject する。

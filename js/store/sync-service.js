@@ -19,6 +19,8 @@ import {
   updateTrack,
   deleteTrack,
   deletePlaylist,
+  setSyncScope,
+  onLibraryMutated,
 } from "./library-db.js";
 import { getPublic, setPublic } from "./settings.js";
 import {
@@ -37,12 +39,39 @@ import {
   isTombstoned,
 } from "./tombstone.js";
 
+// 永続化層の共通変更通知を購読し、全変更経路で確実に dirty 状態を更新
+onLibraryMutated((mutationType) => {
+  recordLibraryModified();
+});
+
 const SYNC_FILE_NAME = "music-player-library-sync.json";
-const SYNC_SCHEMA_VERSION = 3;
+export const SYNC_SCHEMA_VERSION = 4; // スキーマ v4: アートワーク重複排除辞書方式
+
+/**
+ * 画像データURLから一意なハッシュ文字列を生成 (スキーマv4での重複排除用)
+ * @param {string} dataUrl
+ * @returns {string|null}
+ */
+export function computeArtworkHash(dataUrl) {
+  if (!dataUrl || typeof dataUrl !== "string") return null;
+  try {
+    let hash = 2166136261;
+    const len = dataUrl.length;
+    const step = Math.max(1, Math.floor(len / 1024));
+    for (let i = 0; i < len; i += step) {
+      hash ^= dataUrl.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    const hex = (hash >>> 0).toString(16).padStart(8, "0");
+    return `art-${hex}-${len}`;
+  } catch (_) {
+    return `art-fb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  }
+}
 
 /**
  * ライブラリ全体のデータを JSON オブジェクトとしてエクスポート
- * (artworkBlob などのバイナリ・秘密情報は除外し、メタデータを完全保持)
+ * (スキーマ v4: 各曲の artworkDataUrl をルートの artworks 辞書へ集約し、サイズ肥大化を完全防止)
  * @returns {Promise<object>}
  */
 export async function exportLibraryData() {
@@ -52,13 +81,23 @@ export async function exportLibraryData() {
   const tombstones = getTombstones();
   const deviceId = getDeviceId();
 
-  // artworkBlob (Blob) や 一時的な blob URL は JSON 破損防止のため除外し、メタデータを完全コピー
+  const artworks = {};
+
+  // artworkBlob (Blob) や 一時的な blob URL は JSON 破損防止のため除外し、Base64 は artworks 辞書へ集約
   const cleanTracks = tracks.map((t) => {
     const copy = { ...t };
     delete copy.artworkBlob;
-    // 一時的な blob URL の混入を防止
-    if (typeof copy.artworkDataUrl === "string" && copy.artworkDataUrl.startsWith("blob:")) {
-      delete copy.artworkDataUrl;
+    if (typeof copy.artworkDataUrl === "string") {
+      if (copy.artworkDataUrl.startsWith("blob:")) {
+        delete copy.artworkDataUrl;
+      } else if (copy.artworkDataUrl.startsWith("data:")) {
+        const artId = computeArtworkHash(copy.artworkDataUrl);
+        if (artId) {
+          artworks[artId] = copy.artworkDataUrl;
+          copy.artworkId = artId;
+          delete copy.artworkDataUrl; // Track からは Base64 を除外して artworkId のみ保持
+        }
+      }
     }
     return copy;
   });
@@ -72,6 +111,8 @@ export async function exportLibraryData() {
     tracksCount: cleanTracks.length,
     playlistsCount: playlists.length,
     tombstonesCount: tombstones.length,
+    artworksCount: Object.keys(artworks).length,
+    artworks, // スキーマ v4 アートワーク辞書
     tracks: cleanTracks,
     playlists,
     tombstones,
@@ -152,10 +193,23 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
     throw new Error("曲データ (tracks) が含まれていません。");
   }
 
+  // 同期インポート中のローカルDB書き込みでは dirty 通知を抑止し、再帰同期・無限ループを防止
+  setSyncScope(true);
+  try {
+    return await doImportLibraryData(data, { deleteMissing });
+  } finally {
+    setSyncScope(false);
+  }
+}
+
+async function doImportLibraryData(data, { deleteMissing = false } = {}) {
   // 1. Tombstone（削除履歴）のマージと後方互換対応
   if (Array.isArray(data.tombstones)) {
     mergeTombstones(data.tombstones);
   }
+
+  // スキーマ v4: アートワーク辞書 (artworks) の取得
+  const artworksDict = (data.artworks && typeof data.artworks === "object") ? data.artworks : {};
 
   const existingTracks = await getAllTracks();
   const existingMap = new Map(existingTracks.map((t) => [t.id, t]));
@@ -188,10 +242,16 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
     if (!incoming || !incoming.id) continue;
     incomingIds.add(incoming.id);
 
-    // ★ Tombstone判定: 過去にローカルまたは他端末で削除された曲なら、古い同期JSONからの復活を防止
+    // ★ Tombstone判定: 過去にローカルまたは他端末で削除された曲なら、古い同期JSONからの復活を防止 (複合キー track 照合)
     const incomingTime = incoming.updatedAt || incoming.addedAt || 0;
-    if (isTombstoned(incoming.id, incomingTime)) {
+    if (isTombstoned(incoming.id, incomingTime, "track")) {
       continue;
+    }
+
+    // アートワークの復元 (スキーマ v4: artworkId 参照、v1/v2/v3: artworkDataUrl 直接)
+    let incomingArt = incoming.artworkDataUrl;
+    if (!incomingArt && incoming.artworkId && artworksDict[incoming.artworkId]) {
+      incomingArt = artworksDict[incoming.artworkId];
     }
 
     let existing = existingMap.get(incoming.id);
@@ -300,8 +360,8 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
       if (existing.artworkBlob instanceof Blob) {
         merged.artworkBlob = existing.artworkBlob;
       }
-      if (incoming.artworkDataUrl !== undefined && !incoming.artworkDataUrl.startsWith("blob:")) {
-        merged.artworkDataUrl = incoming.artworkDataUrl;
+      if (incomingArt !== undefined && !incomingArt.startsWith("blob:")) {
+        merged.artworkDataUrl = incomingArt;
       } else if (existing.artworkDataUrl) {
         merged.artworkDataUrl = existing.artworkDataUrl;
       }
@@ -317,7 +377,10 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
       // Google Drive 音源なら driveFileId を持つため、インポート先端末でもそのまま再生可能
       const newTrack = { ...incoming };
       delete newTrack.artworkBlob; // 破損した {} を除去
-      if (newTrack.artworkDataUrl && newTrack.artworkDataUrl.startsWith("blob:")) {
+      delete newTrack.artworkId;
+      if (incomingArt && !incomingArt.startsWith("blob:")) {
+        newTrack.artworkDataUrl = incomingArt;
+      } else {
         delete newTrack.artworkDataUrl;
       }
       if (!newTrack.updatedAt) {
@@ -349,7 +412,7 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
     const existingPlaylists = await getAllPlaylists();
     const existingPlMap = new Map(existingPlaylists.map((p) => [p.id, p]));
 
-    // Tombstone によるプレイリスト削除
+    // Tombstone によるプレイリスト削除 (複合キー playlist 照合)
     for (const tomb of allTombstones) {
       if (tomb.type === "playlist") {
         if (existingPlMap.has(tomb.id)) {
@@ -361,7 +424,7 @@ export async function importLibraryData(input, { deleteMissing = false } = {}) {
 
     for (const pl of data.playlists) {
       if (!pl || !pl.id || !pl.name) continue;
-      if (isTombstoned(pl.id, pl.updatedAt || pl.createdAt || 0)) continue;
+      if (isTombstoned(pl.id, pl.updatedAt || pl.createdAt || 0, "playlist")) continue;
 
       const curPl = existingPlMap.get(pl.id);
       if (!curPl || (pl.updatedAt || 0) >= (curPl.updatedAt || 0)) {
@@ -505,15 +568,21 @@ export async function importLibraryFromDrive({ deleteMissing = false } = {}) {
 const STORAGE_KEY_LAST_SYNC = "music_player_last_sync_time";
 const STORAGE_KEY_LAST_MODIFIED = "music_player_last_modified_time";
 const STORAGE_KEY_DIRTY = "music_player_sync_dirty";
+const STORAGE_KEY_GEN = "music_player_sync_gen";
+
+// 同期中に発生した変更を検知するための世代番号カウンタ
+let _currentGeneration = 0;
 
 /**
  * ライブラリに変更があったことを記録（タイムスタンプ更新 ＆ 自動同期トリガー）
  */
 export function recordLibraryModified() {
+  _currentGeneration++;
   try {
     if (typeof localStorage !== "undefined") {
       localStorage.setItem(STORAGE_KEY_LAST_MODIFIED, new Date().toISOString());
       localStorage.setItem(STORAGE_KEY_DIRTY, "true");
+      localStorage.setItem(STORAGE_KEY_GEN, String(_currentGeneration));
     }
   } catch {}
   scheduleDebouncedAutoUpload();
@@ -636,12 +705,24 @@ export function syncLibraryWithDrive({ force = false, silent = false } = {}) {
 }
 
 async function executeSync({ force = false, silent = false } = {}) {
-  // オフライン時のガード
+  // 同期開始時点の世代番号を記録（同期中にローカルで新たな変更が起きた場合を検知）
+  const startGen = _currentGeneration;
+
+  const maybeClearDirty = () => {
+    if (_currentGeneration === startGen) {
+      clearLibraryDirty();
+    } else {
+      console.log("[sync-service] 同期処理中に新たなローカル変更が発生したため dirty フラグを維持します");
+    }
+  };
+
+  // オフライン時のガード: dirty は解除せず保持
   if (typeof navigator !== "undefined" && !navigator.onLine) {
     if (silent) return { action: "none", message: "オフラインのため同期をスキップしました" };
     throw new Error("オフラインのため Google Drive と同期できません。インターネット接続を確認してください。");
   }
 
+  // 未接続時のガード: dirty は解除せず保持
   const connected = await isDriveConnected();
   if (!connected) {
     if (silent) return { action: "none", message: "Google Drive 未接続" };
@@ -654,7 +735,7 @@ async function executeSync({ force = false, silent = false } = {}) {
   if (!driveFile.exists) {
     const res = await exportLibraryToDrive();
     setLastSyncTime(res.modifiedTime || new Date().toISOString());
-    clearLibraryDirty();
+    maybeClearDirty();
     return {
       action: "uploaded",
       message: `Google Drive に初回同期データを保存しました (${res.tracksCount} 曲)`,
@@ -681,10 +762,10 @@ async function executeSync({ force = false, silent = false } = {}) {
     if (shouldReExport) {
       exportRes = await exportLibraryToDrive();
       setLastSyncTime(exportRes.modifiedTime || new Date().toISOString());
-      clearLibraryDirty();
+      maybeClearDirty();
     } else {
       setLastSyncTime(driveFile.modifiedTime || new Date().toISOString());
-      clearLibraryDirty();
+      maybeClearDirty();
     }
 
     const conflictMsg = importRes.conflictsCount > 0 ? ` (⚠️ ${importRes.conflictsCount}件の競合)` : "";
@@ -703,7 +784,7 @@ async function executeSync({ force = false, silent = false } = {}) {
   if (lastLocalModMs > lastSyncMs || isDirty) {
     const res = await exportLibraryToDrive();
     setLastSyncTime(res.modifiedTime || new Date().toISOString());
-    clearLibraryDirty();
+    maybeClearDirty();
     return {
       action: "uploaded",
       message: `変更されたライブラリデータを Google Drive へ保存しました (${res.tracksCount} 曲)`,

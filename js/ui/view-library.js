@@ -2350,7 +2350,8 @@ async function openSyncModal(refs) {
       <div style="font-size: 11px; color: var(--fg-muted); line-height: 1.5; border-top: 1px solid var(--border-color); padding-top: 10px;">
         💡 <strong>iPad ↔ iPhone 同期のポイント:</strong><br/>
         iPad で編集した後、iPhone で <strong>「⚡ ワンタップ自動同期」</strong> を押すだけで変更内容が瞬時に反映されます。<br/>
-        ※ 端末内の音源ファイルやアートワーク画像は保護され、変更された曲名・メモ・お気に入り等のメタデータが確実に反映されます。
+        ※ 端末内の音源ファイルやアートワーク画像は保護され、変更された曲名・メモ・お気に入り等のメタデータが確実に反映されます。<br/>
+        ※ 削除履歴（Tombstone）は365日間保持されます。366日以上一度も同期していない端末を接続した場合は削除曲が復活する可能性があります。
       </div>
     `;
 

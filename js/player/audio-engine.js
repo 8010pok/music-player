@@ -1630,6 +1630,11 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
   applyKeyShift(trackKeyShift, audioEl);
   appState.set({ currentKeyShift: trackKeyShift });
 
+  const pub = getPublic() || {};
+  const isEffectsActive = !!pub.enableAudioEffects;
+  const isKeyShiftActive = trackKeyShift !== 0;
+  const needsWebAudio = isEffectsActive || isKeyShiftActive;
+
   // ★ Phase 0: 音源 URL / Blob の取得（FLAC・大容量ファイル高速化）
   let targetUrl = null;
   let blobErr = null;
@@ -1640,19 +1645,22 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
   const prewarmed = prewarmCache.get(track.id);
   if (prewarmed) {
     prewarmCache.delete(track.id);
-    if (prewarmed.objectUrl) {
-      targetUrl = prewarmed.objectUrl;
-    } else if (prewarmed.promise) {
-      targetUrl = await prewarmed.promise;
+    // Web Audio エフェクトが必要な場合は、CORS制約による無音化を防ぐためストリームURLを破棄しBlobキャッシュを待機
+    if (!needsWebAudio || !prewarmed.isStream) {
+      if (prewarmed.objectUrl) {
+        targetUrl = prewarmed.objectUrl;
+      } else if (prewarmed.promise) {
+        targetUrl = await prewarmed.promise;
+      }
+      if (prewarmed.isStream) {
+        isDirectStream = true;
+        state.isDirectStream = true;
+        setTimeout(() => {
+          cacheDriveTrackInBackground(track.id);
+        }, 1200);
+      }
+      if (targetUrl) logPerfMark(track.id, "prewarm_hit", t0);
     }
-    if (prewarmed.isStream) {
-      isDirectStream = true;
-      state.isDirectStream = true;
-      setTimeout(() => {
-        cacheDriveTrackInBackground(track.id);
-      }, 1200);
-    }
-    if (targetUrl) logPerfMark(track.id, "prewarm_hit", t0);
   }
 
   // 1.5. インメモリ LRU Blob キャッシュ確認 (キャッシュ済み FLAC/MP3 を 0ms で URL 化)
@@ -1665,42 +1673,48 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
   }
 
   // 2. 未キャッシュの Google Drive 曲:
-  //    - 未連携/期限切れならスキップせず「その場で再連携モーダル」を出して再連携後にそのまま再生
-  //    - FLAC や MP3 の巨大ダウンロード待ち（十数秒〜数十秒）を完全回避し、Range ストリーミングで即座に再生開始
+  //    - EQ無効かつキーチェンジ無効: 巨大ダウンロード待ちを完全回避し、ダイレクトストリーミングで即座に再生開始
+  //    - EQまたはキーチェンジ有効: Web Audio への接続が必要なため、CORS無音化を防止すべく全量キャッシュ（Blob URL）完了後に安全に再生開始
   if (!targetUrl && isDriveTrack) {
     const cached = await hasCachedBlob(track.id).catch(() => false);
     if (!cached) {
-      try {
-        const { getDriveToken, getDriveStreamUrl, promptDriveReconnectModal } = await import("../gdrive/drive-service.js");
-        let token = await getDriveToken();
-        if (!token) {
-          // ユーザー操作による再連携待ちの間、無音ループを一時解除してモーダルを表示
-          try { audioEl.pause(); } catch {}
-          token = await promptDriveReconnectModal({ track });
+      if (needsWebAudio) {
+        // Web Audio エフェクト/キーチェンジが必要な未キャッシュDrive曲:
+        // ダイレクトストリームをバイパスし、ステップ3 (getBlob) で全量取得＆同一オリジン Blob URL 化完了を待って安全に再生する
+        logPerfMark(track.id, "wait_cache_for_webaudio", t0);
+      } else {
+        try {
+          const { getDriveToken, getDriveStreamUrl, promptDriveReconnectModal } = await import("../gdrive/drive-service.js");
+          let token = await getDriveToken();
           if (!token) {
-            // ユーザーがキャンセルした場合は勝手に次曲へスキップせず停止状態で待機
-            if (myToken === state.transitionToken) {
-              state.transitioning = false;
-              appState.set({ isPlaying: false, loadingTrackId: null });
+            // ユーザー操作による再連携待ちの間、無音ループを一時解除してモーダルを表示
+            try { audioEl.pause(); } catch {}
+            token = await promptDriveReconnectModal({ track });
+            if (!token) {
+              // ユーザーがキャンセルした場合は勝手に次曲へスキップせず停止状態で待機
+              if (myToken === state.transitionToken) {
+                state.transitioning = false;
+                appState.set({ isPlaying: false, loadingTrackId: null });
+              }
+              return;
             }
-            return;
+            primeAudioElement();
           }
-          primeAudioElement();
+          // ダイレクトストリーミング URL を取得して即座に再生開始（FLAC 全量 DL を待たない）
+          const streamUrl = await getDriveStreamUrl(track.id, token);
+          if (streamUrl) {
+            targetUrl = streamUrl;
+            isDirectStream = true;
+            state.isDirectStream = true;
+            logPerfMark(track.id, "stream_url_ready", t0);
+            // 再生開始と並行してバックグラウンドで IndexedDB キャッシュと完全メタデータ補完を行う
+            setTimeout(() => {
+              cacheDriveTrackInBackground(track.id);
+            }, 1200);
+          }
+        } catch (driveErr) {
+          console.warn("[audio-engine] Drive ストリーム準備警告、通常取得へフォールバック:", driveErr);
         }
-        // ダイレクトストリーミング URL を取得して即座に再生開始（FLAC 全量 DL を待たない）
-        const streamUrl = await getDriveStreamUrl(track.id, token);
-        if (streamUrl) {
-          targetUrl = streamUrl;
-          isDirectStream = true;
-          state.isDirectStream = true;
-          logPerfMark(track.id, "stream_url_ready", t0);
-          // 再生開始と並行してバックグラウンドで IndexedDB キャッシュと完全メタデータ補完を行う
-          setTimeout(() => {
-            cacheDriveTrackInBackground(track.id);
-          }, 1200);
-        }
-      } catch (driveErr) {
-        console.warn("[audio-engine] Drive ストリーム準備警告、通常取得へフォールバック:", driveErr);
       }
     }
   }
