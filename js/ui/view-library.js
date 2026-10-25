@@ -1349,8 +1349,9 @@ async function deleteTrackWithConfirm(t, refs) {
     stopPlayback();
   }
   const savedScrollY = typeof window !== "undefined" ? window.scrollY : 0;
+  let delRes;
   try {
-    await deleteTrack(id);
+    delRes = await deleteTrack(id);
   } catch (e) {
     console.warn("曲削除に失敗", e);
     toast("削除に失敗しました。もう一度お試しください", "err");
@@ -1366,7 +1367,11 @@ async function deleteTrackWithConfirm(t, refs) {
     window.scrollTo({ top: savedScrollY, behavior: "instant" });
   }
   try { await refreshStorage(refs); } catch (e) { console.warn("削除後のストレージ表示更新に失敗", e); }
-  toast("削除しました", "ok");
+  if (delRes && delRes.tombstoneSaved === false) {
+    toast("曲は削除されましたが、端末間同期用の削除履歴を保存できませんでした。別端末から曲が復活する可能性があります。", "warn");
+  } else {
+    toast("削除しました", "ok");
+  }
 }
 
 /**
@@ -1388,9 +1393,9 @@ async function bulkDeleteSelectedTracks(refs) {
   }
 
   const savedScrollY = typeof window !== "undefined" ? window.scrollY : 0;
-
+  let bulkRes;
   try {
-    await bulkDeleteTracks(selectedIds);
+    bulkRes = await bulkDeleteTracks(selectedIds);
   } catch (err) {
     console.warn("一括削除エラー:", err);
     toast("一部またはすべての曲の削除に失敗しました", "err");
@@ -1424,7 +1429,11 @@ async function bulkDeleteSelectedTracks(refs) {
   }
 
   try { await refreshStorage(refs); } catch (e) { console.warn("削除後のストレージ表示更新に失敗", e); }
-  toast(`${selectedIds.length} 曲を一括削除しました`, "ok");
+  if (bulkRes && bulkRes.tombstoneSaved === false) {
+    toast("曲は削除されましたが、端末間同期用の削除履歴を保存できませんでした。別端末から曲が復活する可能性があります。", "warn");
+  } else {
+    toast(`${selectedIds.length} 曲を一括削除しました`, "ok");
+  }
 }
 
 /**

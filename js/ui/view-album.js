@@ -730,8 +730,9 @@ function openTrackActionsModal(track, root) {
         if (appState.get().currentTrack?.id === track.id) {
           stopPlayback();
         }
+        let delRes;
         try {
-          await deleteTrack(track.id);
+          delRes = await deleteTrack(track.id);
         } catch (err) {
           console.warn("曲削除に失敗", err);
           toast("削除に失敗しました", "err");
@@ -740,7 +741,9 @@ function openTrackActionsModal(track, root) {
         await removeTrackFromAllPlaylists(track.id).catch(() => {});
         releaseArtwork(track.id);
         album.tracks = album.tracks.filter((x) => x.id !== track.id);
-        if (album.tracks.length === 0) {
+        if (delRes && delRes.tombstoneSaved === false) {
+          toast("曲は削除されましたが、端末間同期用の削除履歴を保存できませんでした。別端末から曲が復活する可能性があります。", "warn");
+        } else if (album.tracks.length === 0) {
           toast("アルバムの全曲が削除されました", "ok");
           go("library", { tab: "albums" });
         } else {

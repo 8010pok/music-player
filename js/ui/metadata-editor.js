@@ -359,11 +359,15 @@ export function editTrackMetadata(track, onUpdated) {
               stopPlayback();
             }
             try {
-              await deleteTrack(track.id);
+              const delRes = await deleteTrack(track.id);
               await removeTrackFromAllPlaylists(track.id).catch(() => {});
               releaseArtwork(track.id);
               recordLibraryModified();
-              toast("曲を削除しました", "ok");
+              if (delRes && delRes.tombstoneSaved === false) {
+                toast("曲は削除されましたが、端末間同期用の削除履歴を保存できませんでした。別端末から曲が復活する可能性があります。", "warn");
+              } else {
+                toast("曲を削除しました", "ok");
+              }
               if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
               if (typeof onUpdated === "function") onUpdated(null);
               resolve(null);

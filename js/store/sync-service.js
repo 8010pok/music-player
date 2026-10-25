@@ -48,25 +48,76 @@ const SYNC_FILE_NAME = "music-player-library-sync.json";
 export const SYNC_SCHEMA_VERSION = 4; // スキーマ v4: アートワーク重複排除辞書方式
 
 /**
+ * 有効なアートワーク data URL かどうかを厳密に検証
+ * - 文字列であること
+ * - "data:image/" で始まること (画像MIMEタイプのみ許可、javascript: や text/html 等を排除)
+ * - 最大サイズ上限 (15MB) を超える極端な巨大画像によるメモリ枯渇の防止
+ *
+ * @param {any} val
+ * @returns {boolean}
+ */
+export function isValidArtworkDataUrl(val) {
+  if (typeof val !== "string") return false;
+  if (!val.startsWith("data:image/")) return false;
+  const MAX_ARTWORK_DATAURL_LENGTH = 15 * 1024 * 1024;
+  if (val.length > MAX_ARTWORK_DATAURL_LENGTH) return false;
+  return true;
+}
+
+/**
+ * 高速・高衝突耐性フォールバックハッシュ (Web Crypto API が使えない環境用)
+ * 全文字を走査し、64ビット (FNV-1a + Murmur3変種) + 長さでハッシュ化
+ *
+ * @param {string} str
+ * @returns {string}
+ */
+function fallbackArtworkHash(str) {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  const len = str.length;
+  for (let i = 0; i < len; i++) {
+    const code = str.charCodeAt(i);
+    h1 ^= code;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= code;
+    h2 = Math.imul(h2, 0x5bd1e995);
+    h2 ^= (h2 >>> 15);
+  }
+  const hex1 = (h1 >>> 0).toString(16).padStart(8, "0");
+  const hex2 = (h2 >>> 0).toString(16).padStart(8, "0");
+  return `art-fb-${hex1}${hex2}-${len}`;
+}
+
+/**
  * 画像データURLから一意なハッシュ文字列を生成 (スキーマv4での重複排除用)
+ * Web Crypto API SHA-256 を使用し、256ビット (64文字16進) で衝突耐性を最大化。
+ * Node.js (v18+) および全モダンブラウザ (Chrome / Safari / Firefox) の両方でネイティブ動作。
+ *
+ * @param {string} dataUrl
+ * @returns {Promise<string|null>}
+ */
+export async function computeArtworkHash(dataUrl) {
+  if (!dataUrl || typeof dataUrl !== "string") return null;
+  try {
+    if (typeof globalThis !== "undefined" && globalThis.crypto?.subtle?.digest) {
+      const msgUint8 = new TextEncoder().encode(dataUrl);
+      const hashBuffer = await globalThis.crypto.subtle.digest("SHA-256", msgUint8);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      const hex = hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+      return `art-sha256-${hex}`;
+    }
+  } catch (_) {}
+  return fallbackArtworkHash(dataUrl);
+}
+
+/**
+ * 同期フォールバックハッシュ関数 (同期処理が必要な箇所用)
  * @param {string} dataUrl
  * @returns {string|null}
  */
-export function computeArtworkHash(dataUrl) {
+export function computeArtworkHashSync(dataUrl) {
   if (!dataUrl || typeof dataUrl !== "string") return null;
-  try {
-    let hash = 2166136261;
-    const len = dataUrl.length;
-    const step = Math.max(1, Math.floor(len / 1024));
-    for (let i = 0; i < len; i += step) {
-      hash ^= dataUrl.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-    const hex = (hash >>> 0).toString(16).padStart(8, "0");
-    return `art-${hex}-${len}`;
-  } catch (_) {
-    return `art-fb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-  }
+  return fallbackArtworkHash(dataUrl);
 }
 
 /**
@@ -82,25 +133,34 @@ export async function exportLibraryData() {
   const deviceId = getDeviceId();
 
   const artworks = {};
+  const hashCache = new Map();
 
   // artworkBlob (Blob) や 一時的な blob URL は JSON 破損防止のため除外し、Base64 は artworks 辞書へ集約
-  const cleanTracks = tracks.map((t) => {
+  const cleanTracks = [];
+  for (const t of tracks) {
     const copy = { ...t };
     delete copy.artworkBlob;
     if (typeof copy.artworkDataUrl === "string") {
       if (copy.artworkDataUrl.startsWith("blob:")) {
         delete copy.artworkDataUrl;
-      } else if (copy.artworkDataUrl.startsWith("data:")) {
-        const artId = computeArtworkHash(copy.artworkDataUrl);
+      } else if (isValidArtworkDataUrl(copy.artworkDataUrl)) {
+        let artId = hashCache.get(copy.artworkDataUrl);
+        if (!artId) {
+          artId = await computeArtworkHash(copy.artworkDataUrl);
+          if (artId) hashCache.set(copy.artworkDataUrl, artId);
+        }
         if (artId) {
           artworks[artId] = copy.artworkDataUrl;
           copy.artworkId = artId;
           delete copy.artworkDataUrl; // Track からは Base64 を除外して artworkId のみ保持
         }
+      } else {
+        // 不正な data URL (スクリプトや不正MIMEなど) は安全のため除外
+        delete copy.artworkDataUrl;
       }
     }
-    return copy;
-  });
+    cleanTracks.push(copy);
+  }
 
   return {
     app: "music-player",
@@ -249,9 +309,14 @@ async function doImportLibraryData(data, { deleteMissing = false } = {}) {
     }
 
     // アートワークの復元 (スキーマ v4: artworkId 参照、v1/v2/v3: artworkDataUrl 直接)
-    let incomingArt = incoming.artworkDataUrl;
-    if (!incomingArt && incoming.artworkId && artworksDict[incoming.artworkId]) {
-      incomingArt = artworksDict[incoming.artworkId];
+    let incomingArt = null;
+    if (typeof incoming.artworkDataUrl === "string" && isValidArtworkDataUrl(incoming.artworkDataUrl)) {
+      incomingArt = incoming.artworkDataUrl;
+    } else if (typeof incoming.artworkId === "string" && artworksDict && typeof artworksDict === "object") {
+      const candidate = artworksDict[incoming.artworkId];
+      if (typeof candidate === "string" && isValidArtworkDataUrl(candidate)) {
+        incomingArt = candidate;
+      }
     }
 
     let existing = existingMap.get(incoming.id);
@@ -360,11 +425,12 @@ async function doImportLibraryData(data, { deleteMissing = false } = {}) {
       if (existing.artworkBlob instanceof Blob) {
         merged.artworkBlob = existing.artworkBlob;
       }
-      if (incomingArt !== undefined && !incomingArt.startsWith("blob:")) {
+      if (incomingArt && isValidArtworkDataUrl(incomingArt)) {
         merged.artworkDataUrl = incomingArt;
-      } else if (existing.artworkDataUrl) {
+      } else if (existing.artworkDataUrl && isValidArtworkDataUrl(existing.artworkDataUrl)) {
         merged.artworkDataUrl = existing.artworkDataUrl;
       }
+      delete merged.artworkId;
 
       // Google Drive 関連プロパティ
       if (incoming.driveFileId) merged.driveFileId = incoming.driveFileId;
@@ -378,7 +444,7 @@ async function doImportLibraryData(data, { deleteMissing = false } = {}) {
       const newTrack = { ...incoming };
       delete newTrack.artworkBlob; // 破損した {} を除去
       delete newTrack.artworkId;
-      if (incomingArt && !incomingArt.startsWith("blob:")) {
+      if (incomingArt && isValidArtworkDataUrl(incomingArt)) {
         newTrack.artworkDataUrl = incomingArt;
       } else {
         delete newTrack.artworkDataUrl;

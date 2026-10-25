@@ -878,10 +878,12 @@ export function setPlaylistsOrder(entries) {
  * トラック削除（blobも削除し、端末間同期用Tombstoneを記録）
  */
 export function deleteTrack(id) {
+  let tombstoneSaved = true;
   if (id) {
     _memoryBlobCache.delete(id);
     const tombRes = recordTombstone(id, "track");
     if (tombRes && !tombRes.ok) {
+      tombstoneSaved = false;
       console.warn(`[library-db] ⚠️ 曲 ${id} の Tombstone 記録に失敗しました:`, tombRes.error);
     }
   }
@@ -893,7 +895,7 @@ export function deleteTrack(id) {
     return new Promise((resolve, reject) => {
       tx.oncomplete = () => {
         notifyLibraryMutated("track:delete", { id });
-        resolve();
+        resolve({ ok: true, tombstoneSaved });
       };
       tx.onerror = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
       tx.onabort = () => reject(tx.error || new Error("IndexedDB library write failed/aborted"));
@@ -904,15 +906,17 @@ export function deleteTrack(id) {
 /**
  * 複数トラックを一括削除（単一トランザクションで確実に削除しTombstone記録）
  * @param {string[]} ids
- * @returns {Promise<void>}
+ * @returns {Promise<{ ok: boolean, tombstoneSaved: boolean }>}
  */
 export function bulkDeleteTracks(ids) {
-  if (!Array.isArray(ids) || ids.length === 0) return Promise.resolve();
+  if (!Array.isArray(ids) || ids.length === 0) return Promise.resolve({ ok: true, tombstoneSaved: true });
+  let allTombstonesSaved = true;
   for (const id of ids) {
     if (id) {
       _memoryBlobCache.delete(id);
       const tombRes = recordTombstone(id, "track");
       if (tombRes && !tombRes.ok) {
+        allTombstonesSaved = false;
         console.warn(`[library-db] ⚠️ 曲 ${id} の一括削除 Tombstone 記録に失敗:`, tombRes.error);
       }
     }
@@ -931,7 +935,7 @@ export function bulkDeleteTracks(ids) {
     return new Promise((resolve, reject) => {
       tx.oncomplete = () => {
         notifyLibraryMutated("track:bulkDelete", { ids });
-        resolve();
+        resolve({ ok: true, tombstoneSaved: allTombstonesSaved });
       };
       tx.onerror = () => reject(tx.error || new Error("IndexedDB bulk delete tracks failed/aborted"));
       tx.onabort = () => reject(tx.error || new Error("IndexedDB bulk delete tracks failed/aborted"));
