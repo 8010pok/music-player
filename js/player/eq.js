@@ -46,6 +46,7 @@ let pitchDryGain = null;
 let pitchWetGain = null;
 let currentKeyShift = 0;
 let isWorkletLoading = false;
+let workletMessageGeneration = 0;
 
 // MS encode/decode ステージ用ノード
 let msInput = null;                              // splitter 前段: 入力を必ず 2ch にそろえる
@@ -509,10 +510,11 @@ export function applyKeyShift(semitones, audioEl) {
   }
 
   if (pitchShifterNode) {
+    workletMessageGeneration++;
     if (shift === 0) {
-      pitchShifterNode.port.postMessage({ type: "reset" });
+      pitchShifterNode.port.postMessage({ type: "reset", generation: workletMessageGeneration });
     }
-    pitchShifterNode.port.postMessage({ type: "setSemitones", semitones: shift });
+    pitchShifterNode.port.postMessage({ type: "setSemitones", semitones: shift, generation: workletMessageGeneration });
   }
 
   const now = ctx.currentTime;
@@ -534,10 +536,11 @@ export function applyKeyShift(semitones, audioEl) {
  */
 export function resetPitchShifter() {
   currentKeyShift = 0;
+  workletMessageGeneration++;
   if (pitchShifterNode) {
     try {
-      pitchShifterNode.port.postMessage({ type: "reset" });
-      pitchShifterNode.port.postMessage({ type: "setSemitones", semitones: 0 });
+      pitchShifterNode.port.postMessage({ type: "reset", generation: workletMessageGeneration });
+      pitchShifterNode.port.postMessage({ type: "setSemitones", semitones: 0, generation: workletMessageGeneration });
     } catch (_) {}
   }
   if (ctx && pitchDryGain && pitchWetGain) {
@@ -659,37 +662,6 @@ export function getOutputRms() {
 }
 
 /**
- * 既存の全オーディオノードを切断・破棄
- */
-function teardownAudioNodes() {
-  try { source?.disconnect(); } catch (_) {}
-  try { preampGain?.disconnect(); } catch (_) {}
-  try { highPass?.disconnect(); } catch (_) {}
-  try {
-    for (const f of EQ_BANDS) {
-      eqFilters[String(f)]?.disconnect();
-      delete eqFilters[String(f)];
-    }
-  } catch (_) {}
-  try { bassBoost?.disconnect(); } catch (_) {}
-  try { msInput?.disconnect(); } catch (_) {}
-  try { msSplitter?.disconnect(); } catch (_) {}
-  try { msMidGainL?.disconnect(); msMidGainR?.disconnect(); msMidSum?.disconnect(); } catch (_) {}
-  try { msSideGainL?.disconnect(); msSideGainR_neg?.disconnect(); msSideSum?.disconnect(); } catch (_) {}
-  try { msMidScaleNode?.disconnect(); msSideScaleNode?.disconnect(); } catch (_) {}
-  try { msOutMidToL?.disconnect(); msOutMidToR?.disconnect(); } catch (_) {}
-  try { msOutSideToL?.disconnect(); msOutSideToR_neg?.disconnect(); } catch (_) {}
-  try { msMerger?.disconnect(); } catch (_) {}
-  try { panner?.disconnect(); } catch (_) {}
-  try { compressor?.disconnect(); } catch (_) {}
-  try { lowPass?.disconnect(); } catch (_) {}
-  try { pitchDryGain?.disconnect(); } catch (_) {}
-  try { pitchWetGain?.disconnect(); } catch (_) {}
-  try { pitchShifterNode?.disconnect(); } catch (_) {}
-  try { outputAnalyser?.disconnect(); } catch (_) {}
-}
-
-/**
  * 出力監視用 AnalyserNode を取得
  */
 export function getOutputAnalyserNode() {
@@ -697,82 +669,102 @@ export function getOutputAnalyserNode() {
 }
 
 /**
- * Web Audio グラフを安全に再生成（無音状態からの自己復旧用）
- * 全ノード・エフェクト設定・キーシフト・再生状態を完全に復元する
+ * Web Audio グラフの安全な再結線・復元（無音状態からの自己復旧用）
+ *
+ * ★ 重要: HTMLMediaElement を異なる MediaElementAudioSourceNode や別 AudioContext へ
+ *   再バインドするとブラウザ仕様上 InvalidStateError が発生するため、
+ *   AudioContext は close() せず、既存の MediaElementAudioSourceNode (source) を
+ *   100% 保持・再利用してノード間の接続のみを安全に再結線する。
+ *
  * @param {HTMLAudioElement} audioEl
  * @param {{ keyShift?: number }} [options]
  */
-export function recreateAudioContext(audioEl, { keyShift } = {}) {
+export function recoverAudioGraph(audioEl, { keyShift } = {}) {
+  if (audioEl && audioEl.id === "stream-audio-el") return;
+
   const targetShift = typeof keyShift === "number" ? keyShift : currentKeyShift;
-  teardownAudioNodes();
-  try {
-    if (ctx) {
-      ctx.close().catch(() => {});
-    }
-  } catch (_) {}
-  ctx = null;
-  source = null;
-  preampGain = null;
-  highPass = null;
-  lowPass = null;
-  bassBoost = null;
-  panner = null;
-  compressor = null;
-  outputAnalyser = null;
-  pitchShifterNode = null;
-  pitchDryGain = null;
-  pitchWetGain = null;
-  msInput = null;
-  msSplitter = null;
-  msMidGainL = null;
-  msMidGainR = null;
-  msSideGainL = null;
-  msSideGainR_neg = null;
-  msMidSum = null;
-  msSideSum = null;
-  msMidScaleNode = null;
-  msSideScaleNode = null;
-  msOutMidToL = null;
-  msOutMidToR = null;
-  msOutSideToL = null;
-  msOutSideToR_neg = null;
-  msMerger = null;
-  isWorkletLoading = false;
 
-  if (audioEl) {
-    applyEffectsSetting(audioEl, true);
-
-    // ★ ユーザー設定（EQ、プリアンプ、低音、コンプレッサー、パン、MS、ノイズ除去）を完全再適用
-    const pub = getPublic() || {};
-    if (pub.eqGains) {
-      applyEqGains(pub.eqGains);
-    } else if (pub.eqPreset && pub.eqPreset !== "flat") {
-      applyEqGains(presetToGains(pub.eqPreset));
+  // 1. まだ AudioContext または source が未作成の場合は初回構築
+  if (!ctx || !source) {
+    if (audioEl) {
+      applyEffectsSetting(audioEl, true);
+      applyKeyShift(targetShift, audioEl);
+      resumeEqContext().catch(() => {});
     }
-    if (typeof pub.eqPreamp === "number") {
-      applyPreamp(pub.eqPreamp);
-    }
-    if (typeof pub.bassBoost === "number") {
-      applyBassBoost(pub.bassBoost);
-    }
-    if (pub.compressor && pub.compressor !== "off") {
-      applyCompressor(pub.compressor);
-    }
-    if (typeof pub.pan === "number") {
-      applyPan(pub.pan);
-    }
-    applyMidSide({
-      stereoWidth: pub.stereoWidth ?? 1,
-      vocalRemove: pub.vocalRemove ?? 0,
-      mono: !!pub.mono,
-    });
-    if (pub.noiseReduction && pub.noiseReduction !== "off") {
-      applyNoiseReduction(pub.noiseReduction);
-    }
-
-    // ★ キーシフト（Worklet / Dry / Wet）の完全再適用
-    applyKeyShift(targetShift, audioEl);
-    resumeEqContext().catch(() => {});
+    return;
   }
+
+  // 2. 既存の AudioContext と source を再利用してノード間を再結線
+  workletMessageGeneration++;
+  if (pitchShifterNode) {
+    try {
+      pitchShifterNode.port.postMessage({ type: "reset", generation: workletMessageGeneration });
+    } catch (_) {}
+  }
+
+  // ノード間の既存接続のみを切断（source, ctx は絶対に破棄しない）
+  try { source.disconnect(); } catch (_) {}
+  try { preampGain?.disconnect(); } catch (_) {}
+  try { highPass?.disconnect(); } catch (_) {}
+  for (const f of EQ_BANDS) {
+    try { eqFilters[String(f)]?.disconnect(); } catch (_) {}
+  }
+  try { bassBoost?.disconnect(); } catch (_) {}
+  try { pitchDryGain?.disconnect(); } catch (_) {}
+  try { pitchWetGain?.disconnect(); } catch (_) {}
+  try { pitchShifterNode?.disconnect(); } catch (_) {}
+  try { msMerger?.disconnect(); } catch (_) {}
+  try { panner?.disconnect(); } catch (_) {}
+  try { compressor?.disconnect(); } catch (_) {}
+  try { lowPass?.disconnect(); } catch (_) {}
+  try { outputAnalyser?.disconnect(); } catch (_) {}
+
+  // グラフを安全に再接続
+  let node = source.connect(preampGain).connect(highPass);
+  for (const f of EQ_BANDS) {
+    node = node.connect(eqFilters[String(f)]);
+  }
+  node = node.connect(bassBoost);
+  node.connect(pitchDryGain).connect(msInput);
+
+  if (pitchShifterNode && pitchWetGain) {
+    try {
+      node.connect(pitchShifterNode).connect(pitchWetGain).connect(msInput);
+    } catch (_) {}
+  }
+
+  msMerger.connect(panner).connect(compressor).connect(lowPass).connect(outputAnalyser).connect(ctx.destination);
+
+  // 3. ユーザー設定（EQ、プリアンプ、低音、コンプレッサー、パン、MS、ノイズ除去）を再適用
+  const pub = getPublic() || {};
+  if (pub.eqGains) {
+    applyEqGains(pub.eqGains);
+  } else if (pub.eqPreset && pub.eqPreset !== "flat") {
+    applyEqGains(presetToGains(pub.eqPreset));
+  } else {
+    applyEqGains({});
+  }
+  applyPreamp(typeof pub.eqPreamp === "number" ? pub.eqPreamp : 0);
+  applyBassBoost(typeof pub.bassBoost === "number" ? pub.bassBoost : 0);
+  applyCompressor(pub.compressor || "off");
+  applyPan(typeof pub.pan === "number" ? pub.pan : 0);
+  applyMidSide({
+    stereoWidth: pub.stereoWidth ?? 1,
+    vocalRemove: pub.vocalRemove ?? 0,
+    mono: !!pub.mono,
+  });
+  applyNoiseReduction(pub.noiseReduction || "off");
+
+  // 4. キーシフト設定の再反映
+  applyKeyShift(targetShift, audioEl);
+
+  // 5. AudioContext の再開
+  resumeEqContext().catch(() => {});
 }
+
+/**
+ * 後方互換性エイリアス: recreateAudioContext
+ * (実際には InvalidStateError を防ぐため Context を再生成せず recoverAudioGraph を実行)
+ */
+export const recreateAudioContext = recoverAudioGraph;
 

@@ -37,6 +37,7 @@ import {
   setAudioOutputDevice,
   resumeEqContext,
   getOutputRms,
+  recoverAudioGraph,
   recreateAudioContext,
 } from "./eq.js";
 import { getPublic, setPublic } from "../store/settings.js";
@@ -327,28 +328,127 @@ function scheduleSilenceCheck(session) {
             session.hasRecoveredSilence = true;
             console.warn(`[audio-engine] Web Audio 無音状態を確定検知（連続${SILENCE_SAMPLES_REQUIRED}回 RMS < ${SILENCE_RMS_THRESHOLD}）。自動復旧を実行 (1/1):`, session.trackId);
             try {
+              // 1. 再生を一旦停止
+              a.pause();
               const curPos = a.currentTime;
-              recreateAudioContext(mainAudioEl, { keyShift: session.appliedKeyShift });
+              // 2. AudioContextはcloseせず、既存sourceを再利用してグラフを安全に再結線
+              recoverAudioGraph(mainAudioEl, { keyShift: session.appliedKeyShift });
               a.currentTime = curPos;
               a.playbackRate = getEffectivePlaybackRate();
               applyTrackVolume(a, session.track);
               const p = a.play();
               if (p && typeof p.catch === "function") {
                 p.catch((recErr) => {
-                  console.warn("[audio-engine] 無音復旧 play 失敗:", recErr);
-                  handlePlaybackFinalFailure(session.playAttemptId, session.track, recErr);
+                  handleSilenceRecoveryFailure(session, recErr);
                 });
               }
               toast("音声出力を再接続しました", "info", 2500);
             } catch (recErr) {
-              console.warn("[audio-engine] 無音復旧例外:", recErr);
-              handlePlaybackFinalFailure(session.playAttemptId, session.track, recErr);
+              handleSilenceRecoveryFailure(session, recErr);
             }
           }
         }
       }, 400);
     }, 1200);
   }, 3500);
+}
+
+/**
+ * 無音自動復旧失敗時の安全な保守的フォールバック
+ * @param {PlaybackSession} session
+ * @param {Error} err
+ */
+function handleSilenceRecoveryFailure(session, err) {
+  console.warn("[audio-engine] 無音自動復旧失敗:", err);
+  if (session) {
+    session.playbackStatus = "error";
+  }
+  appState.set({ isPlaying: false, playbackStatus: "error", loadingTrackId: null });
+  if (mainAudioEl) {
+    try { mainAudioEl.pause(); } catch (_) {}
+  }
+  promptAudioReconnectAction(session);
+}
+
+/**
+ * ユーザーへ手動再接続アクション（ボタン）を提示
+ * @param {PlaybackSession} [session]
+ */
+export function promptAudioReconnectAction(session) {
+  if (typeof document === "undefined") {
+    toast("音声が途切れました。再接続してください。", "err", 5000);
+    return;
+  }
+  const root = document.getElementById("toast-root");
+  if (!root) {
+    toast("音声が途切れました。再接続してください。", "err", 5000);
+    return;
+  }
+  const el = document.createElement("div");
+  el.className = "toast is-err";
+  el.style.display = "flex";
+  el.style.alignItems = "center";
+  el.style.gap = "8px";
+
+  const span = document.createElement("span");
+  span.textContent = "音声が途切れました";
+  el.appendChild(span);
+
+  const btn = document.createElement("button");
+  btn.textContent = "再接続";
+  btn.className = "btn btn-sm btn-primary";
+  btn.style.marginLeft = "8px";
+  btn.style.padding = "2px 8px";
+  btn.style.fontSize = "12px";
+  btn.onclick = async (e) => {
+    e.stopPropagation();
+    el.remove();
+    await reconnectAudioGraphManually();
+  };
+  el.appendChild(btn);
+
+  root.appendChild(el);
+  setTimeout(() => {
+    el.style.opacity = "0";
+    el.style.transition = "opacity 0.2s";
+    setTimeout(() => el.remove(), 220);
+  }, 8000);
+}
+
+/**
+ * ユーザー操作 (User Gesture) 内で手動再接続を実行
+ * @returns {Promise<boolean>}
+ */
+export async function reconnectAudioGraphManually() {
+  const session = activePlaybackSession;
+  const curAudio = getAudioElement() || mainAudioEl;
+  if (!curAudio) return false;
+
+  try {
+    await resumeEqContext();
+    const curPos = curAudio.currentTime;
+    // AudioContextはcloseせず、既存sourceを再利用してグラフのみ再結線
+    recoverAudioGraph(curAudio, { keyShift: session?.appliedKeyShift ?? 0 });
+    curAudio.currentTime = curPos;
+    curAudio.playbackRate = getEffectivePlaybackRate();
+    if (session?.track) {
+      applyTrackVolume(curAudio, session.track);
+    }
+    await curAudio.play();
+    if (session) {
+      session.playbackStatus = "playing";
+      session.playingAt = Date.now();
+    }
+    appState.set({ isPlaying: true, playbackStatus: "playing", loadingTrackId: null });
+    toast("音声出力を再接続しました", "ok", 2500);
+    return true;
+  } catch (err) {
+    console.warn("[audio-engine] 手動再接続失敗:", err);
+    if (session) session.playbackStatus = "error";
+    appState.set({ isPlaying: false, playbackStatus: "error", loadingTrackId: null });
+    toast("音声の初期化に失敗しました。ページを再読み込みしてください。", "err", 5000);
+    return false;
+  }
 }
 
 export function getMainAudioElement() { return mainAudioEl; }

@@ -142,8 +142,13 @@ if (typeof registerProcessor === "function") {
       super();
       const sr = typeof sampleRate !== "undefined" ? sampleRate : 44100;
       this.core = new PitchShifterCore(sr, 0.1);
+      this.lastGeneration = 0;
       this.port.onmessage = (e) => {
         if (!e.data) return;
+        if (typeof e.data.generation === "number") {
+          if (e.data.generation < this.lastGeneration) return;
+          this.lastGeneration = e.data.generation;
+        }
         if (e.data.type === "setSemitones") {
           this.core.setSemitones(e.data.semitones);
         } else if (e.data.type === "reset") {

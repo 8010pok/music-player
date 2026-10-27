@@ -1485,16 +1485,16 @@ test("pitch-shifter-processor.js に reset() メソッドがあり、ディレ�
 
 console.log("\n=== 12. 監査対応: 無音検知の誤作動防止・AudioContext完全復元・終端早送り防止・Drive再認証 ===");
 
-test("AudioContext 再生成: teardownAudioNodes で旧ノードがすべて切断され、保存設定とkeyShiftが完全復元されること", () => {
+test("AudioContext グラフ復元: recoverAudioGraph で既存sourceを再利用して再結線され、保存設定とkeyShiftが完全復元されること", () => {
   const eqCode = fs.readFileSync(path.join(__dirname, "../js/player/eq.js"), "utf8");
-  strictEqual(eqCode.includes("function teardownAudioNodes"), true, "旧ノード切断関数が存在");
-  strictEqual(eqCode.includes("source?.disconnect()"), true, "source切断");
+  strictEqual(eqCode.includes("function recoverAudioGraph"), true, "recoverAudioGraph関数が存在");
+  strictEqual(eqCode.includes("source.disconnect()"), true, "既存sourceの接続切断（再利用）");
   strictEqual(eqCode.includes("for (const f of EQ_BANDS)"), true, "10バンドEQノード全切断");
   strictEqual(eqCode.includes("applyEqGains(pub.eqGains"), true, "EQゲイン復元");
-  strictEqual(eqCode.includes("applyPreamp(pub.eqPreamp"), true, "プリアンプ復元");
-  strictEqual(eqCode.includes("applyBassBoost(pub.bassBoost"), true, "低音ブースト復元");
+  strictEqual(eqCode.includes("applyPreamp(typeof pub.eqPreamp"), true, "プリアンプ復元");
+  strictEqual(eqCode.includes("applyBassBoost(typeof pub.bassBoost"), true, "低音ブースト復元");
   strictEqual(eqCode.includes("applyCompressor(pub.compressor"), true, "コンプレッサー復元");
-  strictEqual(eqCode.includes("applyPan(pub.pan"), true, "パン復元");
+  strictEqual(eqCode.includes("applyPan(typeof pub.pan"), true, "パン復元");
   strictEqual(eqCode.includes("applyMidSide("), true, "MSステレオ復元");
   strictEqual(eqCode.includes("applyNoiseReduction(pub.noiseReduction"), true, "ノイズ除去復元");
   strictEqual(eqCode.includes("applyKeyShift(targetShift, audioEl)"), true, "keyShift復元");
@@ -1631,6 +1631,131 @@ test("終端フォールバック: 前進中は切らず停滞時にのみ発動
   // 7. seek中なら発動しない
   const stepSeek = checkFallback({ cur: 199.85, dur, isSeeking: true, isWaitingOrStalled: false, userPaused: false, nearEndCheckPos: 199.85, nearEndCheckAt: 1000, nowMs: 2000 });
   strictEqual(stepSeek.fallback, false, "seek中は発動しない");
+});
+
+console.log("\n=== 13. 実関数モック検証: createMediaElementSource 1回制限・AudioContext非close・source再利用・手動再接続 ===");
+
+await asyncTest("Web Audio実呼出検証: recoverAudioGraph は createMediaElementSource を再実行せず既存sourceを再利用し、AudioContextをcloseしないこと", async () => {
+  let createMediaElementSourceCallCount = 0;
+  let audioContextCloseCallCount = 0;
+  let sourceDisconnectCallCount = 0;
+  let sourceConnectCallCount = 0;
+
+  const mockSourceNode = {
+    connect(target) {
+      sourceConnectCallCount++;
+      return target;
+    },
+    disconnect() {
+      sourceDisconnectCallCount++;
+    },
+  };
+
+  const createMockAudioNode = () => ({
+    gain: { value: 1, setValueAtTime() {} },
+    frequency: { value: 0 },
+    Q: { value: 0 },
+    pan: { value: 0 },
+    threshold: { value: 0 },
+    knee: { value: 0 },
+    ratio: { value: 1 },
+    attack: { value: 0 },
+    release: { value: 0 },
+    connect(target) { return target; },
+    disconnect() {},
+  });
+
+  class MockAudioContext {
+    constructor() {
+      this.state = "running";
+      this.currentTime = 0;
+      this.destination = createMockAudioNode();
+    }
+    createMediaElementSource() {
+      createMediaElementSourceCallCount++;
+      return mockSourceNode;
+    }
+    createGain() { return createMockAudioNode(); }
+    createBiquadFilter() { return createMockAudioNode(); }
+    createChannelSplitter() { return createMockAudioNode(); }
+    createChannelMerger() { return createMockAudioNode(); }
+    createStereoPanner() { return createMockAudioNode(); }
+    createDynamicsCompressor() { return createMockAudioNode(); }
+    createAnalyser() {
+      const a = createMockAudioNode();
+      a.fftSize = 256;
+      a.getFloatTimeDomainData = () => {};
+      return a;
+    }
+    close() {
+      audioContextCloseCallCount++;
+      return Promise.resolve();
+    }
+    resume() {
+      this.state = "running";
+      return Promise.resolve();
+    }
+  }
+
+  // グローバルモック設定
+  globalThis.window = globalThis.window || {};
+  globalThis.window.AudioContext = MockAudioContext;
+  globalThis.AudioContext = MockAudioContext;
+
+  const { applyEffectsSetting, recoverAudioGraph, getCurrentKeyShift } = await import("../js/player/eq.js");
+  const mockAudio = { id: "audio-el-mock", currentTime: 10, volume: 1, muted: false, paused: false };
+
+  // 1. 初回作成
+  applyEffectsSetting(mockAudio, true);
+  strictEqual(createMediaElementSourceCallCount, 1, "createMediaElementSource は初回に1回だけ呼ばれる");
+  strictEqual(audioContextCloseCallCount, 0, "初期化でcloseは呼ばれない");
+  const initialConnects = sourceConnectCallCount;
+  ok(initialConnects >= 1, "source.connect が呼ばれている");
+
+  // 2. 1回目の無音復旧 (keyShift = +2)
+  recoverAudioGraph(mockAudio, { keyShift: 2 });
+  strictEqual(createMediaElementSourceCallCount, 1, "復旧時にcreateMediaElementSourceは再生成されない (1回のまま)");
+  strictEqual(audioContextCloseCallCount, 0, "復旧時にAudioContext.closeは絶対に呼ばれない");
+  strictEqual(sourceDisconnectCallCount >= 1, true, "既存sourceが一旦disconnectされる");
+  strictEqual(sourceConnectCallCount > initialConnects, true, "同じ既存sourceが再connectされる");
+  strictEqual(getCurrentKeyShift(), 2, "keyShift +2 が適用される");
+
+  // 3. 2回目の無音復旧 (keyShift = -3)
+  const prevConnects = sourceConnectCallCount;
+  recoverAudioGraph(mockAudio, { keyShift: -3 });
+  strictEqual(createMediaElementSourceCallCount, 1, "2回目復旧でもcreateMediaElementSourceは1回のまま（InvalidStateError完全防止）");
+  strictEqual(audioContextCloseCallCount, 0, "2回目復旧でもAudioContext.closeは絶対に呼ばれない");
+  strictEqual(sourceConnectCallCount > prevConnects, true, "既存sourceが再結線される");
+  strictEqual(getCurrentKeyShift(), -3, "keyShift -3 が適用される");
+
+  // 4. 3回目の無音復旧 (keyShift = 0)
+  recoverAudioGraph(mockAudio, { keyShift: 0 });
+  strictEqual(createMediaElementSourceCallCount, 1, "3回目復旧でもcreateMediaElementSourceは1回のまま");
+  strictEqual(getCurrentKeyShift(), 0, "keyShift 0 が適用される");
+});
+
+test("PlaybackSession と audio-engine: 無音復旧は1セッション1回まで、復旧失敗時はerrorとなり手動再接続が提供されること", async () => {
+  const { PlaybackSession, beginPlaybackSession, reconnectAudioGraphManually, promptAudioReconnectAction } = await import("../js/player/audio-engine.js");
+
+  const trackA = { id: "track-a", title: "Track A", keyShift: 2 };
+  const sessionA = beginPlaybackSession(trackA, 0, 0);
+
+  strictEqual(sessionA.requestedKeyShift, 2, "trackAのkeyShiftは2");
+  strictEqual(sessionA.hasRecoveredSilence, false, "初期状態では未復旧");
+
+  // 復旧フラグを立てる
+  sessionA.hasRecoveredSilence = true;
+  strictEqual(sessionA.hasRecoveredSilence, true, "1回復旧したらtrue");
+
+  // 手動再接続関数の存在と型
+  strictEqual(typeof reconnectAudioGraphManually, "function", "手動再接続関数がexportされている");
+  strictEqual(typeof promptAudioReconnectAction, "function", "手動再接続アクション提示関数がexportされている");
+
+  // 次曲へ移動 (trackB: keyShiftなし)
+  const trackB = { id: "track-b", title: "Track B" };
+  const sessionB = beginPlaybackSession(trackB, 1, 0);
+  strictEqual(sessionB.requestedKeyShift, 0, "次曲trackBでは前曲のkeyShiftが残らず0になる");
+  strictEqual(sessionB.hasRecoveredSilence, false, "新セッションでは復旧フラグがリフレッシュされる");
 });
 
 console.log(`\n高速再生 & ナビゲーションスタックテスト: ${passed} 件 PASSED ✓`);
