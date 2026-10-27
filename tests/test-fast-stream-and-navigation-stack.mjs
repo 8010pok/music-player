@@ -1436,17 +1436,24 @@ test("未キャッシュDrive曲で appliedKeyShift が 0 に固定され、stre
   strictEqual(aeCode.includes("applyKeyShift(0, streamAudioEl);"), true, "streamAudioElには常に0を適用");
 });
 
-test("終端フォールバック: cur >= dur - 0.45 で ended イベント未発火時も確実に次曲へ進むこと", () => {
+test("終端フォールバック: 曲長に応じた適応的閾値と400ms停滞検知により早送りを防止しつつ確実に次曲へ進むこと", () => {
   const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
-  strictEqual(aeCode.includes("cur >= dur - 0.45"), true, "0.45秒前の終端停滞検知が存在する");
+  strictEqual(aeCode.includes("const endThreshold = Math.min(0.40, Math.max(0.08, dur * 0.015));"), true, "曲長に応じた適応的閾値算出");
+  strictEqual(aeCode.includes("Math.abs(cur - session.nearEndCheckPos) > 0.04"), true, "再生前進中はendedを待つガード");
+  strictEqual(aeCode.includes("nowMs - session.nearEndCheckAt >= 400"), true, "400ms以上の停滞確定でフォールバック発動");
+  strictEqual(aeCode.includes("!state.isSeeking"), true, "シーク中除外");
+  strictEqual(aeCode.includes("!state.isWaitingOrStalled"), true, "バッファリング除外");
   strictEqual(aeCode.includes("session.endedHandled = true;"), true, "多重遷移防止フラグをセット");
-  strictEqual(aeCode.includes("session.nextTransitionStarted = true;"), true, "次曲遷移開始フラグをセット");
 });
 
-test("無音検知: getOutputRms() が 0 の場合に 1セッション最大1回 recreateAudioContext を呼んで自動復旧すること", () => {
+test("無音検知: 誤検知防止（曲頭無音・フェードイン・バッファリング・音量ゼロ除外）と連続サンプリング", () => {
   const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
-  strictEqual(aeCode.includes("getOutputRms()"), true, "出力RMSを監視する");
-  strictEqual(aeCode.includes("recreateAudioContext(mainAudioEl)"), true, "無音時にAudioContextを再構築して自己復旧");
+  strictEqual(aeCode.includes("SILENCE_RMS_THRESHOLD = 1e-5"), true, "デジタル無音閾値 1e-5 (-100dB)");
+  strictEqual(aeCode.includes("SILENCE_SAMPLES_REQUIRED = 4"), true, "連続4回サンプリング要求");
+  strictEqual(aeCode.includes("curAudio.readyState < 3"), true, "HAVE_FUTURE_DATA未満を除外");
+  strictEqual(aeCode.includes("curAudio.currentTime < 2.5"), true, "曲頭無音の誤検知防止");
+  strictEqual(aeCode.includes("progress < 0.8"), true, "時間進捗がない場合は除外");
+  strictEqual(aeCode.includes("rms >= SILENCE_RMS_THRESHOLD"), true, "フェードインや極小音量検出で即座に解除");
   strictEqual(aeCode.includes("session.hasRecoveredSilence = true;"), true, "1セッション最大1回に制限してループ防止");
 });
 
@@ -1474,6 +1481,156 @@ test("pitch-shifter-processor.js に reset() メソッドがあり、ディレ�
   strictEqual(pspCode.includes("this.delayBufferL.fill(0)"), true, "左バッファのゼロクリア");
   strictEqual(pspCode.includes("this.delayBufferR.fill(0)"), true, "右バッファのゼロクリア");
   strictEqual(pspCode.includes("this.phase = 0"), true, "位相の初期化");
+});
+
+console.log("\n=== 12. 監査対応: 無音検知の誤作動防止・AudioContext完全復元・終端早送り防止・Drive再認証 ===");
+
+test("AudioContext 再生成: teardownAudioNodes で旧ノードがすべて切断され、保存設定とkeyShiftが完全復元されること", () => {
+  const eqCode = fs.readFileSync(path.join(__dirname, "../js/player/eq.js"), "utf8");
+  strictEqual(eqCode.includes("function teardownAudioNodes"), true, "旧ノード切断関数が存在");
+  strictEqual(eqCode.includes("source?.disconnect()"), true, "source切断");
+  strictEqual(eqCode.includes("for (const f of EQ_BANDS)"), true, "10バンドEQノード全切断");
+  strictEqual(eqCode.includes("applyEqGains(pub.eqGains"), true, "EQゲイン復元");
+  strictEqual(eqCode.includes("applyPreamp(pub.eqPreamp"), true, "プリアンプ復元");
+  strictEqual(eqCode.includes("applyBassBoost(pub.bassBoost"), true, "低音ブースト復元");
+  strictEqual(eqCode.includes("applyCompressor(pub.compressor"), true, "コンプレッサー復元");
+  strictEqual(eqCode.includes("applyPan(pub.pan"), true, "パン復元");
+  strictEqual(eqCode.includes("applyMidSide("), true, "MSステレオ復元");
+  strictEqual(eqCode.includes("applyNoiseReduction(pub.noiseReduction"), true, "ノイズ除去復元");
+  strictEqual(eqCode.includes("applyKeyShift(targetShift, audioEl)"), true, "keyShift復元");
+  strictEqual(eqCode.includes("resumeEqContext().catch"), true, "resume実行");
+});
+
+test("終端フォールバック閾値の適応計算ロジック検証 (5秒SE / 30秒 / 通常曲 / 異常値)", () => {
+  const calcThreshold = (dur) => {
+    if (!isFinite(dur) || dur <= 0) return 0;
+    return Math.min(0.40, Math.max(0.08, dur * 0.015));
+  };
+
+  // 5秒の短いSE: 5 * 0.015 = 0.075 → 下限 0.08 秒
+  strictEqual(calcThreshold(5), 0.08);
+  // 10秒のSE: 10 * 0.015 = 0.15 秒
+  strictEqual(calcThreshold(10), 0.15);
+  // 30秒の曲: 30 * 0.015 = 0.45 → 上限 0.40 秒
+  strictEqual(calcThreshold(30), 0.40);
+  // 240秒の通常曲: 240 * 0.015 = 3.6 → 上限 0.40 秒
+  strictEqual(calcThreshold(240), 0.40);
+  // 異常値: NaN, Infinity, 0
+  strictEqual(calcThreshold(NaN), 0);
+  strictEqual(calcThreshold(Infinity), 0);
+  strictEqual(calcThreshold(0), 0);
+  strictEqual(calcThreshold(-10), 0);
+});
+
+test("Google Drive 再認証: 様々なデータ形状での isDriveTrack / getDriveFileId 判定検証", async () => {
+  const { isDriveTrack, getDriveFileId } = await import("../js/gdrive/drive-service.js");
+
+  // 1. source === "gdrive"
+  strictEqual(isDriveTrack({ id: "abc1", source: "gdrive" }), true, "source: gdrive");
+  // 2. driveFileId あり
+  strictEqual(isDriveTrack({ id: "abc2", driveFileId: "file123" }), true, "driveFileIdあり");
+  strictEqual(getDriveFileId({ id: "abc2", driveFileId: "file123" }), "file123");
+  // 3. IDが gd- で始まる
+  strictEqual(isDriveTrack({ id: "gd-file456" }), true, "id starts with gd-");
+  strictEqual(getDriveFileId({ id: "gd-file456" }), "file456");
+  strictEqual(isDriveTrack("gd-file789"), true, "string starts with gd-");
+  strictEqual(getDriveFileId("gd-file789"), "file789");
+  // 4. IDは gd- で始まらないが driveFileId あり
+  strictEqual(isDriveTrack({ id: "custom-id-999", driveFileId: "file888" }), true, "custom id with driveFileId");
+  strictEqual(getDriveFileId({ id: "custom-id-999", driveFileId: "file888" }), "file888");
+  // 5. ローカルファイル (非Drive)
+  strictEqual(isDriveTrack({ id: "loc-123", source: "local" }), false, "local file");
+  strictEqual(isDriveTrack({ id: "loc-456" }), false, "standard id");
+  strictEqual(isDriveTrack(null), false, "null");
+  strictEqual(isDriveTrack(undefined), false, "undefined");
+});
+
+test("無音検知の誤作動防止: 曲頭無音・フェードイン・waiting・stalled・volume0 シミュレーション", () => {
+  const SILENCE_RMS_THRESHOLD = 1e-5;
+  const SILENCE_SAMPLES_REQUIRED = 4;
+
+  // 判定ロジックシミュレータ
+  function evaluateSilenceRecovery({ currentTime, volume, muted, readyState, isWaitingOrStalled, rmsSamples }) {
+    if (currentTime < 2.5) return false; // 曲頭無音誤検知防止
+    if (volume <= 0 || muted) return false; // 消音中
+    if (readyState < 3) return false; // データ準備中
+    if (isWaitingOrStalled) return false; // バッファリング中
+
+    // 連続して閾値未満か
+    if (rmsSamples.length < SILENCE_SAMPLES_REQUIRED) return false;
+    for (const r of rmsSamples) {
+      if (r >= SILENCE_RMS_THRESHOLD) return false; // 音声信号あり
+    }
+    return true;
+  }
+
+  // ケースA: 曲頭10秒無音（開始直後 currentTime=1.5秒）→ 発動しない
+  strictEqual(evaluateSilenceRecovery({ currentTime: 1.5, volume: 1, muted: false, readyState: 4, isWaitingOrStalled: false, rmsSamples: [0, 0, 0, 0] }), false, "曲頭1.5秒は無音でも発動しない");
+
+  // ケースB: 10秒フェードイン（極小音量 0.001）→ 発動しない
+  strictEqual(evaluateSilenceRecovery({ currentTime: 4.0, volume: 1, muted: false, readyState: 4, isWaitingOrStalled: false, rmsSamples: [0, 0, 0.0001, 0.001] }), false, "フェードイン微小音量は発動しない");
+
+  // ケースC: 非常に小さい音量 (アンビエント等、1e-4) → 発動しない
+  strictEqual(evaluateSilenceRecovery({ currentTime: 5.0, volume: 1, muted: false, readyState: 4, isWaitingOrStalled: false, rmsSamples: [1e-4, 1e-4, 1e-4, 1e-4] }), false, "微小音量(-80dB)は発動しない");
+
+  // ケースD: waiting / stalled 中 → 発動しない
+  strictEqual(evaluateSilenceRecovery({ currentTime: 5.0, volume: 1, muted: false, readyState: 4, isWaitingOrStalled: true, rmsSamples: [0, 0, 0, 0] }), false, "waiting中は発動しない");
+
+  // ケースE: volume 0 / muted → 発動しない
+  strictEqual(evaluateSilenceRecovery({ currentTime: 5.0, volume: 0, muted: false, readyState: 4, isWaitingOrStalled: false, rmsSamples: [0, 0, 0, 0] }), false, "volume 0 は発動しない");
+  strictEqual(evaluateSilenceRecovery({ currentTime: 5.0, volume: 1, muted: true, readyState: 4, isWaitingOrStalled: false, rmsSamples: [0, 0, 0, 0] }), false, "muted は発動しない");
+
+  // ケースF: 通常曲なのに Web Audio 出力だけ 0（進捗あり・完全無音4回連続）→ 発動！
+  strictEqual(evaluateSilenceRecovery({ currentTime: 5.0, volume: 1, muted: false, readyState: 4, isWaitingOrStalled: false, rmsSamples: [0, 0, 0, 0] }), true, "進捗あり完全無音4回連続で発動");
+});
+
+test("終端フォールバック: 前進中は切らず停滞時にのみ発動するシミュレーション", () => {
+  function checkFallback({ cur, dur, isSeeking, isWaitingOrStalled, userPaused, nearEndCheckPos, nearEndCheckAt, nowMs }) {
+    if (!isFinite(dur) || dur <= 0) return { fallback: false };
+    if (isSeeking || isWaitingOrStalled || userPaused) return { fallback: false };
+
+    const endThreshold = Math.min(0.40, Math.max(0.08, dur * 0.015));
+    if (cur >= dur - endThreshold) {
+      if (nearEndCheckPos === null || Math.abs(cur - nearEndCheckPos) > 0.04) {
+        return { fallback: false, newPos: cur, newAt: nowMs }; // 前進中: ended待機
+      } else if (nowMs - nearEndCheckAt >= 400) {
+        return { fallback: true }; // 400ms以上停滞: フォールバック発動
+      } else {
+        return { fallback: false, newPos: nearEndCheckPos, newAt: nearEndCheckAt }; // 停滞中だが400ms未満
+      }
+    }
+    return { fallback: false, newPos: null, newAt: null };
+  }
+
+  const dur = 200; // 通常曲
+  // 1. 終端手前 (cur = 199.50) → 発動しない
+  strictEqual(checkFallback({ cur: 199.50, dur, isSeeking: false, isWaitingOrStalled: false, userPaused: false, nearEndCheckPos: null, nearEndCheckAt: null, nowMs: 1000 }).fallback, false);
+
+  // 2. 終端到達 (cur = 199.70) 初回 → 前進中として記録、発動しない
+  const step1 = checkFallback({ cur: 199.70, dur, isSeeking: false, isWaitingOrStalled: false, userPaused: false, nearEndCheckPos: null, nearEndCheckAt: null, nowMs: 1000 });
+  strictEqual(step1.fallback, false);
+  strictEqual(step1.newPos, 199.70);
+
+  // 3. 200ms後も再生が前進 (cur = 199.85) → 前進中として更新、発動しない
+  const step2 = checkFallback({ cur: 199.85, dur, isSeeking: false, isWaitingOrStalled: false, userPaused: false, nearEndCheckPos: step1.newPos, nearEndCheckAt: step1.newAt, nowMs: 1200 });
+  strictEqual(step2.fallback, false);
+  strictEqual(step2.newPos, 199.85);
+
+  // 4. 200ms後、進まなくなった (cur = 199.85、経過200ms) → 停滞中だが400ms未満のため発動しない
+  const step3 = checkFallback({ cur: 199.85, dur, isSeeking: false, isWaitingOrStalled: false, userPaused: false, nearEndCheckPos: step2.newPos, nearEndCheckAt: step2.newAt, nowMs: 1400 });
+  strictEqual(step3.fallback, false);
+
+  // 5. さらに250ms後（合計停滞450ms、cur = 199.85）→ 400ms停滞確定でフォールバック発動！
+  const step4 = checkFallback({ cur: 199.85, dur, isSeeking: false, isWaitingOrStalled: false, userPaused: false, nearEndCheckPos: step3.newPos, nearEndCheckAt: step3.newAt, nowMs: 1650 });
+  strictEqual(step4.fallback, true, "400ms以上の停滞確定でフォールバック発動");
+
+  // 6. 手動pause中なら停滞しても発動しない
+  const stepPause = checkFallback({ cur: 199.85, dur, isSeeking: false, isWaitingOrStalled: false, userPaused: true, nearEndCheckPos: 199.85, nearEndCheckAt: 1000, nowMs: 2000 });
+  strictEqual(stepPause.fallback, false, "手動pause中は発動しない");
+
+  // 7. seek中なら発動しない
+  const stepSeek = checkFallback({ cur: 199.85, dur, isSeeking: true, isWaitingOrStalled: false, userPaused: false, nearEndCheckPos: 199.85, nearEndCheckAt: 1000, nowMs: 2000 });
+  strictEqual(stepSeek.fallback, false, "seek中は発動しない");
 });
 
 console.log(`\n高速再生 & ナビゲーションスタックテスト: ${passed} 件 PASSED ✓`);

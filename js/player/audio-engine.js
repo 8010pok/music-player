@@ -183,7 +183,11 @@ export class PlaybackSession {
     this.bgCacheController = null;
     this.watchdogId = null;
     this.silenceCheckTimer = null;
+    this.silenceSampleInterval = null;
+    this.silenceSamples = [];
     this.hasRecoveredSilence = false;
+    this.nearEndCheckPos = null;
+    this.nearEndCheckAt = null;
     this.objectUrl = null;
     this.isStale = false;
   }
@@ -197,6 +201,10 @@ export class PlaybackSession {
     if (this.silenceCheckTimer) {
       clearTimeout(this.silenceCheckTimer);
       this.silenceCheckTimer = null;
+    }
+    if (this.silenceSampleInterval) {
+      clearInterval(this.silenceSampleInterval);
+      this.silenceSampleInterval = null;
     }
     if (this.abortController) {
       try { this.abortController.abort(); } catch {}
@@ -231,6 +239,116 @@ export function beginPlaybackSession(track, queueIndex, startTime = 0) {
   state.currentPlayAttemptId = activePlaybackSession.playAttemptId;
   state.currentPlayAttemptStartTime = (typeof performance !== "undefined" && typeof performance.now === "function") ? performance.now() : Date.now();
   return activePlaybackSession;
+}
+
+const SILENCE_RMS_THRESHOLD = 1e-5; // -100 dB 以下（デジタル無音相当）
+const SILENCE_SAMPLES_REQUIRED = 4; // 連続4回無音で判定
+
+/**
+ * 安全な無音監視と自動復旧スケジューラ
+ * 誤検知（曲頭無音、フェードイン、極小音量、バッファリング、一時停止）を完全排除
+ * @param {PlaybackSession} session
+ */
+function scheduleSilenceCheck(session) {
+  if (!session || session.isStale || session.hasRecoveredSilence) return;
+  if (session.activeElement !== mainAudioEl) return; // stream-audio-el は対象外
+
+  const pub = getPublic() || {};
+  const needsWebAudio = !!pub.enableAudioEffects || session.requestedKeyShift !== 0;
+  if (!needsWebAudio) return; // Web Audio 接続経路でなければ対象外
+
+  if (session.silenceCheckTimer) {
+    clearTimeout(session.silenceCheckTimer);
+    session.silenceCheckTimer = null;
+  }
+  if (session.silenceSampleInterval) {
+    clearInterval(session.silenceSampleInterval);
+    session.silenceSampleInterval = null;
+  }
+
+  // 1. 曲頭の意図的な無音（イントロ無音、10秒フェードイン等）を排除するため、
+  //    再生開始直後はサンプリングせず、3.5秒後に第1段階（進捗確認）を実行。
+  session.silenceCheckTimer = setTimeout(() => {
+    if (session.isStale || session !== activePlaybackSession) return;
+    const curAudio = getAudioElement();
+    if (!curAudio || curAudio !== mainAudioEl || curAudio.paused) return;
+    if (curAudio.volume <= 0 || curAudio.muted) return;
+    if (curAudio.readyState < 3) return; // HAVE_FUTURE_DATA (3) 未満は除外
+    if (state.isWaitingOrStalled) return; // バッファリング中は除外
+    if (curAudio.currentTime < 2.5) return; // 曲頭無音誤検知防止
+
+    const t0Pos = curAudio.currentTime;
+
+    // 2. 「時間が継続して進んでいるか」を確認（1.2秒後に比較）
+    session.silenceCheckTimer = setTimeout(() => {
+      if (session.isStale || session !== activePlaybackSession) return;
+      const curAudioAfter = getAudioElement();
+      if (!curAudioAfter || curAudioAfter !== mainAudioEl || curAudioAfter.paused) return;
+      if (curAudioAfter.volume <= 0 || curAudioAfter.muted) return;
+      if (curAudioAfter.readyState < 3 || state.isWaitingOrStalled) return;
+
+      const progress = curAudioAfter.currentTime - t0Pos;
+      // 時間が進んでいないなら（バッファ遅延等）、Web Audio の無音スタックではない
+      if (progress < 0.8) return;
+
+      // 3. RMS 連続サンプリング開始 (400ms間隔で4回測定)
+      session.silenceSamples = [];
+      session.silenceSampleInterval = setInterval(() => {
+        if (session.isStale || session !== activePlaybackSession) {
+          clearInterval(session.silenceSampleInterval);
+          session.silenceSampleInterval = null;
+          return;
+        }
+        const a = getAudioElement();
+        if (!a || a !== mainAudioEl || a.paused || a.muted || a.volume <= 0 || a.readyState < 3 || state.isWaitingOrStalled) {
+          clearInterval(session.silenceSampleInterval);
+          session.silenceSampleInterval = null;
+          return;
+        }
+
+        const rms = getOutputRms();
+        if (rms < 0) return;
+
+        // フェードインや微小音量（アンビエント等）が検出されたら即座に正常判定で終了
+        if (rms >= SILENCE_RMS_THRESHOLD) {
+          clearInterval(session.silenceSampleInterval);
+          session.silenceSampleInterval = null;
+          session.silenceSamples = [];
+          return;
+        }
+
+        session.silenceSamples.push(rms);
+        if (session.silenceSamples.length >= SILENCE_SAMPLES_REQUIRED) {
+          clearInterval(session.silenceSampleInterval);
+          session.silenceSampleInterval = null;
+
+          // ★ 4回すべて無音閾値未満かつ時間が進んでいる → Web Audio 出力スタックと確定
+          if (!session.hasRecoveredSilence) {
+            session.hasRecoveredSilence = true;
+            console.warn(`[audio-engine] Web Audio 無音状態を確定検知（連続${SILENCE_SAMPLES_REQUIRED}回 RMS < ${SILENCE_RMS_THRESHOLD}）。自動復旧を実行 (1/1):`, session.trackId);
+            try {
+              const curPos = a.currentTime;
+              recreateAudioContext(mainAudioEl, { keyShift: session.appliedKeyShift });
+              a.currentTime = curPos;
+              a.playbackRate = getEffectivePlaybackRate();
+              applyTrackVolume(a, session.track);
+              const p = a.play();
+              if (p && typeof p.catch === "function") {
+                p.catch((recErr) => {
+                  console.warn("[audio-engine] 無音復旧 play 失敗:", recErr);
+                  handlePlaybackFinalFailure(session.playAttemptId, session.track, recErr);
+                });
+              }
+              toast("音声出力を再接続しました", "info", 2500);
+            } catch (recErr) {
+              console.warn("[audio-engine] 無音復旧例外:", recErr);
+              handlePlaybackFinalFailure(session.playAttemptId, session.track, recErr);
+            }
+          }
+        }
+      }, 400);
+    }, 1200);
+  }, 3500);
 }
 
 export function getMainAudioElement() { return mainAudioEl; }
@@ -404,6 +522,8 @@ const state = {
   preloadToken: 0,        // プリロード要求の世代カウンタ（in-flight の stale 破棄用）
   preloadingId: null,     // 現在 getBlob 取得中のトラック id（二重取得防止）
   lastSessionSaveAt: 0,   // 再生セッション状態の localStorage 自動保存スロットリング用
+  isWaitingOrStalled: false, // バッファリング中または stall 状態
+  isSeeking: false,          // シーク操作中フラグ
 };
 
 // スリープタイマー管理 (オフ / 15分 / 30分 / 60分 / 曲終了時)
@@ -677,6 +797,7 @@ export function attachElementListeners(el) {
 
   el.addEventListener("playing", (e) => {
     if (!isFromActive(e)) return;
+    state.isWaitingOrStalled = false;
     logPlaybackEvent("playing", { targetEl: e.currentTarget || el });
     clearPlayingWatchdog();
     if (stallRecoveryTimer) {
@@ -694,6 +815,7 @@ export function attachElementListeners(el) {
 
   el.addEventListener("timeupdate", (e) => {
     if (!isFromActive(e)) return;
+    state.isWaitingOrStalled = false;
     onTimeUpdate(e);
   });
 
@@ -727,6 +849,7 @@ export function attachElementListeners(el) {
   el.addEventListener("canplay", (e) => {
     logPlaybackEvent("canplay", { targetEl: e.currentTarget || el });
     if (!isFromActive(e)) return;
+    state.isWaitingOrStalled = false;
     const cur = appState.get().currentTrack;
     if (cur && cur.id) {
       logPerfMark(cur.id, "canplay", state.currentPlayAttemptStartTime);
@@ -756,14 +879,36 @@ export function attachElementListeners(el) {
 
   el.addEventListener("waiting", (e) => {
     if (!isFromActive(e)) return;
+    state.isWaitingOrStalled = true;
     logPlaybackEvent("waiting", { targetEl: e.currentTarget || el });
     onStallOrWaiting(e.currentTarget || e.target);
   });
 
   el.addEventListener("stalled", (e) => {
     if (!isFromActive(e)) return;
+    state.isWaitingOrStalled = true;
     logPlaybackEvent("stalled", { targetEl: e.currentTarget || el });
     onStallOrWaiting(e.currentTarget || e.target);
+  });
+
+  el.addEventListener("seeking", (e) => {
+    if (!isFromActive(e)) return;
+    state.isSeeking = true;
+    const session = activePlaybackSession;
+    if (session) {
+      session.nearEndCheckPos = null;
+      session.nearEndCheckAt = null;
+    }
+  });
+
+  el.addEventListener("seeked", (e) => {
+    if (!isFromActive(e)) return;
+    state.isSeeking = false;
+    const session = activePlaybackSession;
+    if (session) {
+      session.nearEndCheckPos = null;
+      session.nearEndCheckAt = null;
+    }
   });
 
   el.addEventListener("suspend", (e) => {
@@ -1507,35 +1652,7 @@ function playPreloadedSync(index, track, url, { isDirectStream = false } = {}) {
   }
 
   // ★ 無音検知と安全な自動復旧（Web Audio 接続時の無音化防止・1セッション最大1回）
-  if (!session.isStale && session.activeElement === mainAudioEl && needsWebAudio && !session.hasRecoveredSilence) {
-    session.silenceCheckTimer = setTimeout(() => {
-      if (session.isStale || session !== activePlaybackSession) return;
-      const curAudio = getAudioElement();
-      if (!curAudio || curAudio !== mainAudioEl || curAudio.paused) return;
-      if (curAudio.volume <= 0 || curAudio.muted) return;
-      if (curAudio.currentTime < 2.0) return;
-      if (curAudio.readyState < 2) return;
-
-      const rms = getOutputRms();
-      if (rms === 0) {
-        console.warn(`[audio-engine] Web Audio 無音状態を検知。自動復旧を実行します (1/1):`, session.trackId);
-        session.hasRecoveredSilence = true;
-        try {
-          recreateAudioContext(mainAudioEl);
-          const curPos = curAudio.currentTime;
-          applyKeyShift(session.appliedKeyShift, mainAudioEl);
-          curAudio.currentTime = curPos;
-          curAudio.play().catch((recErr) => {
-            console.warn("[audio-engine] 無音復旧 play 失敗:", recErr);
-            handlePlaybackFinalFailure(session.playAttemptId, session.track, recErr);
-          });
-        } catch (recErr) {
-          console.warn("[audio-engine] 無音復旧例外:", recErr);
-          handlePlaybackFinalFailure(session.playAttemptId, session.track, recErr);
-        }
-      }
-    }, 5000);
-  }
+  scheduleSilenceCheck(session);
 
   startPlayingWatchdog(myAttemptId, track, 0, isDirectStream);
 
@@ -1972,7 +2089,19 @@ async function autoStartFirstTrack() {
 
 export function seekTo(sec) {
   if (!isFinite(sec)) return;
-  try { audioEl.currentTime = Math.max(0, sec); } catch (e) { console.warn("seek 失敗", e); }
+  state.isSeeking = true;
+  const session = activePlaybackSession;
+  if (session) {
+    session.nearEndCheckPos = null;
+    session.nearEndCheckAt = null;
+  }
+  try {
+    audioEl.currentTime = Math.max(0, sec);
+  } catch (e) {
+    console.warn("seek 失敗", e);
+  } finally {
+    setTimeout(() => { state.isSeeking = false; }, 200);
+  }
 }
 
 export function setVolume(v) {
@@ -2424,35 +2553,7 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
       }).catch(() => {});
 
       // ★ 無音検知と安全な自動復旧（Web Audio 接続時の無音化防止・1セッション最大1回）
-      if (!session.isStale && session.activeElement === mainAudioEl && needsWebAudio && !session.hasRecoveredSilence) {
-        session.silenceCheckTimer = setTimeout(() => {
-          if (session.isStale || session !== activePlaybackSession) return;
-          const curAudio = getAudioElement();
-          if (!curAudio || curAudio !== mainAudioEl || curAudio.paused) return;
-          if (curAudio.volume <= 0 || curAudio.muted) return;
-          if (curAudio.currentTime < 2.0) return;
-          if (curAudio.readyState < 2) return; // buffer underrun 除外
-
-          const rms = getOutputRms();
-          if (rms === 0) {
-            console.warn(`[audio-engine] Web Audio 無音状態を検知。自動復旧を実行します (1/1):`, session.trackId);
-            session.hasRecoveredSilence = true;
-            try {
-              recreateAudioContext(mainAudioEl);
-              const curPos = curAudio.currentTime;
-              applyKeyShift(session.appliedKeyShift, mainAudioEl);
-              curAudio.currentTime = curPos;
-              curAudio.play().catch((recErr) => {
-                console.warn("[audio-engine] 無音復旧 play 失敗:", recErr);
-                handlePlaybackFinalFailure(session.playAttemptId, session.track, recErr);
-              });
-            } catch (recErr) {
-              console.warn("[audio-engine] 無音復旧例外:", recErr);
-              handlePlaybackFinalFailure(session.playAttemptId, session.track, recErr);
-            }
-          }
-        }, 5000);
-      }
+      scheduleSilenceCheck(session);
     };
     audioEl.addEventListener("loadedmetadata", onMeta);
     audioEl.addEventListener("canplay", onCanPlay);
@@ -2747,13 +2848,40 @@ function onTimeUpdate() {
 
   // ★ 終端フォールバック (End-of-track fallback)
   // Google Drive Range ストリーミングや一部ブラウザで ended イベントが
-  // ドロップした場合（曲末尾 0.45 秒以内で再生が停滞）、確実に次曲へ進める
+  // ドロップした場合（曲末尾で再生が停滞）、確実に次曲へ進める。
+  // 正常再生中のラストノートやフェードアウトを強制カットしないよう、
+  // 「終端付近に達した上で、再生位置が一定時間進まなくなった（停滞した）」ことを確認する。
   const session = activePlaybackSession;
-  if (session && !session.endedHandled && !session.nextTransitionStarted && !state.userPausedExplicitly && !state.transitioning && isFinite(dur) && dur > 1.0 && cur >= dur - 0.45 && !audioEl.paused) {
-    session.endedHandled = true;
-    session.nextTransitionStarted = true;
-    onEnded();
-    return;
+  if (
+    session &&
+    !session.endedHandled &&
+    !session.nextTransitionStarted &&
+    !state.userPausedExplicitly &&
+    !state.transitioning &&
+    !state.isSeeking &&
+    !state.isWaitingOrStalled &&
+    isFinite(dur) &&
+    dur > 0 &&
+    !audioEl.paused
+  ) {
+    const endThreshold = Math.min(0.40, Math.max(0.08, dur * 0.015));
+    if (cur >= dur - endThreshold) {
+      const nowMs = Date.now();
+      if (session.nearEndCheckPos === null || Math.abs(cur - session.nearEndCheckPos) > 0.04) {
+        // 再生が前進している最中はフォールバックを発動せず、ブラウザ本来の ended を待つ
+        session.nearEndCheckPos = cur;
+        session.nearEndCheckAt = nowMs;
+      } else if (nowMs - session.nearEndCheckAt >= 400) {
+        // 終端付近で 400ms 以上 currentTime が進まなくなった（ended ドロップ停滞）
+        session.endedHandled = true;
+        session.nextTransitionStarted = true;
+        onEnded();
+        return;
+      }
+    } else {
+      session.nearEndCheckPos = null;
+      session.nearEndCheckAt = null;
+    }
   }
 
   // ★ UI更新のスロットリング (200ms間引き) で描画負荷を大幅軽減

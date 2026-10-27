@@ -25,6 +25,8 @@
  * 既存EQと完全に同じ (新たに iPhone ロック画面挙動を悪化させない)。
  */
 
+import { getPublic } from "../store/settings.js";
+
 let ctx = null;
 let source = null;
 
@@ -657,10 +659,52 @@ export function getOutputRms() {
 }
 
 /**
- * Web Audio グラフを安全に再生成（無音状態からの自己復旧用）
- * @param {HTMLAudioElement} audioEl
+ * 既存の全オーディオノードを切断・破棄
  */
-export function recreateAudioContext(audioEl) {
+function teardownAudioNodes() {
+  try { source?.disconnect(); } catch (_) {}
+  try { preampGain?.disconnect(); } catch (_) {}
+  try { highPass?.disconnect(); } catch (_) {}
+  try {
+    for (const f of EQ_BANDS) {
+      eqFilters[String(f)]?.disconnect();
+      delete eqFilters[String(f)];
+    }
+  } catch (_) {}
+  try { bassBoost?.disconnect(); } catch (_) {}
+  try { msInput?.disconnect(); } catch (_) {}
+  try { msSplitter?.disconnect(); } catch (_) {}
+  try { msMidGainL?.disconnect(); msMidGainR?.disconnect(); msMidSum?.disconnect(); } catch (_) {}
+  try { msSideGainL?.disconnect(); msSideGainR_neg?.disconnect(); msSideSum?.disconnect(); } catch (_) {}
+  try { msMidScaleNode?.disconnect(); msSideScaleNode?.disconnect(); } catch (_) {}
+  try { msOutMidToL?.disconnect(); msOutMidToR?.disconnect(); } catch (_) {}
+  try { msOutSideToL?.disconnect(); msOutSideToR_neg?.disconnect(); } catch (_) {}
+  try { msMerger?.disconnect(); } catch (_) {}
+  try { panner?.disconnect(); } catch (_) {}
+  try { compressor?.disconnect(); } catch (_) {}
+  try { lowPass?.disconnect(); } catch (_) {}
+  try { pitchDryGain?.disconnect(); } catch (_) {}
+  try { pitchWetGain?.disconnect(); } catch (_) {}
+  try { pitchShifterNode?.disconnect(); } catch (_) {}
+  try { outputAnalyser?.disconnect(); } catch (_) {}
+}
+
+/**
+ * 出力監視用 AnalyserNode を取得
+ */
+export function getOutputAnalyserNode() {
+  return outputAnalyser;
+}
+
+/**
+ * Web Audio グラフを安全に再生成（無音状態からの自己復旧用）
+ * 全ノード・エフェクト設定・キーシフト・再生状態を完全に復元する
+ * @param {HTMLAudioElement} audioEl
+ * @param {{ keyShift?: number }} [options]
+ */
+export function recreateAudioContext(audioEl, { keyShift } = {}) {
+  const targetShift = typeof keyShift === "number" ? keyShift : currentKeyShift;
+  teardownAudioNodes();
   try {
     if (ctx) {
       ctx.close().catch(() => {});
@@ -668,13 +712,67 @@ export function recreateAudioContext(audioEl) {
   } catch (_) {}
   ctx = null;
   source = null;
+  preampGain = null;
+  highPass = null;
+  lowPass = null;
+  bassBoost = null;
+  panner = null;
+  compressor = null;
   outputAnalyser = null;
   pitchShifterNode = null;
   pitchDryGain = null;
   pitchWetGain = null;
+  msInput = null;
+  msSplitter = null;
+  msMidGainL = null;
+  msMidGainR = null;
+  msSideGainL = null;
+  msSideGainR_neg = null;
+  msMidSum = null;
+  msSideSum = null;
+  msMidScaleNode = null;
+  msSideScaleNode = null;
+  msOutMidToL = null;
+  msOutMidToR = null;
+  msOutSideToL = null;
+  msOutSideToR_neg = null;
+  msMerger = null;
   isWorkletLoading = false;
+
   if (audioEl) {
     applyEffectsSetting(audioEl, true);
+
+    // ★ ユーザー設定（EQ、プリアンプ、低音、コンプレッサー、パン、MS、ノイズ除去）を完全再適用
+    const pub = getPublic() || {};
+    if (pub.eqGains) {
+      applyEqGains(pub.eqGains);
+    } else if (pub.eqPreset && pub.eqPreset !== "flat") {
+      applyEqGains(presetToGains(pub.eqPreset));
+    }
+    if (typeof pub.eqPreamp === "number") {
+      applyPreamp(pub.eqPreamp);
+    }
+    if (typeof pub.bassBoost === "number") {
+      applyBassBoost(pub.bassBoost);
+    }
+    if (pub.compressor && pub.compressor !== "off") {
+      applyCompressor(pub.compressor);
+    }
+    if (typeof pub.pan === "number") {
+      applyPan(pub.pan);
+    }
+    applyMidSide({
+      stereoWidth: pub.stereoWidth ?? 1,
+      vocalRemove: pub.vocalRemove ?? 0,
+      mono: !!pub.mono,
+    });
+    if (pub.noiseReduction && pub.noiseReduction !== "off") {
+      applyNoiseReduction(pub.noiseReduction);
+    }
+
+    // ★ キーシフト（Worklet / Dry / Wet）の完全再適用
+    applyKeyShift(targetShift, audioEl);
+    resumeEqContext().catch(() => {});
   }
 }
 
