@@ -36,6 +36,7 @@ const eqFilters = {}; // { '31': BiquadFilterNode, ... }
 let bassBoost = null;
 let panner = null;
 let compressor = null;
+let outputAnalyser = null;
 
 // ピッチシフター（キーチェンジ）用ノード
 let pitchShifterNode = null;
@@ -141,6 +142,10 @@ export function applyEffectsSetting(audioEl, enabled) {
     pitchWetGain = ctx.createGain();
     pitchWetGain.gain.value = currentKeyShift === 0 ? 0.0 : 1.0;
 
+    // --- 出力監視用 AnalyserNode (無音検知・RMS計測用) ---
+    outputAnalyser = ctx.createAnalyser();
+    outputAnalyser.fftSize = 256;
+
     // --- chain 接続 ---
     let node = source.connect(preampGain).connect(highPass);
     for (const f of EQ_BANDS) {
@@ -154,8 +159,8 @@ export function applyEffectsSetting(audioEl, enabled) {
     // バックグラウンドで AudioWorklet ロードと Wet 経路を接続
     ensurePitchShifterLoaded(ctx, node);
 
-    // 出口: msMerger → panner → compressor → lowPass → destination
-    msMerger.connect(panner).connect(compressor).connect(lowPass).connect(ctx.destination);
+    // 出口: msMerger → panner → compressor → lowPass → outputAnalyser → destination
+    msMerger.connect(panner).connect(compressor).connect(lowPass).connect(outputAnalyser).connect(ctx.destination);
   } catch (e) {
     console.warn("音声エフェクト初期化失敗", e);
     // source 生成済み(createMediaElementSource 後)に chain 構築が中断すると、
@@ -480,8 +485,13 @@ export function applyKeyShift(semitones, audioEl) {
   const shift = Math.max(-12, Math.min(12, Math.round(Number(semitones) || 0)));
   currentKeyShift = shift;
 
-  // 高速ストリーミング専用要素は Web Audio に接続しない
+  // 高速ストリーミング専用要素は Web Audio に接続しない（Worklet はバイパス状態を維持）
   if (audioEl && audioEl.id === "stream-audio-el") {
+    if (pitchDryGain && pitchWetGain && ctx) {
+      const now = ctx.currentTime;
+      pitchDryGain.gain.setValueAtTime(1, now);
+      pitchWetGain.gain.setValueAtTime(0, now);
+    }
     return;
   }
 
@@ -497,6 +507,9 @@ export function applyKeyShift(semitones, audioEl) {
   }
 
   if (pitchShifterNode) {
+    if (shift === 0) {
+      pitchShifterNode.port.postMessage({ type: "reset" });
+    }
     pitchShifterNode.port.postMessage({ type: "setSemitones", semitones: shift });
   }
 
@@ -511,6 +524,26 @@ export function applyKeyShift(semitones, audioEl) {
       pitchDryGain.gain.setValueAtTime(0, now);
       pitchWetGain.gain.setValueAtTime(1, now);
     }
+  }
+}
+
+/**
+ * ピッチシフターの状態をリセット（前曲のバッファクリア・完全バイパス化）
+ */
+export function resetPitchShifter() {
+  currentKeyShift = 0;
+  if (pitchShifterNode) {
+    try {
+      pitchShifterNode.port.postMessage({ type: "reset" });
+      pitchShifterNode.port.postMessage({ type: "setSemitones", semitones: 0 });
+    } catch (_) {}
+  }
+  if (ctx && pitchDryGain && pitchWetGain) {
+    const now = ctx.currentTime;
+    try {
+      pitchDryGain.gain.setValueAtTime(1, now);
+      pitchWetGain.gain.setValueAtTime(0, now);
+    } catch (_) {}
   }
 }
 
@@ -602,5 +635,46 @@ export function getEffectsState() {
     msMidScale: msMidScaleNode?.gain?.value ?? 1,
     msSideScale: msSideScaleNode?.gain?.value ?? 1,
   };
+}
+
+/**
+ * 現在の Web Audio 出力信号の実効 RMS を取得（無音検知用）
+ * @returns {number} RMS 値 (0.0〜1.0)、未初期化または停止時は -1
+ */
+export function getOutputRms() {
+  if (!outputAnalyser || !ctx || ctx.state !== "running") return -1;
+  try {
+    const data = new Float32Array(outputAnalyser.fftSize);
+    outputAnalyser.getFloatTimeDomainData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) {
+      sum += data[i] * data[i];
+    }
+    return Math.sqrt(sum / data.length);
+  } catch (_) {
+    return -1;
+  }
+}
+
+/**
+ * Web Audio グラフを安全に再生成（無音状態からの自己復旧用）
+ * @param {HTMLAudioElement} audioEl
+ */
+export function recreateAudioContext(audioEl) {
+  try {
+    if (ctx) {
+      ctx.close().catch(() => {});
+    }
+  } catch (_) {}
+  ctx = null;
+  source = null;
+  outputAnalyser = null;
+  pitchShifterNode = null;
+  pitchDryGain = null;
+  pitchWetGain = null;
+  isWorkletLoading = false;
+  if (audioEl) {
+    applyEffectsSetting(audioEl, true);
+  }
 }
 

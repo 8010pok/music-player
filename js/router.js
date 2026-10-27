@@ -158,10 +158,16 @@ function parseHashParams(queryString) {
 export function start(root, fallback = "player") {
   _activeRoot = root;
 
-  // スクロール位置の自動追従保存
+  // スクロール位置の自動追従保存（スクロール中のストレージ同期書き込みを排除し、600ms デバウンスまたは画面離脱時のみ保存）
   let scrollSaveTimer = null;
   if (root) {
     root.addEventListener("scroll", () => {
+      if (currentRoute && currentRoute !== "welcome") {
+        const cur = getCurrentStackEntry();
+        if (cur) {
+          cur.scrollTop = root.scrollTop || 0;
+        }
+      }
       clearTimeout(scrollSaveTimer);
       scrollSaveTimer = setTimeout(() => {
         if (currentRoute && currentRoute !== "welcome") {
@@ -178,7 +184,7 @@ export function start(root, fallback = "player") {
             state: cur?.state || {},
           });
         }
-      }, 150);
+      }, 600);
     }, { passive: true });
   }
 

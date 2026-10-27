@@ -34,6 +34,19 @@ export class PitchShifterCore {
     this.semitones = s;
     this.pitchFactor = Math.pow(2, s / 12);
     this.phaseStep = (this.pitchFactor - 1.0) / this.windowSize;
+    if (s === 0) {
+      this.reset();
+    }
+  }
+
+  /**
+   * 内部ディレイバッファと位相をリセット（前曲の残響・音程漏れを完全防止）
+   */
+  reset() {
+    if (this.delayBufferL) this.delayBufferL.fill(0);
+    if (this.delayBufferR) this.delayBufferR.fill(0);
+    this.writeIndex = 0;
+    this.phase = 0.0;
   }
 
   /**
@@ -130,8 +143,11 @@ if (typeof registerProcessor === "function") {
       const sr = typeof sampleRate !== "undefined" ? sampleRate : 44100;
       this.core = new PitchShifterCore(sr, 0.1);
       this.port.onmessage = (e) => {
-        if (e.data && e.data.type === "setSemitones") {
+        if (!e.data) return;
+        if (e.data.type === "setSemitones") {
           this.core.setSemitones(e.data.semitones);
+        } else if (e.data.type === "reset") {
+          this.core.reset();
         }
       };
     }

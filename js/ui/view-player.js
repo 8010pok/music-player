@@ -1526,7 +1526,8 @@ function updateUI(refs, s) {
     refs.title.innerHTML = `<span class="track-title-text">${escapeHtml(t.title || "(無題)")}</span>`;
   }
 
-  const shift = (typeof t.keyShift === "number") ? t.keyShift : (s.currentKeyShift || 0);
+  // ★ 新曲の Track データのみから値を決定（前曲の state をフォールバック値にしない）
+  const shift = (typeof t.keyShift === "number" && !isNaN(t.keyShift)) ? t.keyShift : 0;
   if (refs.keyBadge) {
     if (shift !== 0) {
       refs.keyBadge.textContent = shift > 0 ? `♯${shift}` : `♭${Math.abs(shift)}`;
@@ -1852,7 +1853,8 @@ export function openPlayerSoundModal(targetTrack) {
     return;
   }
 
-  let currentShift = (typeof currentTrack.keyShift === "number") ? currentTrack.keyShift : (appState.get().currentKeyShift || 0);
+  // ★ 新曲の Track データのみから値を決定（前曲の state をフォールバック値にしない）
+  let currentShift = (typeof currentTrack.keyShift === "number" && !isNaN(currentTrack.keyShift)) ? currentTrack.keyShift : 0;
   const artUrl = getArtworkUrl(currentTrack) || "./icons/icon-192.png";
 
   const body = document.createElement("div");

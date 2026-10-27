@@ -32,9 +32,12 @@ import {
   applyMidSide,
   applyNoiseReduction,
   applyKeyShift,
+  resetPitchShifter,
   getCurrentKeyShift,
   setAudioOutputDevice,
   resumeEqContext,
+  getOutputRms,
+  recreateAudioContext,
 } from "./eq.js";
 import { getPublic, setPublic } from "../store/settings.js";
 // アートワーク URL は UI と共通の「ID 単位で安定なキャッシュ」を使う。
@@ -49,6 +52,8 @@ import {
   getDriveToken,
   getDriveStreamUrl,
   promptDriveReconnectModal,
+  isDriveTrack,
+  getDriveFileId,
 } from "../gdrive/drive-service.js";
 
 const UNCACHED_STREAM_TOAST_KEY = "music_player_uncached_fast_stream_notified";
@@ -148,6 +153,84 @@ export function setPendingPlayback(track, queue = [], queueIndex = -1, originalR
     originalRoute: originalRoute || (typeof window !== "undefined" ? window.location.hash : ""),
     retryOnAuthSuccess: true,
   };
+}
+
+let sessionCounter = 0;
+
+/**
+ * 1回の再生セッション（曲の決定から再生・終了まで）のライフサイクルを一元追跡するクラス
+ */
+export class PlaybackSession {
+  constructor({ track, queueIndex, startTime = 0 }) {
+    this.sessionId = `sess-${Date.now()}-${++sessionCounter}`;
+    this.playAttemptId = `att-${Date.now()}-${++playAttemptCounter}`;
+    this.track = track;
+    this.trackId = track?.id || null;
+    this.queueIndex = queueIndex;
+    this.startTime = startTime;
+    this.activeElement = null; // mainAudioEl or streamAudioEl
+    this.sourceType = "none";  // "memory_blob", "prewarm_cache", "cached_blob", "drive_stream", "direct_url"
+    this.isDrive = isDriveTrack(track);
+    this.isCached = false;
+    this.requestedKeyShift = (track && typeof track.keyShift === "number" && !isNaN(track.keyShift)) ? track.keyShift : 0;
+    this.appliedKeyShift = 0;
+    this.playbackStatus = "loading";
+    this.startedAt = Date.now();
+    this.playingAt = 0;
+    this.endedHandled = false;
+    this.nextTransitionStarted = false;
+    this.abortController = new AbortController();
+    this.bgCacheController = null;
+    this.watchdogId = null;
+    this.silenceCheckTimer = null;
+    this.hasRecoveredSilence = false;
+    this.objectUrl = null;
+    this.isStale = false;
+  }
+
+  destroy() {
+    this.isStale = true;
+    if (this.watchdogId) {
+      clearTimeout(this.watchdogId);
+      this.watchdogId = null;
+    }
+    if (this.silenceCheckTimer) {
+      clearTimeout(this.silenceCheckTimer);
+      this.silenceCheckTimer = null;
+    }
+    if (this.abortController) {
+      try { this.abortController.abort(); } catch {}
+    }
+    if (this.bgCacheController) {
+      try { this.bgCacheController.abort(); } catch {}
+    }
+    if (this.objectUrl && this.objectUrl.startsWith("blob:")) {
+      try { URL.revokeObjectURL(this.objectUrl); } catch {}
+      this.objectUrl = null;
+    }
+  }
+}
+
+let activePlaybackSession = null;
+
+export function getCurrentPlaybackSession() {
+  return activePlaybackSession;
+}
+
+/**
+ * 新しいセッションを開始し、前セッションのタイマーや非同期処理、ピッチシフター状態を完全に破棄する
+ */
+export function beginPlaybackSession(track, queueIndex, startTime = 0) {
+  if (activePlaybackSession) {
+    activePlaybackSession.destroy();
+  }
+  // ★ 前曲のピッチシフター（バッファ・半音値）を必ず即時リセット
+  try { resetPitchShifter(); } catch {}
+
+  activePlaybackSession = new PlaybackSession({ track, queueIndex, startTime });
+  state.currentPlayAttemptId = activePlaybackSession.playAttemptId;
+  state.currentPlayAttemptStartTime = (typeof performance !== "undefined" && typeof performance.now === "function") ? performance.now() : Date.now();
+  return activePlaybackSession;
 }
 
 export function getMainAudioElement() { return mainAudioEl; }
@@ -1335,10 +1418,8 @@ function playPreloadedSync(index, track, url, { isDirectStream = false } = {}) {
     return;
   }
 
-  const myAttemptId = `att-${Date.now()}-${++playAttemptCounter}`;
-  state.currentPlayAttemptId = myAttemptId;
-  state.currentPlayAttemptStartTime = (typeof performance !== "undefined" && typeof performance.now === "function") ? performance.now() : Date.now();
-  state.playAttemptRetryCount = 0;
+  const session = beginPlaybackSession(track, index, 0);
+  const myAttemptId = session.playAttemptId;
 
   resetSession(track?.id);
   // この遷移の世代トークンを採番。clearTransitioning はこの世代が最新の
@@ -1359,9 +1440,40 @@ function playPreloadedSync(index, track, url, { isDirectStream = false } = {}) {
   state.preloadToken++;
   abortActiveBackgroundCache();
 
+  // ★ キーチェンジ（音程変更）の反映: track に固定された keyShift または 0 (前曲の値は絶対流用しない)
+  const trackKeyShift = session.requestedKeyShift;
+
+  const pub = getPublic() || {};
+  const isEffectsActive = !!pub.enableAudioEffects;
+  const isKeyShiftActive = trackKeyShift !== 0;
+  const needsWebAudio = isEffectsActive || isKeyShiftActive;
+
+  if (isDirectStream) {
+    setActiveAudioElement(streamAudioEl);
+    session.activeElement = streamAudioEl;
+    session.sourceType = "drive_stream";
+    session.appliedKeyShift = 0;
+    applyKeyShift(0, streamAudioEl);
+    appState.set({ currentKeyShift: 0 });
+    if (needsWebAudio) {
+      notifyUncachedFastStreamOnce();
+    }
+    // 未キャッシュダイレクトストリーム時は Web Audio をバイパス（CORS無音化防止）
+  } else {
+    setActiveAudioElement(mainAudioEl);
+    session.activeElement = mainAudioEl;
+    session.sourceType = "cached_blob";
+    session.appliedKeyShift = trackKeyShift;
+    // ★ 0 の場合も必ず Worklet リセットと完全バイパス直結を実施
+    applyKeyShift(trackKeyShift, mainAudioEl);
+    appState.set({ currentKeyShift: trackKeyShift });
+    if (pub.enableAudioEffects && mainAudioEl) {
+      try { applyEffectsSetting(mainAudioEl, true); } catch (_) {}
+    }
+    resumeEqContext().catch(() => {});
+  }
+
   // ★ UI 状態 (currentTrack 等) は play() の前に同期で確定する。
-  //   loadAndPlay と順序を揃え、play 直後の各ハンドラが前曲 track を参照する
-  //   窓を作らない (この関数は同期実行なのでイベント発火前に確定する)。
   appState.set({
     currentTrack: track,
     queueIndex: index,
@@ -1376,33 +1488,7 @@ function playPreloadedSync(index, track, url, { isDirectStream = false } = {}) {
     scrobbleReason: null,
   });
 
-  // ★ キーチェンジ（音程変更）の反映: track に固定された keyShift または 0
-  const trackKeyShift = (track && typeof track.keyShift === "number") ? track.keyShift : 0;
-  appState.set({ currentKeyShift: trackKeyShift });
-
   state.userPausedExplicitly = false;
-  // --- ここから play() まで完全同期 (バックグラウンド再生権限を持つ単一の audioEl を操作) ---
-  const pub = getPublic() || {};
-  const isEffectsActive = !!pub.enableAudioEffects;
-  const isKeyShiftActive = trackKeyShift !== 0;
-  const needsWebAudio = isEffectsActive || isKeyShiftActive;
-
-  if (isDirectStream) {
-    setActiveAudioElement(streamAudioEl);
-    if (needsWebAudio) {
-      notifyUncachedFastStreamOnce();
-    }
-    // 未キャッシュダイレクトストリーム時は Web Audio をバイパス（CORS無音化防止）
-  } else {
-    setActiveAudioElement(mainAudioEl);
-    if (trackKeyShift !== 0) {
-      applyKeyShift(trackKeyShift, mainAudioEl);
-    }
-    if (pub.enableAudioEffects && mainAudioEl) {
-      try { applyEffectsSetting(mainAudioEl, true); } catch (_) {}
-    }
-    resumeEqContext().catch(() => {});
-  }
 
   audioEl.src = url;
   audioEl.loop = false;
@@ -1418,6 +1504,37 @@ function playPreloadedSync(index, track, url, { isDirectStream = false } = {}) {
       startBackgroundDriveCache(track.id, Date.now());
     };
     audioEl.addEventListener("playing", onPlayingOnce);
+  }
+
+  // ★ 無音検知と安全な自動復旧（Web Audio 接続時の無音化防止・1セッション最大1回）
+  if (!session.isStale && session.activeElement === mainAudioEl && needsWebAudio && !session.hasRecoveredSilence) {
+    session.silenceCheckTimer = setTimeout(() => {
+      if (session.isStale || session !== activePlaybackSession) return;
+      const curAudio = getAudioElement();
+      if (!curAudio || curAudio !== mainAudioEl || curAudio.paused) return;
+      if (curAudio.volume <= 0 || curAudio.muted) return;
+      if (curAudio.currentTime < 2.0) return;
+      if (curAudio.readyState < 2) return;
+
+      const rms = getOutputRms();
+      if (rms === 0) {
+        console.warn(`[audio-engine] Web Audio 無音状態を検知。自動復旧を実行します (1/1):`, session.trackId);
+        session.hasRecoveredSilence = true;
+        try {
+          recreateAudioContext(mainAudioEl);
+          const curPos = curAudio.currentTime;
+          applyKeyShift(session.appliedKeyShift, mainAudioEl);
+          curAudio.currentTime = curPos;
+          curAudio.play().catch((recErr) => {
+            console.warn("[audio-engine] 無音復旧 play 失敗:", recErr);
+            handlePlaybackFinalFailure(session.playAttemptId, session.track, recErr);
+          });
+        } catch (recErr) {
+          console.warn("[audio-engine] 無音復旧例外:", recErr);
+          handlePlaybackFinalFailure(session.playAttemptId, session.track, recErr);
+        }
+      }
+    }, 5000);
   }
 
   startPlayingWatchdog(myAttemptId, track, 0, isDirectStream);
@@ -1445,6 +1562,10 @@ function playPreloadedSync(index, track, url, { isDirectStream = false } = {}) {
         logPlaybackEvent("play_resolved", { targetEl: audioEl, track, attemptId: myAttemptId, playPromiseResult: "resolved" });
         clearTransitioning();
         state.consecutiveSkips = 0;
+        if (session) {
+          session.playbackStatus = "playing";
+          session.playingAt = Date.now();
+        }
         hydrateTrackMetadata(track?.id);
         // 再生回数 / 最終再生日時を更新 (await 不要、失敗は無視)
         updateTrack(track.id, {
@@ -1456,12 +1577,19 @@ function playPreloadedSync(index, track, url, { isDirectStream = false } = {}) {
       .catch((e) => {
         logPlaybackEvent("play_rejected", { targetEl: audioEl, track, attemptId: myAttemptId, error: e, playPromiseResult: `rejected: ${e?.name || e?.message || e}` });
         clearTransitioning();
+        if (session) {
+          session.playbackStatus = "error";
+        }
         handlePlaybackFinalFailure(myAttemptId, track, e);
         console.warn("[audio-engine] プリロード再生 play 失敗", e);
       });
   } else {
     // play() が promise を返さない古い実装 → 即クリア
     clearTransitioning();
+    if (session) {
+      session.playbackStatus = "playing";
+      session.playingAt = Date.now();
+    }
     schedulePreload();
   }
   // 保険: promise が解決しない異常時でも transitioning を必ず解除
@@ -1497,14 +1625,13 @@ function advanceFromEnded() {
   // どちらも reload せず同期で seek + play する (await ゼロ、iOS BG でも無音化しない)。
   if (repeat === "one" || (next >= 0 && next === state.queueIndex)) {
     state.userPausedExplicitly = false;
-    // ★ 同一曲のループ再生も「新しい再生セッション」として扱い、スクロブル/履歴/
-    //   セッション集計をリセットする。これをしないと scrobbledForCurrent が true の
-    //   まま残り、2周目以降は何周完聴しても onTimeUpdate の再スクロブル判定
-    //   (!scrobbledForCurrent && progress>=1) が永久に偽になり、Last.fm 再生回数も
-    //   ローカル履歴(recordHistory)も増えない。loadAndPlay / playPreloadedSync が必ず
-    //   行っている resetSession + フラグリセットと同じ扱いに揃える。
-    //   音声経路(src/play/MediaSession)には触れず、集計用 state と UI ミラーのみ初期化する。
     const curTrack = state.queue[state.queueIndex];
+    const session = beginPlaybackSession(curTrack, state.queueIndex, 0);
+    session.activeElement = audioEl;
+    session.appliedKeyShift = session.requestedKeyShift;
+    applyKeyShift(session.appliedKeyShift, audioEl);
+    session.playbackStatus = "playing";
+    session.playingAt = Date.now();
     resetSession(curTrack?.id);
     appState.set({
       currentTime: 0,
@@ -1513,6 +1640,7 @@ function advanceFromEnded() {
       scrobbledForCurrent: false,
       scrobbleResult: "none",
       scrobbleReason: null,
+      currentKeyShift: session.appliedKeyShift,
     });
     try { audioEl.currentTime = 0; } catch {}
     const p = audioEl.play();
@@ -2029,10 +2157,9 @@ function isSupersededTransition(myToken, ownUrl) {
 async function loadAndPlay(track, { startTime = 0 } = {}) {
   if (!track) return;
   const t0 = (typeof performance !== "undefined" && typeof performance.now === "function") ? performance.now() : Date.now();
-  const myAttemptId = `att-${Date.now()}-${++playAttemptCounter}`;
+  const session = beginPlaybackSession(track, state.queueIndex, startTime);
+  const myAttemptId = session.playAttemptId;
   state.currentPlayAttemptId = myAttemptId;
-  state.currentPlayAttemptStartTime = t0;
-  state.playAttemptRetryCount = 0;
 
   logPerfMark(track.id, "tap", t0);
   logPerfMark(track.id, "track_resolved", t0);
@@ -2040,20 +2167,9 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
   // 前曲のバックグラウンドキャッシュが進行中の場合、不要な通信を即座に中断
   abortActiveBackgroundCache();
 
-  // ★ iOS: 再生開始のたびに(ユーザー操作起点で)audioSession.type="playback" を
-  //   再宣言する。init 時の一度きり設定だけだと、コールド起動でメディアプレイヤー
-  //   認識がリセットされた状態(特にマナーモード ON 時)では、ロック画面の音声が
-  //   ミュートされる(進捗だけ進んで無音)。最初の再生ジェスチャ内で type を
-  //   設定し直し、ロックする前に「メディア再生(マナーモード/画面ロック無視)」と
-  //   iOS に認識させる。feature-detection + try/catch 済みで、非iOS/非対応では
-  //   no-op、音声フロー(src/play/MediaSession)には一切干渉しない。
   setupAudioSession();
-
   resetSession(track?.id);
 
-  // ★ タップした瞬間（同期フレーム 0ms）に世代トークン・遷移フラグ・UI状態・MediaSession を
-  //   即時確定させる。これにより IndexedDB / Google Drive 取得完了を待たずに
-  //   ミニプレイヤー・リストの再生ハイライト・ロック画面メタデータが即座に切り替わる。
   const myToken = ++state.transitionToken;
   state.transitioning = true;
   state.userPausedExplicitly = false;
@@ -2076,10 +2192,9 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
 
   updateMediaSessionMetadata(track);
   updateMediaPositionState({ position: startTime || 0, duration: track.duration });
-  // hydrateTrackMetadata は play() 前の同期/非同期遅延を避けるため onPlaying へ移動
 
-  // ★ キーチェンジ（音程変更）の反映: track に固定された keyShift または 0
-  const trackKeyShift = (track && typeof track.keyShift === "number") ? track.keyShift : 0;
+  // ★ キーチェンジの反映: track から厳格に決定（未設定・null・NaNは必ず 0、前曲の値を流用しない）
+  const trackKeyShift = session.requestedKeyShift;
   appState.set({ currentKeyShift: trackKeyShift });
 
   const pub = getPublic() || {};
@@ -2087,12 +2202,12 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
   const isKeyShiftActive = trackKeyShift !== 0;
   const needsWebAudio = isEffectsActive || isKeyShiftActive;
 
-  // ★ Phase 0: 音源 URL / Blob の取得（FLAC・大容量ファイル高速化）
+  // ★ Phase 0: 音源 URL / Blob の取得
   let targetUrl = null;
   let blobErr = null;
   let isDirectStream = false;
   let isUncachedDirectStream = false;
-  const isDriveTrack = (typeof track.id === "string" && track.id.startsWith("gd-")) || !!track.driveFileId;
+  const isDrive = session.isDrive;
 
   // 1. Prewarm キャッシュにあるか確認
   const prewarmed = prewarmCache.get(track.id);
@@ -2124,11 +2239,13 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
   // 2. 未キャッシュの Google Drive 曲:
   //    EQ または キーチェンジ が有効な場合でも、全量ダウンロード待機をバイパスし、
   //    ダイレクトストリーミング (HTTP Range) で最速で音出しを開始する。
-  if (!targetUrl && isDriveTrack) {
+  if (!targetUrl && (isDrive || isDriveTrack(track))) {
     logPerfMark(track.id, "cache_checked", t0);
     const cached = await hasCachedBlob(track.id).catch(() => false);
+    session.isCached = cached;
     if (!cached) {
       logPerfMark(track.id, "auth_checked", t0);
+      session.activeElement = streamAudioEl;
       setActiveAudioElement(streamAudioEl);
       try {
         let token = await getDriveToken();
@@ -2143,6 +2260,7 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
             // ユーザーがキャンセルした場合は勝手に次曲へスキップせず停止状態で待機
             if (myToken === state.transitionToken) {
               state.transitioning = false;
+              session.playbackStatus = "paused";
               appState.set({ isPlaying: false, loadingTrackId: null, playbackStatus: "paused" });
               if (navigator.mediaSession) {
                 try { navigator.mediaSession.playbackState = "none"; } catch {}
@@ -2160,6 +2278,7 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
           isDirectStream = true;
           isUncachedDirectStream = true;
           state.isDirectStream = true;
+          session.sourceType = "drive_stream";
           logPerfMark(track.id, "stream_url_ready", t0);
           if (needsWebAudio) {
             notifyUncachedFastStreamOnce();
@@ -2171,6 +2290,7 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
         console.warn("[audio-engine] Drive ストリーム準備失敗:", driveErr);
         if (myToken === state.transitionToken) {
           state.transitioning = false;
+          session.playbackStatus = "error";
           appState.set({ isPlaying: false, loadingTrackId: null, playbackStatus: "error" });
           toast(driveErr.message || "Google Drive の曲を読み込めませんでした", "err", 4000);
         }
@@ -2281,6 +2401,10 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
     const onPlaying = () => {
       logPerfMark(track.id, "playing", t0);
       clearPlayingWatchdog();
+      if (session) {
+        session.playingAt = Date.now();
+        session.playbackStatus = "playing";
+      }
       if (isPerfDebugEnabled()) {
         console.log(`[AudioPerf] [${track.id}] tap → playing: +${(performance.now() - t0).toFixed(1)}ms`);
       }
@@ -2298,6 +2422,37 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
         playCount: (track.playCount || 0) + 1,
         lastPlayedAt: Date.now(),
       }).catch(() => {});
+
+      // ★ 無音検知と安全な自動復旧（Web Audio 接続時の無音化防止・1セッション最大1回）
+      if (!session.isStale && session.activeElement === mainAudioEl && needsWebAudio && !session.hasRecoveredSilence) {
+        session.silenceCheckTimer = setTimeout(() => {
+          if (session.isStale || session !== activePlaybackSession) return;
+          const curAudio = getAudioElement();
+          if (!curAudio || curAudio !== mainAudioEl || curAudio.paused) return;
+          if (curAudio.volume <= 0 || curAudio.muted) return;
+          if (curAudio.currentTime < 2.0) return;
+          if (curAudio.readyState < 2) return; // buffer underrun 除外
+
+          const rms = getOutputRms();
+          if (rms === 0) {
+            console.warn(`[audio-engine] Web Audio 無音状態を検知。自動復旧を実行します (1/1):`, session.trackId);
+            session.hasRecoveredSilence = true;
+            try {
+              recreateAudioContext(mainAudioEl);
+              const curPos = curAudio.currentTime;
+              applyKeyShift(session.appliedKeyShift, mainAudioEl);
+              curAudio.currentTime = curPos;
+              curAudio.play().catch((recErr) => {
+                console.warn("[audio-engine] 無音復旧 play 失敗:", recErr);
+                handlePlaybackFinalFailure(session.playAttemptId, session.track, recErr);
+              });
+            } catch (recErr) {
+              console.warn("[audio-engine] 無音復旧例外:", recErr);
+              handlePlaybackFinalFailure(session.playAttemptId, session.track, recErr);
+            }
+          }
+        }, 5000);
+      }
     };
     audioEl.addEventListener("loadedmetadata", onMeta);
     audioEl.addEventListener("canplay", onCanPlay);
@@ -2313,16 +2468,19 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
 
     if (isUncachedDirectStream) {
       // ★ 未キャッシュGoogle Driveダイレクトストリーム時:
-      // CORS制約による無音化を防ぐため、初回再生時はWeb Audio API（EQ・キーチェンジ・コンプレッサー等）を
-      // 接続せず、専用の streamAudioEl から直接出力する。
+      // CORS制約による無音化を防ぐため、初回再生時はWeb Audio APIをバイパス
+      session.appliedKeyShift = 0;
+      applyKeyShift(0, streamAudioEl);
+      appState.set({ currentKeyShift: 0 });
       if (needsWebAudio) {
         notifyUncachedFastStreamOnce();
       }
     } else {
       // キャッシュ済み曲またはローカル曲: 安全にWeb Audioを接続 (mainAudioEl)
-      if (trackKeyShift !== 0) {
-        applyKeyShift(trackKeyShift, mainAudioEl);
-      }
+      // ★ 新曲の Track.keyShift を必ず反映（0 の場合も Worklet リセット＆完全バイパス化）
+      session.appliedKeyShift = trackKeyShift;
+      applyKeyShift(trackKeyShift, mainAudioEl);
+      appState.set({ currentKeyShift: trackKeyShift });
       if (pub.enableAudioEffects && mainAudioEl) {
         try { applyEffectsSetting(mainAudioEl, true); } catch (_) {}
       }
@@ -2566,6 +2724,8 @@ function flushSessionPlayed() {
   state.lastTickAt = now;
 }
 
+let lastTimeUpdateUiAt = 0;
+
 function onTimeUpdate() {
   if (audioEl.src && audioEl.src.startsWith("data:audio/wav")) return;
   flushSessionPlayed();
@@ -2584,13 +2744,29 @@ function onTimeUpdate() {
       ? Math.round(track.duration * (track.fileSize / 1572864))
       : (track.duration || 0));
   const cur = audioEl.currentTime || 0;
-  appState.set({ currentTime: cur });
+
+  // ★ 終端フォールバック (End-of-track fallback)
+  // Google Drive Range ストリーミングや一部ブラウザで ended イベントが
+  // ドロップした場合（曲末尾 0.45 秒以内で再生が停滞）、確実に次曲へ進める
+  const session = activePlaybackSession;
+  if (session && !session.endedHandled && !session.nextTransitionStarted && !state.userPausedExplicitly && !state.transitioning && isFinite(dur) && dur > 1.0 && cur >= dur - 0.45 && !audioEl.paused) {
+    session.endedHandled = true;
+    session.nextTransitionStarted = true;
+    onEnded();
+    return;
+  }
+
+  // ★ UI更新のスロットリング (200ms間引き) で描画負荷を大幅軽減
+  const now = Date.now();
+  if (now - lastTimeUpdateUiAt >= 200 || cur === 0 || cur >= dur - 0.5) {
+    lastTimeUpdateUiAt = now;
+    appState.set({ currentTime: cur });
+  }
 
   // 周期的に position state を更新（iOS のロック画面プログレスバーと
   // セッション維持のため）。timeupdate は ~250ms 間隔で発火するが、
   // ~1 秒間隔に間引く。
   // ★ 遷移中 (loadAndPlay 内で audio が一瞬動いている可能性) は更新しない。
-  const now = Date.now();
   if (!state.transitioning && now - state.lastPositionUpdateAt > 1000) {
     updateMediaPositionState();
     state.lastPositionUpdateAt = now;
@@ -2620,7 +2796,9 @@ function onTimeUpdate() {
     const ratio50 = Math.min(1, state.sessionPlayed / (dur * 0.5));
     const ratio4m = Math.min(1, state.sessionPlayed / (4 * 60));
     const progress = Math.max(ratio50, ratio4m);
-    appState.set({ scrobbleProgress: progress });
+    if (now - lastTimeUpdateUiAt <= 50 || progress >= 1) {
+      appState.set({ scrobbleProgress: progress });
+    }
 
     if (!state.hasScrobbledSession && !appState.get().scrobbledForCurrent && progress >= 1) {
       // ★ 同期ロックフラグを即座にセット（非同期処理前の最初の1行目で多重発火を完全防止）
@@ -2643,6 +2821,14 @@ function onTimeUpdate() {
 function onEnded() {
   if (state.transitioning) return;
   if (audioEl.src && audioEl.src.startsWith("data:audio/wav")) return;
+
+  const session = activePlaybackSession;
+  if (session) {
+    if (session.endedHandled && session.nextTransitionStarted) return;
+    session.endedHandled = true;
+    session.nextTransitionStarted = true;
+  }
+
   if (!appState.get().scrobbledForCurrent) {
     const track = appState.get().currentTrack;
     if (track) {

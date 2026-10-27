@@ -645,8 +645,6 @@ export async function getBlob(id, { signal = null } = {}) {
 export async function hasCachedBlob(id) {
   if (!id) return false;
   if (hasMemoryBlob(id)) return true;
-  // 非Drive曲はローカル保存済み
-  if (typeof id === "string" && !id.startsWith("gd-")) return true;
   try {
     const db = await openDb();
     const count = await txReq(db.transaction("blobs").objectStore("blobs").count(id));

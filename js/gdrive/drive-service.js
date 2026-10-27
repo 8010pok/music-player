@@ -29,6 +29,40 @@ export function isDriveTrackId(id) {
 }
 
 /**
+ * トラックまたはトラックIDが Google Drive 音源か判定（source, driveFileId, gd- プレフィックスを全考慮）
+ * @param {object|string} track
+ * @returns {boolean}
+ */
+export function isDriveTrack(track) {
+  if (!track) return false;
+  if (typeof track === "object") {
+    if (track.source === "gdrive") return true;
+    if (Boolean(track.driveFileId)) return true;
+    if (typeof track.id === "string" && track.id.startsWith("gd-")) return true;
+    return false;
+  }
+  return typeof track === "string" && track.startsWith("gd-");
+}
+
+/**
+ * トラックまたはトラックIDから Google Drive fileId を抽出
+ * @param {object|string} track
+ * @returns {string|null}
+ */
+export function getDriveFileId(track) {
+  if (!track) return null;
+  if (typeof track === "object") {
+    if (track.driveFileId) return track.driveFileId;
+    if (typeof track.id === "string" && track.id.startsWith("gd-")) return track.id.slice(3);
+    return null;
+  }
+  if (typeof track === "string") {
+    return track.startsWith("gd-") ? track.slice(3) : track;
+  }
+  return null;
+}
+
+/**
  * トラック ID から Google Drive fileId を抽出
  * @param {string} id
  * @returns {string}
@@ -333,6 +367,27 @@ export function silentRefreshGisToken(clientId) {
       return;
     }
 
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("サイレント更新タイムアウト (3.0s)"));
+    }, 3000);
+
+    const safeResolve = (val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(val);
+    };
+
+    const safeReject = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    };
+
     ensureGisScript()
       .then(() => {
         try {
@@ -344,27 +399,27 @@ export function silentRefreshGisToken(clientId) {
             ...(emailHint ? { hint: emailHint } : {}),
             callback: async (resp) => {
               if (resp.error) {
-                reject(new Error(`サイレント更新エラー: ${resp.error_description || resp.error}`));
+                safeReject(new Error(`サイレント更新エラー: ${resp.error_description || resp.error}`));
                 return;
               }
               if (resp.access_token) {
                 const expiresIn = resp.expires_in ? parseInt(resp.expires_in, 10) : 3600;
                 await setDriveToken(resp.access_token, { expiresIn });
-                resolve(resp.access_token);
+                safeResolve(resp.access_token);
               } else {
-                reject(new Error("アクセストークンが取得できませんでした"));
+                safeReject(new Error("アクセストークンが取得できませんでした"));
               }
             },
             error_callback: (err) => {
-              reject(new Error(err && err.message ? err.message : "サイレント更新失敗"));
+              safeReject(new Error(err && err.message ? err.message : "サイレント更新失敗"));
             },
           });
           client.requestAccessToken(emailHint ? { prompt: "", hint: emailHint } : { prompt: "" });
         } catch (e) {
-          reject(e);
+          safeReject(e);
         }
       })
-      .catch(reject);
+      .catch(safeReject);
   });
 }
 

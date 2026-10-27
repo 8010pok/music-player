@@ -1409,4 +1409,71 @@ test("ビジュアライザー非表示時 (document.hidden) に描画ループ�
   strictEqual(/if \(typeof document !== "undefined" && document\.hidden\)\s*\{\s*if \(raf\) cancelAnimationFrame\(raf\);/.test(vizCode), true, "非表示時にcancelAnimationFrameでループ停止");
 });
 
+console.log("\n=== 11. 再生セッション一元化・キーシフト漏れ防止・Drive再認証・無音復旧 ===");
+
+test("PlaybackSession クラスと beginPlaybackSession が存在し、前セッションのタイマーやWorkletを即座に破棄すること", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(aeCode.includes("class PlaybackSession"), true, "PlaybackSessionクラスが存在する");
+  strictEqual(aeCode.includes("function beginPlaybackSession"), true, "beginPlaybackSession関数が存在する");
+  strictEqual(aeCode.includes("resetPitchShifter()"), true, "新セッション開始時にresetPitchShifterが呼ばれる");
+  strictEqual(aeCode.includes("this.abortController = new AbortController()"), true, "セッションごとに固有のAbortControllerを持つ");
+  strictEqual(aeCode.includes("destroy()"), true, "destroyメソッドが存在する");
+});
+
+test("keyShift +2 または -3 の次曲で、新曲が未設定/0なら必ず applyKeyShift(0) が呼ばれ前曲の値が引き継がれないこと", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  // loadAndPlay と playPreloadedSync で、0 の場合も applyKeyShift が呼ばれること
+  strictEqual(aeCode.includes("applyKeyShift(trackKeyShift, mainAudioEl);"), true, "0の場合もapplyKeyShiftを呼びWorkletをリセット");
+  // view-player.js で前曲の currentKeyShift をフォールバックしないこと
+  const vpCode = fs.readFileSync(path.join(__dirname, "../js/ui/view-player.js"), "utf8");
+  strictEqual(vpCode.includes("t.keyShift ?? s.currentKeyShift"), false, "前曲のcurrentKeyShiftをフォールバック流用しない");
+  strictEqual(vpCode.includes("(typeof t.keyShift === \"number\" && !isNaN(t.keyShift)) ? t.keyShift : 0"), true, "Trackデータから厳格に決定");
+});
+
+test("未キャッシュDrive曲で appliedKeyShift が 0 に固定され、streamAudioEl に Web Audio が接続されないこと", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(aeCode.includes("session.appliedKeyShift = 0;"), true, "未キャッシュDrive時はappliedKeyShiftが0");
+  strictEqual(aeCode.includes("applyKeyShift(0, streamAudioEl);"), true, "streamAudioElには常に0を適用");
+});
+
+test("終端フォールバック: cur >= dur - 0.45 で ended イベント未発火時も確実に次曲へ進むこと", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(aeCode.includes("cur >= dur - 0.45"), true, "0.45秒前の終端停滞検知が存在する");
+  strictEqual(aeCode.includes("session.endedHandled = true;"), true, "多重遷移防止フラグをセット");
+  strictEqual(aeCode.includes("session.nextTransitionStarted = true;"), true, "次曲遷移開始フラグをセット");
+});
+
+test("無音検知: getOutputRms() が 0 の場合に 1セッション最大1回 recreateAudioContext を呼んで自動復旧すること", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(aeCode.includes("getOutputRms()"), true, "出力RMSを監視する");
+  strictEqual(aeCode.includes("recreateAudioContext(mainAudioEl)"), true, "無音時にAudioContextを再構築して自己復旧");
+  strictEqual(aeCode.includes("session.hasRecoveredSilence = true;"), true, "1セッション最大1回に制限してループ防止");
+});
+
+test("silentRefreshGisToken に 3000ms タイムアウトが存在し、未連携時にハングしないこと", () => {
+  const dsCode = fs.readFileSync(path.join(__dirname, "../js/gdrive/drive-service.js"), "utf8");
+  strictEqual(dsCode.includes("サイレント更新タイムアウト (3.0s)"), true, "GISサイレント更新タイムアウト設定");
+  strictEqual(dsCode.includes("3000);"), true, "3000msタイムアウトタイマーが存在する");
+});
+
+test("hasCachedBlob が gd- 以外の曲でも IndexedDB の実データレコード数を正しく確認すること", () => {
+  const ldbCode = fs.readFileSync(path.join(__dirname, "../js/store/library-db.js"), "utf8");
+  strictEqual(ldbCode.includes("return true; // Drive以外は常にキャッシュありとみなす"), false, "Drive以外を無条件trueとする誤判定を撤廃");
+  strictEqual(ldbCode.includes('db.transaction("blobs").objectStore("blobs").count(id)'), true, "実データレコード数をカウントして判定");
+});
+
+test("router.js のスクロールイベントでデバウンスが適用され毎フレームの sessionStorage 同期書き込みが排除されていること", () => {
+  const routerCode = fs.readFileSync(path.join(__dirname, "../js/router.js"), "utf8");
+  strictEqual(routerCode.includes("clearTimeout(scrollSaveTimer);"), true, "スクロール位置保存をデバウンス");
+  strictEqual(routerCode.includes("cur.scrollTop = root.scrollTop"), true, "インメモリには即時反映");
+});
+
+test("pitch-shifter-processor.js に reset() メソッドがあり、ディレイバッファと位相がゼロクリアされること", () => {
+  const pspCode = fs.readFileSync(path.join(__dirname, "../js/player/pitch-shifter-processor.js"), "utf8");
+  strictEqual(pspCode.includes("reset()"), true, "resetメソッドが存在する");
+  strictEqual(pspCode.includes("this.delayBufferL.fill(0)"), true, "左バッファのゼロクリア");
+  strictEqual(pspCode.includes("this.delayBufferR.fill(0)"), true, "右バッファのゼロクリア");
+  strictEqual(pspCode.includes("this.phase = 0"), true, "位相の初期化");
+});
+
 console.log(`\n高速再生 & ナビゲーションスタックテスト: ${passed} 件 PASSED ✓`);
