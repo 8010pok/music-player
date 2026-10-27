@@ -161,8 +161,33 @@ function resizeCanvas() {
   canvas.height = Math.max(1, Math.floor(r.height * dpr));
 }
 
+function onVisibilityChange() {
+  if (typeof document === "undefined") return;
+  if (document.hidden) {
+    if (raf) {
+      cancelAnimationFrame(raf);
+      raf = 0;
+    }
+  } else if (active && !raf) {
+    loop();
+  }
+}
+
+if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+  document.addEventListener("visibilitychange", onVisibilityChange);
+}
+
 function loop() {
-  if (!active) return;
+  if (!active) {
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+    return;
+  }
+  if (typeof document !== "undefined" && document.hidden) {
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+    return;
+  }
   raf = requestAnimationFrame(loop);
   draw();
 }

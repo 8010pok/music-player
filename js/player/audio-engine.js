@@ -130,6 +130,26 @@ if (!streamAudioEl && typeof document !== "undefined" && typeof document.createE
 let activeAudioEl = mainAudioEl;
 let audioEl = activeAudioEl;
 
+let pendingPlaybackState = null;
+
+export function getPendingPlayback() {
+  return pendingPlaybackState ? { ...pendingPlaybackState } : null;
+}
+
+export function clearPendingPlayback() {
+  pendingPlaybackState = null;
+}
+
+export function setPendingPlayback(track, queue = [], queueIndex = -1, originalRoute = null) {
+  pendingPlaybackState = {
+    pendingTrackId: track?.id || null,
+    pendingQueue: (queue || []).map((t) => (typeof t === "string" ? t : t?.id || null)).filter(Boolean),
+    pendingQueueIndex: queueIndex,
+    originalRoute: originalRoute || (typeof window !== "undefined" ? window.location.hash : ""),
+    retryOnAuthSuccess: true,
+  };
+}
+
 export function getMainAudioElement() { return mainAudioEl; }
 export function getStreamAudioElement() { return streamAudioEl; }
 
@@ -191,6 +211,10 @@ let playAttemptCounter = 0;
  * 再生イベントの詳細ログを記録（セキュリティ配慮: トークン・フルURL等は一切出力しない）
  */
 function logPlaybackEvent(event, { targetEl = activeAudioEl, track = null, attemptId = null, error = null, playPromiseResult = null, extra = null } = {}) {
+  // ★ パフォーマンス最優先: デバッグフラグ (debug_audio_perf) が false かつエラーでなければ即時リターンし、
+  //   毎フレーム・毎秒の大量イベント (timeupdate/progress 等) によるオブジェクト生成・文字列フォーマット負荷を完全根絶
+  if (!error && !isPerfDebugEnabled()) return;
+
   const currentAttemptId = attemptId || state.currentPlayAttemptId || "none";
   const curTrack = track || appState.get().currentTrack;
   const trackId = curTrack?.id || "none";
@@ -475,6 +499,13 @@ function startPlayingWatchdog(attemptId, track, startTime, isDirectStream) {
     if (attemptId !== state.currentPlayAttemptId) return;
     if (state.userPausedExplicitly || appState.get().playbackStatus === "playing") return;
 
+    // ★ playing 直前ガード: 要素がすでにデータを受信している (readyState >= 2)
+    // または再生移行中 (!curEl.paused) の場合、playing 直前に強制解除して切断しない
+    const curEl = getAudioElement();
+    if (curEl && (!curEl.paused || curEl.readyState >= 2)) {
+      return;
+    }
+
     logPlaybackEvent("playing_timeout", { track, attemptId, error: new Error("10s watchdog timeout") });
 
     if (state.playAttemptRetryCount < 1) {
@@ -546,22 +577,24 @@ export function attachElementListeners(el) {
   const isFromActive = (e) => (e.currentTarget === getAudioElement() || (!e.currentTarget && e.target === getAudioElement()));
 
   el.addEventListener("loadstart", (e) => {
+    if (!isFromActive(e)) return;
     logPlaybackEvent("loadstart", { targetEl: e.currentTarget || el });
   });
 
   el.addEventListener("loadeddata", (e) => {
+    if (!isFromActive(e)) return;
     logPlaybackEvent("loadeddata", { targetEl: e.currentTarget || el });
   });
 
   el.addEventListener("play", (e) => {
-    logPlaybackEvent("play", { targetEl: e.currentTarget || el });
     if (!isFromActive(e)) return;
+    logPlaybackEvent("play", { targetEl: e.currentTarget || el });
     onPlay(e);
   });
 
   el.addEventListener("playing", (e) => {
-    logPlaybackEvent("playing", { targetEl: e.currentTarget || el });
     if (!isFromActive(e)) return;
+    logPlaybackEvent("playing", { targetEl: e.currentTarget || el });
     clearPlayingWatchdog();
     if (stallRecoveryTimer) {
       clearTimeout(stallRecoveryTimer);
@@ -618,6 +651,7 @@ export function attachElementListeners(el) {
   });
 
   el.addEventListener("canplaythrough", (e) => {
+    if (!isFromActive(e)) return;
     logPlaybackEvent("canplaythrough", { targetEl: e.currentTarget || el });
   });
 
@@ -638,18 +672,19 @@ export function attachElementListeners(el) {
   });
 
   el.addEventListener("waiting", (e) => {
-    logPlaybackEvent("waiting", { targetEl: e.currentTarget || el });
     if (!isFromActive(e)) return;
+    logPlaybackEvent("waiting", { targetEl: e.currentTarget || el });
     onStallOrWaiting(e.currentTarget || e.target);
   });
 
   el.addEventListener("stalled", (e) => {
-    logPlaybackEvent("stalled", { targetEl: e.currentTarget || el });
     if (!isFromActive(e)) return;
+    logPlaybackEvent("stalled", { targetEl: e.currentTarget || el });
     onStallOrWaiting(e.currentTarget || e.target);
   });
 
   el.addEventListener("suspend", (e) => {
+    if (!isFromActive(e)) return;
     logPlaybackEvent("suspend", { targetEl: e.currentTarget || el });
   });
 
@@ -1012,18 +1047,14 @@ export function unlockAudioElementsOnUserGesture() {
   const elements = [mainAudioEl, streamAudioEl].filter(Boolean);
   for (const el of elements) {
     if (!el.paused && el.src && !el.src.startsWith("data:audio/wav")) continue;
+    if (state.transitioning) continue;
     try {
       if (!el.src || el.src === "" || el.src.startsWith("data:audio/wav")) {
         el.src = SILENT_AUDIO_URI;
       }
       const p = el.play();
       if (p && typeof p.then === "function") {
-        p.then(() => {
-          if (el.src === SILENT_AUDIO_URI) {
-            try { el.pause(); } catch {}
-            try { el.currentTime = 0; } catch {}
-          }
-        }).catch(() => {});
+        p.catch(() => {});
       }
     } catch (_) {}
   }
@@ -1091,9 +1122,6 @@ export async function playTrackImmediate(track) {
   if (prewarmed && prewarmed.objectUrl) {
     prewarmCache.delete(track.id);
     playPreloadedSync(state.queueIndex, track, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
-    if (prewarmed.isStream) {
-      setTimeout(() => { cacheDriveTrackInBackground(track.id); }, 1200);
-    }
     return;
   }
   primeAudioElement();
@@ -1131,9 +1159,6 @@ export async function setQueueAndPlay(tracks, startIndex = 0) {
   if (prewarmed && prewarmed.objectUrl) {
     prewarmCache.delete(cur.id);
     playPreloadedSync(state.queueIndex, cur, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
-    if (prewarmed.isStream) {
-      setTimeout(() => { cacheDriveTrackInBackground(cur.id); }, 1200);
-    }
     return;
   }
 
@@ -1190,9 +1215,6 @@ export async function playNext() {
   if (prewarmed && prewarmed.objectUrl) {
     prewarmCache.delete(t.id);
     playPreloadedSync(next, t, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
-    if (prewarmed.isStream) {
-      setTimeout(() => { cacheDriveTrackInBackground(t.id); }, 1200);
-    }
     return;
   }
   state.queueIndex = next;
@@ -1524,9 +1546,6 @@ function advanceFromEnded() {
   if (prewarmed && prewarmed.objectUrl) {
     prewarmCache.delete(track.id);
     playPreloadedSync(next, track, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
-    if (prewarmed.isStream) {
-      setTimeout(() => { cacheDriveTrackInBackground(track.id); }, 1200);
-    }
     return;
   }
 
@@ -1576,9 +1595,6 @@ export async function playPrev() {
     if (prewarmed && prewarmed.objectUrl) {
       prewarmCache.delete(t.id);
       playPreloadedSync(prev, t, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
-      if (prewarmed.isStream) {
-        setTimeout(() => { cacheDriveTrackInBackground(t.id); }, 1200);
-      }
       return;
     }
     primeAudioElement();
@@ -1742,9 +1758,6 @@ export async function jumpToQueueIndex(index) {
     if (prewarmed && prewarmed.objectUrl) {
       prewarmCache.delete(track.id);
       playPreloadedSync(index, track, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
-      if (prewarmed.isStream) {
-        setTimeout(() => { cacheDriveTrackInBackground(track.id); }, 1200);
-      }
       return;
     }
     primeAudioElement();
@@ -2116,13 +2129,17 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
     const cached = await hasCachedBlob(track.id).catch(() => false);
     if (!cached) {
       logPerfMark(track.id, "auth_checked", t0);
+      setActiveAudioElement(streamAudioEl);
       try {
         let token = await getDriveToken();
         if (!token) {
+          // 未連携またはトークンなし: 再生を保留し、pending state を記録
+          setPendingPlayback(track, state.queue, state.queueIndex);
           // ユーザー操作による再連携待ちの間、無音ループを一時解除してモーダルを表示
           try { audioEl.pause(); } catch {}
           token = await promptDriveReconnectModal({ track });
           if (!token) {
+            clearPendingPlayback();
             // ユーザーがキャンセルした場合は勝手に次曲へスキップせず停止状態で待機
             if (myToken === state.transitionToken) {
               state.transitioning = false;
@@ -2133,7 +2150,8 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
             }
             return;
           }
-          primeAudioElement();
+          clearPendingPlayback();
+          primeAudioElement(streamAudioEl);
         }
         // ダイレクトストリーミング URL を取得して即座に再生開始（FLAC 全量 DL を待たない）
         const streamUrl = await getDriveStreamUrl(track.id, token);
@@ -2146,15 +2164,23 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
           if (needsWebAudio) {
             notifyUncachedFastStreamOnce();
           }
+        } else {
+          throw new Error("ストリームURLの取得に失敗しました");
         }
       } catch (driveErr) {
-        console.warn("[audio-engine] Drive ストリーム準備警告、通常取得へフォールバック:", driveErr);
+        console.warn("[audio-engine] Drive ストリーム準備失敗:", driveErr);
+        if (myToken === state.transitionToken) {
+          state.transitioning = false;
+          appState.set({ isPlaying: false, loadingTrackId: null, playbackStatus: "error" });
+          toast(driveErr.message || "Google Drive の曲を読み込めませんでした", "err", 4000);
+        }
+        return; // ★ 再生失敗時に全量 getBlob へフォールバックしない（通信量・負荷爆発防止）
       }
     }
   }
 
-  // 3. 音源 Blob 取得 (ローカル曲、キャッシュ済み Drive 曲、またはストリームフォールバック)
-  if (!targetUrl) {
+  // 3. 音源 Blob 取得 (ローカル曲、キャッシュ済み Drive 曲)
+  if (!targetUrl && !isUncachedDirectStream) {
     logPerfMark(track.id, "getBlob_start", t0);
     let blob = await getBlob(track.id).catch((e) => {
       console.warn("[audio-engine] getBlob 失敗", track.id, e);

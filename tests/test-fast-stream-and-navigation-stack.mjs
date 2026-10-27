@@ -1332,4 +1332,81 @@ test("ログにアクセストークンや秘密情報が出力されないこ�
   strictEqual(/src=drive_stream|src=\$\{srcType\}/.test(logCode), true, "URLではなくsrcType種別のみを出力");
 });
 
+console.log("\n=== 10. hotfix: Drive再生信頼性・軽量化・未連携モーダル導線 ===");
+
+test("未接続の未キャッシュDrive曲で接続UI (promptDriveReconnectModal) が呼ばれること", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(aeCode.includes("token = await promptDriveReconnectModal({ track });"), true, "未接続未キャッシュDrive曲でpromptDriveReconnectModalが呼ばれる");
+  strictEqual(aeCode.includes("setPendingPlayback(track"), true, "接続UI呼び出し前にpendingPlaybackが記録される");
+});
+
+test("認証成功後に元の曲のストリームURLを取得して再生を再開すること", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(aeCode.includes("clearPendingPlayback();"), true, "認証完了時にpendingPlaybackがクリアされる");
+  strictEqual(aeCode.includes("primeAudioElement(streamAudioEl);"), true, "認証後にstreamAudioElがプライムされる");
+  strictEqual(aeCode.includes("const streamUrl = await getDriveStreamUrl(track.id, token);"), true, "取得した新トークンでストリームURLを取得");
+});
+
+test("認証キャンセルでpausedへ戻り、勝手に次曲スキップしないこと", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  const cancelSnippet = aeCode.match(/if \(!token\) \{\s*clearPendingPlayback\(\);[\s\S]*?return;\s*\}/);
+  ok(cancelSnippet, "キャンセル処理ブロックが存在する");
+  strictEqual(cancelSnippet[0].includes('playbackStatus: "paused"'), true, "ステータスがpausedになる");
+  strictEqual(cancelSnippet[0].includes('skipToNextOnError'), false, "次曲へスキップしない");
+});
+
+test("キャッシュ済みDrive曲では接続UIを開かないこと", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  const cacheCheckMatch = aeCode.match(/const cached = await hasCachedBlob\(track\.id\)[\s\S]*?if \(!cached\) \{([\s\S]*?)\}/);
+  ok(cacheCheckMatch, "キャッシュチェックブロックが存在する");
+  strictEqual(aeCode.includes("if (!targetUrl && !isUncachedDirectStream)"), true, "キャッシュ済み曲はgetBlob経由でローカル再生");
+});
+
+test("NotAllowedError および MEDIA_ERR_NETWORK を適切にハンドリングすること", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(aeCode.includes("handlePlaybackFinalFailure"), true, "失敗時にhandlePlaybackFinalFailureが呼ばれる");
+  strictEqual(aeCode.includes("Google Driveとの接続が切れています"), true, "ネットワーク/接続エラー用のメッセージ");
+  strictEqual(aeCode.includes("この音源をブラウザで再生できませんでした"), true, "非対応コーデック用のメッセージ");
+});
+
+test("playing直前 (readyState >= 2 または !paused) にwatchdogがsrcを解除しないこと", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(aeCode.includes("curEl.readyState >= 2"), true, "データ受信済みなら解除しない");
+  strictEqual(aeCode.includes("!curEl.paused"), true, "再生進行中なら解除しない");
+});
+
+test("unlock処理が無音play-pause競合を起こさないこと（then内のpause廃止検証）", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  const unlockMatch = aeCode.match(/export function unlockAudioElementsOnUserGesture[\s\S]*?^}/m);
+  ok(unlockMatch, "unlockAudioElementsOnUserGestureが存在する");
+  strictEqual(unlockMatch[0].includes("el.pause()"), false, "unlock内でel.pause()を呼ばない");
+  strictEqual(unlockMatch[0].includes("state.transitioning"), true, "遷移中の要素はスキップ");
+});
+
+test("未キャッシュDrive再生失敗時に全量getBlobへフォールバックしないこと", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(aeCode.includes("★ 再生失敗時に全量 getBlob へフォールバックしない"), true, "全量getBlobフォールバックを防止");
+  strictEqual(aeCode.includes("if (!targetUrl && !isUncachedDirectStream)"), true, "ストリーム失敗曲をgetBlobへ流さない");
+});
+
+test("非アクティブaudioのイベントは重い処理を行わないこと", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(/el\.addEventListener\("loadstart",\s*\(e\)\s*=>\s*\{\s*if \(!isFromActive\(e\)\) return;/.test(aeCode), true, "loadstartで非アクティブを早期return");
+  strictEqual(/el\.addEventListener\("loadeddata",\s*\(e\)\s*=>\s*\{\s*if \(!isFromActive\(e\)\) return;/.test(aeCode), true, "loadeddataで非アクティブを早期return");
+});
+
+test("debug_audio_perfがfalseなら詳細ログを作らないこと（先頭早期return検証）", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  const logMatch = aeCode.match(/function logPlaybackEvent[\s\S]*?^}/m);
+  ok(logMatch, "logPlaybackEventが存在する");
+  strictEqual(logMatch[0].includes("if (!error && !isPerfDebugEnabled()) return;"), true, "デバッグ無効時は先頭で即時return");
+});
+
+test("ビジュアライザー非表示時 (document.hidden) に描画ループが停止すること", () => {
+  const vizCode = fs.readFileSync(path.join(__dirname, "../js/player/visualizer.js"), "utf8");
+  strictEqual(vizCode.includes("visibilitychange"), true, "visibilitychangeリスナーが存在する");
+  strictEqual(vizCode.includes("document.hidden"), true, "document.hidden判定が存在する");
+  strictEqual(/if \(typeof document !== "undefined" && document\.hidden\)\s*\{\s*if \(raf\) cancelAnimationFrame\(raf\);/.test(vizCode), true, "非表示時にcancelAnimationFrameでループ停止");
+});
+
 console.log(`\n高速再生 & ナビゲーションスタックテスト: ${passed} 件 PASSED ✓`);
