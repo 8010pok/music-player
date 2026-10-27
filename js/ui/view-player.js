@@ -16,7 +16,7 @@ import { extractMetadata } from "../metadata/index.js";
 import { initVisualizer, startVisualizer, stopVisualizer, decodePcmForVisualization } from "../player/visualizer.js";
 import { setLoved, retryScrobbleForTrack } from "../lastfm/scrobble.js";
 import { formatTime, toast, escapeHtml, escapeAttr, openModal, dismissActiveModal, closeActiveModalSync } from "./components.js";
-import { getBlob, updateTrack } from "../store/library-db.js";
+import { getBlob, updateTrack, hasCachedBlob } from "../store/library-db.js";
 import { getArtworkUrl, markArtworkBroken } from "./artwork-cache.js";
 import { editTrackMetadata } from "./metadata-editor.js";
 import { openNormalizeModal } from "./normalize-modal.js";
@@ -614,6 +614,23 @@ export async function mount(root) {
     lastBlobId = tid;
     applyLyrics(null); // 前曲の歌詞をクリア(誤表示防止)
     if (!tid) return;
+
+    // ★ 未キャッシュの Google Drive 曲の場合は、再生用ストリーミング帯域の奪取を防ぐため
+    //    全量 50MB のダウンロード(getBlob)を走らせない。
+    const isDrive = typeof tid === "string" && tid.startsWith("gd-");
+    let hasBlob = false;
+    if (isDrive) {
+      hasBlob = await hasCachedBlob(tid).catch(() => false);
+    } else {
+      hasBlob = true;
+    }
+
+    if (!hasBlob) {
+      // 未キャッシュ Drive 曲: 歌詞はオンライン検索のみを試行し、PCM デコードはキャッシュ完了まで保留
+      ensureLyricsForCurrentTrack();
+      return;
+    }
+
     let blob = null;
     try { blob = await getBlob(tid); } catch {}
     // await 中の曲変更・ビュー離脱は破棄

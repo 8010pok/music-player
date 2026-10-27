@@ -1248,4 +1248,88 @@ test("キャッシュ済みメインaudioへ戻るとビジュアライザーが
   strictEqual(/if\s*\(pcm\s*&&\s*pcmCoversFull\)\s*\{\s*drawFromPcm\(w,\s*h\);/.test(vizCode), true);
 });
 
+console.log("\n=== 9. 再生エンジン安定化・無音防止・10秒タイムアウト再試行・User Gesture ===");
+
+test("play() Promise rejection で loading 解除 & error 状態へ安全に遷移すること", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(aeCode.includes("handlePlaybackFinalFailure(myAttemptId, track, err)"), true, "play失敗時にhandlePlaybackFinalFailureが呼ばれる");
+  strictEqual(/playbackStatus:\s*"error"/.test(aeCode), true, "エラー時にplaybackStatus: 'error'に設定される");
+  strictEqual(/loadingTrackId:\s*null/.test(aeCode), true, "エラー時にloadingTrackId: nullにクリアされる");
+});
+
+test("play() 後に playing が発生しない場合の 10秒タイムアウトと安全な1回再試行", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(aeCode.includes("startPlayingWatchdog(myAttemptId, track"), true, "play_called直後にstartPlayingWatchdogが起動される");
+  strictEqual(aeCode.includes("10000"), true, "タイムアウトは10秒(10000ms)");
+  strictEqual(/state\.playAttemptRetryCount\s*<\s*1/.test(aeCode), true, "最大1回のみ安全な再試行を実行");
+  strictEqual(/curEl\.load\(\)/.test(aeCode), true, "再試行時にload()を呼んで通信とデコーダをリセット");
+});
+
+test("2回目タイムアウト/失敗で error 状態へ遷移し、次曲スキップしないこと", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  // handlePlaybackFinalFailure 内で skipToNextOnError を呼ばないこと
+  const handleFnMatch = aeCode.match(/function handlePlaybackFinalFailure[\s\S]*?^}/m);
+  ok(handleFnMatch, "handlePlaybackFinalFailure関数が存在する");
+  const handleFnCode = handleFnMatch[0];
+  strictEqual(handleFnCode.includes("skipToNextOnError"), false, "再生失敗時に勝手に次曲スキップしない");
+  strictEqual(handleFnCode.includes('playbackStatus: "error"'), true, "停止してerror状態にする");
+  strictEqual(handleFnCode.includes("toast("), true, "ユーザーフレンドリーな通知を表示する");
+});
+
+test("古い playAttemptId の playing / play resolve を無視すること", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(aeCode.includes("state.currentPlayAttemptId = myAttemptId"), true, "再生試行ごとに固有IDを発行・保持");
+  strictEqual(aeCode.includes("if (attemptId !== state.currentPlayAttemptId) return;"), true, "staleな試行IDのタイムアウトを無視");
+});
+
+test("非アクティブ要素の pause / abort / error を無視すること", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(aeCode.includes("const isFromActive = (e) =>"), true, "アクティブ要素判定ガードが存在");
+  strictEqual(/if \(!isFromActive\(e\)\) return;\s*onPause\(e\);/.test(aeCode), true, "非アクティブ要素のpauseは無視");
+  strictEqual(/if \(!isFromActive\(e\)\) return;\s*clearPlayingWatchdog\(\);/.test(aeCode), true, "非アクティブ要素のerrorは無視");
+});
+
+test("mainAudioEl と streamAudioEl が同時再生しないこと（setActiveAudioElementの排他制御）", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  const setActiveMatch = aeCode.match(/function setActiveAudioElement[\s\S]*?^}/m);
+  ok(setActiveMatch, "setActiveAudioElementが存在する");
+  const setActiveCode = setActiveMatch[0];
+  strictEqual(setActiveCode.includes("standbyEl.pause()"), true, "待機要素をpause");
+  strictEqual(setActiveCode.includes('standbyEl.removeAttribute("src")'), true, "待機要素のsrcを解除");
+  strictEqual(setActiveCode.includes("standbyEl.load()"), true, "待機要素のload()を呼んで通信を中止");
+});
+
+test("playing 前にバックグラウンドキャッシュを開始しないこと（2.5秒固定タイマー廃止の検証）", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  // loadAndPlay 内に setTimeout(..., 2500) が残っていないこと
+  const loadPlayMatch = aeCode.match(/async function loadAndPlay[\s\S]*?^}/m);
+  ok(loadPlayMatch, "loadAndPlayが存在する");
+  const loadPlayCode = loadPlayMatch[0];
+  strictEqual(/setTimeout\([^,]+,\s*2500\)/.test(loadPlayCode), false, "loadAndPlay内の2.5秒固定タイマーは完全撤廃");
+  strictEqual(loadPlayCode.includes("triggerBgCache();"), true, "onPlaying内からのみキャッシュを開始");
+});
+
+test("streamAudioEl の User Gesture unlock が両要素に対して実装されていること", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(aeCode.includes("export function unlockAudioElementsOnUserGesture"), true, "unlockAudioElementsOnUserGestureがexportされている");
+  strictEqual(aeCode.includes("const elements = [mainAudioEl, streamAudioEl].filter(Boolean);"), true, "両要素を対象にアンロック");
+  strictEqual(/pointerdown/.test(aeCode) && /keydown/.test(aeCode), true, "グローバル操作イベントでセッション初回にアンロック");
+});
+
+test("view-player.js で未キャッシュDrive曲の場合に getBlob を呼ばないこと", () => {
+  const vpCode = fs.readFileSync(path.join(__dirname, "../js/ui/view-player.js"), "utf8");
+  strictEqual(vpCode.includes("hasCachedBlob"), true, "hasCachedBlobがimport・使用されている");
+  strictEqual(/if \(!hasBlob\) \{\s*\/\/[^\n]*\s*ensureLyricsForCurrentTrack\(\);\s*return;\s*\}/.test(vpCode), true, "未キャッシュDrive曲でgetBlobを呼ばずにreturn");
+});
+
+test("ログにアクセストークンや秘密情報が出力されないこと", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  const logMatch = aeCode.match(/function logPlaybackEvent[\s\S]*?^}/m);
+  ok(logMatch, "logPlaybackEventが存在する");
+  const logCode = logMatch[0];
+  strictEqual(logCode.includes("access_token"), false, "ログにaccess_tokenを出力しない");
+  strictEqual(logCode.includes("ya29"), false, "ログにトークンプレフィックスを出力しない");
+  strictEqual(/src=drive_stream|src=\$\{srcType\}/.test(logCode), true, "URLではなくsrcType種別のみを出力");
+});
+
 console.log(`\n高速再生 & ナビゲーションスタックテスト: ${passed} 件 PASSED ✓`);
