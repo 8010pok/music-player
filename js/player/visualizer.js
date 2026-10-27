@@ -17,6 +17,7 @@
  */
 
 import { appState } from "../state.js";
+import { getAudioElement } from "./audio-engine.js";
 
 let canvas = null;
 let ctx = null;
@@ -176,12 +177,24 @@ function draw() {
   // - audio.paused === false
   // - audio.src がセットされている
   // - readyState が HAVE_CURRENT_DATA (>=2) 以上 = データを再生できる状態
-  const hasSrc = !!(audioEl && audioEl.src);
-  const hasData = !!(audioEl && audioEl.readyState >= 2);
-  const playing = !!(audioEl && !audioEl.paused && hasSrc && hasData);
+  const curEl = (typeof getAudioElement === "function" ? getAudioElement() : null) || audioEl;
+  const hasSrc = !!(curEl && curEl.src);
+  const hasData = !!(curEl && curEl.readyState >= 2);
+  const playing = !!(curEl && !curEl.paused && hasSrc && hasData);
   if (!playing) {
     // 静止時はバーをゆっくり減衰
     decayBars();
+    return;
+  }
+
+  // ★ stream-audio-el (未キャッシュGoogle Driveダイレクトストリーミング再生時):
+  // CORS 制約による無音化を防ぐため、Web Audio API (createMediaElementSource / AnalyserNode) には
+  // 一切接続しない。実波形・周波数スペクトラム・RMS・Peak の算出・更新は停止（0減衰）とし、
+  // 安全なフォールバックプレースホルダー表示を描画する。
+  // （再生位置 currentTime 表示やシーク処理は getAudioElement() 経由で正常に継続される）
+  if (curEl && curEl.id === "stream-audio-el") {
+    decayBars();
+    drawStreamingPlaceholder(w, h);
     return;
   }
 
@@ -193,11 +206,57 @@ function draw() {
 }
 
 /**
+ * 未キャッシュDrive高速ストリーミング用プレースホルダー描画
+ * - Web Audio (AnalyserNode) に一切接続せず安全に描画
+ * - RMS/Peak バーは更新停止（減衰状態）を維持
+ */
+function drawStreamingPlaceholder(w, h) {
+  // 1. 静止プレースホルダーバー（控えめな半透明バー）
+  const bins = 32;
+  const barW = w / bins;
+  const t = performance.now() / 1500;
+  ctx.fillStyle = "rgba(128, 128, 128, 0.15)";
+  for (let i = 0; i < bins; i++) {
+    const v = 0.08 + 0.04 * Math.sin(t + i * 0.35);
+    const bh = v * h;
+    ctx.fillRect(i * barW + 1, h - bh, Math.max(1, barW - 2), bh);
+  }
+
+  // 2. 高速ストリーミング中のステータス表示
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  const dpr = window.devicePixelRatio || 1;
+  const fontSize = Math.max(10, Math.min(13, Math.floor(11 * dpr)));
+  ctx.font = `500 ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+  ctx.fillStyle = "rgba(255, 255, 255, 0.72)";
+  ctx.fillText("⚡ 高速ストリーミング再生中（キャッシュ完了後に実波形表示）", w / 2, h / 2);
+  ctx.restore();
+}
+
+/**
+ * ビジュアライザの現在の状態を取得（診断・テスト用）
+ * @returns {{ isStreaming: boolean, hasPcm: boolean, webAudioConnected: boolean, active: boolean }}
+ */
+export function getVisualizerState() {
+  const curEl = (typeof getAudioElement === "function" ? getAudioElement() : null) || audioEl;
+  const isStreaming = !!(curEl && curEl.id === "stream-audio-el");
+  return {
+    isStreaming,
+    hasPcm: !!(pcm && pcmCoversFull),
+    webAudioConnected: false, // ビジュアライザは Web Audio / AnalyserNode に接続しない設計
+    active,
+  };
+}
+
+/**
  * PCM ベース描画
  * 現在の currentTime 付近のサンプルから RMS/Peak と簡易DFTを算出
  */
 function drawFromPcm(w, h) {
-  const cur = audioEl.currentTime || 0;
+  const curEl = (typeof getAudioElement === "function" ? getAudioElement() : null) || audioEl;
+  const cur = curEl ? (curEl.currentTime || 0) : 0;
   const startSample = Math.floor(cur * sampleRate);
   // 解析窓のサンプル数。グローバル window をシャドウしないよう windowSize と命名。
   const windowSize = 2048;

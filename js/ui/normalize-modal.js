@@ -21,6 +21,11 @@ import {
   normalizeTrackAudio,
   determineNormalizationStrategy,
 } from "../audio/normalize-service.js";
+import {
+  getAudioElement,
+  getMainAudioElement,
+  getStreamAudioElement,
+} from "../player/audio-engine.js";
 
 /**
  * トラックの音量ノーマライズモーダルを開く
@@ -288,9 +293,17 @@ export async function openNormalizeModal(track, opts = {}) {
       cleanupPreview();
 
       // メインプレイヤーが再生中ならプレビュー試聴の邪魔にならないよう一時停止
-      const mainAudioEl = document.getElementById("audio-el");
-      if (mainAudioEl && !mainAudioEl.paused) {
-        try { mainAudioEl.pause(); } catch (_) {}
+      const curAudio = getAudioElement();
+      if (curAudio && !curAudio.paused) {
+        try { curAudio.pause(); } catch (_) {}
+      }
+      const streamAudio = getStreamAudioElement();
+      if (streamAudio && !streamAudio.paused) {
+        try { streamAudio.pause(); } catch (_) {}
+      }
+      const mainAudio = getMainAudioElement();
+      if (mainAudio && !mainAudio.paused) {
+        try { mainAudio.pause(); } catch (_) {}
       }
 
       const AC = window.AudioContext || window.webkitAudioContext;

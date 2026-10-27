@@ -22,7 +22,7 @@ import {
   removeTracksFromPlaylist,
 } from "../store/library-db.js";
 import { setQueueAndPlay, setShuffleMode, setRepeatMode, prewarmTrack, prewarmTracks } from "../player/audio-engine.js";
-import { go } from "../router.js";
+import { go, back } from "../router.js";
 import { toast, confirm, promptForm, escapeHtml, escapeAttr } from "./components.js";
 
 /**
@@ -53,7 +53,7 @@ export async function mount(root) {
   const params = parseQuery();
   const id = params.id;
   if (!id) {
-    go("playlists");
+    back("playlists");
     return () => {};
   }
   playlist = await getPlaylist(id);
@@ -65,7 +65,7 @@ export async function mount(root) {
     if (appState.get().currentPlaylistId === id) {
       appState.set({ currentPlaylistId: null, currentPlaylistName: null });
     }
-    go("playlists");
+    back("playlists");
     return () => {};
   }
   await reloadTracks();
@@ -84,7 +84,7 @@ export async function mount(root) {
     prewarmTracks(tracksInOrder.map((t) => t.id), 10);
   }
 
-  refs.backBtn.addEventListener("click", () => go("playlists"));
+  refs.backBtn.addEventListener("click", () => back("playlists"));
   refs.renameBtn.addEventListener("click", () => renamePlaylist(refs));
   refs.playBtn.addEventListener("click", () => playPlaylist(false));
   refs.shufflePlayBtn.addEventListener("click", () => playPlaylist(true));

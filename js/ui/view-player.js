@@ -22,7 +22,7 @@ import { editTrackMetadata } from "./metadata-editor.js";
 import { openNormalizeModal } from "./normalize-modal.js";
 import { fetchOnlineLyrics, fetchLyricsCandidates, getExternalLyricsUrls, setLyricsCache } from "../metadata/lrclib.js";
 import { parseLrc } from "../metadata/lyrics.js";
-import { go } from "../router.js";
+import { go, back } from "../router.js";
 import { getAlbumKey, getAlbumArtist } from "../metadata/album-util.js";
 
 /**
@@ -60,11 +60,7 @@ export async function mount(root) {
   // 上部閉じるボタン (下スワイプ / 戻る 相当で前画面へ)
   if (refs.dismissBtn) {
     refs.dismissBtn.addEventListener("click", () => {
-      if (window.history.length > 1) {
-        window.history.back();
-      } else {
-        go("library");
-      }
+      back("library");
     });
   }
 
@@ -89,7 +85,7 @@ export async function mount(root) {
   let renderQueueList = () => {};
 
   const unsub = appState.subscribe(
-    ["currentTrack", "isPlaying", "duration", "currentTime", "scrobbleProgress", "scrobbleResult", "scrobbleReason", "scrobbleRejectedTrack", "shuffleMode", "repeatMode", "authState", "sleepTimer", "queue", "queueIndex"],
+    ["currentTrack", "isPlaying", "loadingTrackId", "playbackStatus", "duration", "currentTime", "scrobbleProgress", "scrobbleResult", "scrobbleReason", "scrobbleRejectedTrack", "shuffleMode", "repeatMode", "authState", "sleepTimer", "queue", "queueIndex"],
     (s) => {
       updateUI(refs, s);
       updateSleepTimerBadge(s.sleepTimer);
@@ -1568,14 +1564,17 @@ function updateUI(refs, s) {
   // アートワーク色による動的アンビエントオーロラ背景の更新
   updateAmbientColor(refs, artUrl);
 
+  // loading / playing 状態の厳密な整合
+  const isLoading = !!(s.loadingTrackId && (!t || s.loadingTrackId === t.id));
+  refs.playBtn.classList.toggle("is-loading", isLoading);
   // is-playing クラスで再生/一時停止アイコン(SVG)を CSS 側で出し分ける
-  refs.playBtn.classList.toggle("is-playing", !!s.isPlaying);
+  refs.playBtn.classList.toggle("is-playing", !!s.isPlaying && !isLoading);
   // aria-label も状態に追従させる (アイコンだけだとスクリーンリーダーに伝わらない)
-  refs.playBtn.setAttribute("aria-label", s.isPlaying ? "一時停止" : "再生");
+  refs.playBtn.setAttribute("aria-label", isLoading ? "読み込み中" : s.isPlaying ? "一時停止" : "再生");
 
   // 再生中/停止中でアートワークの拡大/縮小スプリング演出
   if (refs.artWrap) {
-    refs.artWrap.classList.toggle("is-paused", !s.isPlaying);
+    refs.artWrap.classList.toggle("is-paused", !s.isPlaying || isLoading);
   }
 
   const dur = s.duration || 0;

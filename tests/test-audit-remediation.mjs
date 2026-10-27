@@ -568,36 +568,59 @@ await asyncTest("setSyncScope(true) 中は notifyLibraryMutated が抑止され�
   }
 });
 
-console.log("=== 4. 未キャッシュDrive曲とWeb Audio (EQ/キーチェンジ) 安全経路 ===");
+console.log("=== 4. 未キャッシュDrive曲の高速再生 & Web Audio一時バイパス経路 ===");
 
-test("EQ無効かつキーチェンジ無効の場合はダイレクトストリームが優先されること", () => {
-  // needsWebAudio = isEffectsActive || isKeyShiftActive
-  const pub = { enableAudioEffects: false };
-  const track = { id: "gd-test-stream", keyShift: 0 };
+test("未キャッシュDrive曲はEQ/キーチェンジ有効時でもダウンロード待機せずダイレクトストリームが優先されること", () => {
+  // 新設計: 未キャッシュGoogle Drive曲は、EQまたはキーチェンジが有効であっても
+  // 全量ダウンロード待ち（Blobキャッシュ待機）を完全バイパスし、
+  // HTTP Range ダイレクトストリーミング URL を即座にセットして音出しを開始する。
+  const track = { id: "gd-test-stream", keyShift: 2 };
+  const pub = { enableAudioEffects: true };
+  const isDriveTrack = (typeof track.id === "string" && track.id.startsWith("gd-")) || !!track.driveFileId;
   const isEffectsActive = !!pub.enableAudioEffects;
   const trackKeyShift = track.keyShift || 0;
   const isKeyShiftActive = trackKeyShift !== 0;
   const needsWebAudio = isEffectsActive || isKeyShiftActive;
 
-  strictEqual(needsWebAudio, false, "EQ/キーチェンジ不要なら Web Audio バイパスフラグは立たない");
+  strictEqual(isDriveTrack, true, "Drive曲判定");
+  strictEqual(needsWebAudio, true, "Web Audio が本来必要な状態");
+
+  // 未キャッシュ時はダイレクトストリーム経路へ進み、Web Audio (EQ/キーチェンジ) を初回一時バイパス
+  const cached = false;
+  let targetUrl = null;
+  let isDirectStream = false;
+  let isUncachedDirectStream = false;
+  if (!targetUrl && isDriveTrack && !cached) {
+    targetUrl = "https://www.googleapis.com/drive/v3/files/test-stream?alt=media&access_token=ya29.test";
+    isDirectStream = true;
+    isUncachedDirectStream = true;
+  }
+
+  strictEqual(isDirectStream, true, "ダウンロード待機せずダイレクトストリームURLが即座に設定される");
+  strictEqual(isUncachedDirectStream, true, "未キャッシュダイレクトストリームとしてマークされる");
+  // 初回再生時は Web Audio 結線をバイパスして HTMLAudioElement 直接出力（CORS無音化防止）
+  const shouldWireWebAudio = !isUncachedDirectStream && needsWebAudio;
+  strictEqual(shouldWireWebAudio, false, "初回未キャッシュ再生時は Web Audio 結線がバイパスされること");
 });
 
-test("EQ有効またはキーチェンジ有効時はCORS無音化防止のためBlobキャッシュ待機となること", () => {
-  // Case A: EQ 有効
-  {
-    const pub = { enableAudioEffects: true };
-    const track = { id: "gd-test-stream", keyShift: 0 };
-    const needsWebAudio = !!pub.enableAudioEffects || (track.keyShift !== 0);
-    strictEqual(needsWebAudio, true, "EQ有効時は Web Audio 接続が必要");
+test("キャッシュ済みDrive曲またはローカル曲は通常通りWeb Audioが接続されること", () => {
+  const track = { id: "gd-cached-stream", keyShift: 2 };
+  const pub = { enableAudioEffects: true };
+  const isDriveTrack = (typeof track.id === "string" && track.id.startsWith("gd-")) || !!track.driveFileId;
+  const isEffectsActive = !!pub.enableAudioEffects;
+  const trackKeyShift = track.keyShift || 0;
+  const needsWebAudio = isEffectsActive || (trackKeyShift !== 0);
+
+  const cached = true; // キャッシュ済み
+  let targetUrl = "blob:https://example.com/cached-uuid";
+  let isUncachedDirectStream = false;
+  if (!targetUrl && isDriveTrack && !cached) {
+    isUncachedDirectStream = true;
   }
 
-  // Case B: キーチェンジ有効
-  {
-    const pub = { enableAudioEffects: false };
-    const track = { id: "gd-test-stream", keyShift: 2 };
-    const needsWebAudio = !!pub.enableAudioEffects || (track.keyShift !== 0);
-    strictEqual(needsWebAudio, true, "キーチェンジ有効時は Web Audio 接続が必要");
-  }
+  strictEqual(isUncachedDirectStream, false, "キャッシュ済み曲は未キャッシュストリームではない");
+  const shouldWireWebAudio = !isUncachedDirectStream && needsWebAudio;
+  strictEqual(shouldWireWebAudio, true, "キャッシュ済み曲では Web Audio (EQ/キーチェンジ) が安全に接続されること");
 });
 
 console.log("=== 5. 同期失敗時の dirty 保持 & 世代番号管理 ===");

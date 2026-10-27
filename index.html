@@ -47,10 +47,11 @@
   <!-- ============================================================
        常駐オーディオ要素：iOS バックグラウンド再生の生命線。
        絶対にビューと一緒に再生成しないこと。
-       AudioContext を音声経路に挟むとロック画面で停止するため、
-       これは独立した最上位ノードとして DOM に常駐させる。
+       - audio-el: メイン音源（ローカル、キャッシュBlob、Web Audio/EQ経由）
+       - stream-audio-el: 未キャッシュDriveダイレクトストリーム専用（CORS無音化防止）
        ============================================================ -->
   <audio id="audio-el" preload="metadata" playsinline></audio>
+  <audio id="stream-audio-el" preload="metadata" playsinline></audio>
 
   <!-- 全体ヘッダー（タイトル + 状態表示 + 統計取得進捗） -->
   <header class="app-header" role="banner">

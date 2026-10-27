@@ -26,6 +26,7 @@ import { getSimilarArtists, getArtistInfo, getAlbumInfo, getTopTracks } from "..
 import { cached, ckey } from "../lastfm/stats-cache.js";
 import { getPublic } from "../store/settings.js";
 import { toast, escapeHtml, escapeAttr } from "./components.js";
+import { getCurrentState, updateCurrentState } from "../router.js";
 
 // escapeHtml=テキストノード用、escapeAttr=属性値用（どちらも components.js で null-safe）
 
@@ -93,6 +94,13 @@ let chartGenre = null, chartDecade = null;       // ジャンルタブ: DNA ド�
 let chartLovedTimeline = null;                   // Loved タブ: 月別 Love 数
 
 export async function mount(root) {
+  const savedState = getCurrentState();
+  if (savedState?.currentTab && MAIN_TABS.some((t) => t.value === savedState.currentTab)) {
+    currentTab = savedState.currentTab;
+  }
+  if (savedState?.currentPeriod) currentPeriod = savedState.currentPeriod;
+  if (savedState?.currentCompareRange) currentCompareRange = savedState.currentCompareRange;
+
   root.innerHTML = render();
   refs = collectRefs(root);
 
@@ -116,6 +124,7 @@ export async function mount(root) {
       if (!refs) return;
       refs.tabs.forEach((x) => x.classList.toggle("is-active", x === tb));
       currentTab = tb.dataset.tab;
+      updateCurrentState({ currentTab, currentPeriod, currentCompareRange });
       // 前回 run が中断/部分失敗で未完了(complete:false)のまま、前面・オンライン・非ダッシュボードタブに
       //   滞在し続けると visibilitychange/online/再マウントのいずれも発火せず回復契機を逃すため、タブ切替
       //   という明示操作を回復契機に加える。retryIfIncomplete は完了済み/取得中/ユーザ無し/永続エラーでは

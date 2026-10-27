@@ -424,6 +424,7 @@
 .player-view #btn-play .ic-pause { display: none; }
 .player-view #btn-play.is-playing .ic-play { display: none; }
 .player-view #btn-play.is-playing .ic-pause { display: block; }
+.player-view #btn-play.is-loading { opacity: 0.75; cursor: wait; }
 
 /* リピート / 単曲リピート アイコンの出し分け(is-one) */
 .player-view #btn-repeat .ic-repeat-one { display: none; }

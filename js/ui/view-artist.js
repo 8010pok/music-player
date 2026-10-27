@@ -13,7 +13,7 @@ import { sortAlbums } from "../metadata/album-util.js";
 import { setQueueAndPlay, setShuffleMode, prewarmTrack, prewarmTracks, playNextTrack, addToQueueEnd } from "../player/audio-engine.js";
 import { appState } from "../state.js";
 import { getArtworkUrl } from "./artwork-cache.js";
-import { go } from "../router.js";
+import { go, back } from "../router.js";
 import { toast, escapeHtml, escapeAttr, formatTime } from "./components.js";
 import { editTrackMetadata } from "./metadata-editor.js";
 
@@ -25,7 +25,7 @@ export async function mount(root) {
   const artistName = params.name ? decodeURIComponent(params.name) : "";
 
   if (!artistName) {
-    go("library", { tab: "artists" });
+    back("library", { tab: "artists" });
     return () => {};
   }
 
@@ -38,7 +38,7 @@ export async function mount(root) {
 
   if (!artist) {
     toast("アーティストが見つかりません", "err");
-    go("library", { tab: "artists" });
+    back("library", { tab: "artists" });
     return () => {};
   }
 
@@ -54,11 +54,7 @@ export async function mount(root) {
   const refs = collectRefs(root);
 
   refs.backBtn.addEventListener("click", () => {
-    if (window.history.length > 1) {
-      window.history.back();
-    } else {
-      go("library", { tab: "artists" });
-    }
+    back("library", { tab: "artists" });
   });
 
   refs.playAllBtn.addEventListener("click", () => playArtist(false));

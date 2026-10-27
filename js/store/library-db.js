@@ -565,8 +565,10 @@ export function hasMemoryBlob(id) {
 
 /**
  * トラック本体（Blob）取得
+ * @param {string} id
+ * @param {{ signal?: AbortSignal|null }} [opts]
  */
-export async function getBlob(id) {
+export async function getBlob(id, { signal = null } = {}) {
   const mem = getMemoryBlob(id);
   if (mem) {
     ensureTrackMetadataInBackground(id, mem);
@@ -598,7 +600,7 @@ export async function getBlob(id) {
     const driveFileId = id.slice(3);
     try {
       const { fetchDriveAudioBlob } = await import("../gdrive/drive-service.js");
-      const blob = await fetchDriveAudioBlob(driveFileId);
+      const blob = await fetchDriveAudioBlob(driveFileId, { signal });
       if (blob) {
         putMemoryBlob(id, blob);
         let shouldCache = true;
@@ -660,20 +662,26 @@ const _cachingDriveIds = new Set();
  * ダイレクトストリーミング再生開始後に、裏（バックグラウンド）で Google Drive 音源を
  * IndexedDB (blobs ストア) にキャッシュし、完全なメタデータ・アートワーク・正確な再生時間を補完する。
  * @param {string} id
+ * @param {{ signal?: AbortSignal|null }} [opts]
+ * @returns {Promise<void>}
  */
-export function cacheDriveTrackInBackground(id) {
-  if (!id || typeof id !== "string" || !id.startsWith("gd-")) return;
-  if (_cachingDriveIds.has(id)) return;
+export function cacheDriveTrackInBackground(id, { signal = null } = {}) {
+  if (!id || typeof id !== "string" || !id.startsWith("gd-")) return Promise.resolve();
+  if (_cachingDriveIds.has(id)) return Promise.resolve();
+  if (signal?.aborted) return Promise.resolve();
   _cachingDriveIds.add(id);
-  (async () => {
+  return (async () => {
     try {
       const pub = getPublic();
       if (pub && pub.gdriveAutoCache === false) return;
       const already = await hasCachedBlob(id);
       if (already) return;
-      await getBlob(id);
+      if (signal?.aborted) return;
+      await getBlob(id, { signal });
     } catch (e) {
-      console.warn("[library-db] バックグラウンドDriveキャッシュスキップ:", id, e);
+      if (e?.name !== "AbortError" && !signal?.aborted) {
+        console.warn("[library-db] バックグラウンドDriveキャッシュスキップ:", id, e);
+      }
     } finally {
       _cachingDriveIds.delete(id);
     }

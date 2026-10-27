@@ -167,7 +167,7 @@ async function main() {
   });
   register("albums", async (root) => {
     // 下のアルバムタブ廃止に伴い、ライブラリ内のアルバムタブへ自動誘導
-    go("library", { tab: "albums" });
+    go("library", { tab: "albums" }, { replace: true });
   });
   register("album", async (root) => {
     const m = await loadView("album");

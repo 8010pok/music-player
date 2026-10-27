@@ -17,7 +17,7 @@ import {
   removeTracksFromPlaylist,
 } from "../store/library-db.js";
 import { appState } from "../state.js";
-import { go } from "../router.js";
+import { go, back } from "../router.js";
 import { toast, confirm, escapeHtml, escapeAttr } from "./components.js";
 import { getArtworkUrl } from "./artwork-cache.js";
 
@@ -29,7 +29,7 @@ let searchQuery = "";
 export async function mount(root) {
   const params = parseQuery();
   const id = params.id;
-  if (!id) { go("playlists"); return () => {}; }
+  if (!id) { back("playlists"); return () => {}; }
   playlist = await getPlaylist(id);
   if (!playlist) {
     toast("プレイリストが見つかりません", "err");
@@ -38,7 +38,7 @@ export async function mount(root) {
     if (appState.get().currentPlaylistId === id) {
       appState.set({ currentPlaylistId: null, currentPlaylistName: null });
     }
-    go("playlists");
+    back("playlists");
     return () => {};
   }
   allTracks = await getAllTracks();
@@ -54,7 +54,7 @@ export async function mount(root) {
   root.innerHTML = render();
   const refs = collectRefs(root);
 
-  refs.backBtn.addEventListener("click", () => go("playlist", { id: playlist.id }));
+  refs.backBtn.addEventListener("click", () => back("playlist", { id: playlist.id }));
   refs.tabs.forEach((tb) => {
     tb.addEventListener("click", () => {
       currentTab = tb.dataset.tab;

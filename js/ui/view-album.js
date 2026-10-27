@@ -11,7 +11,7 @@ import { groupTracksIntoAlbums, parseTrackIndex, getAlbumKey } from "../metadata
 import { setQueueAndPlay, setShuffleMode, stopPlayback, prewarmTrack, prewarmTracks, playNextTrack, addToQueueEnd } from "../player/audio-engine.js";
 import { appState } from "../state.js";
 import { getArtworkUrl, releaseArtwork } from "./artwork-cache.js";
-import { go } from "../router.js";
+import { go, back } from "../router.js";
 import { escapeHtml, escapeAttr, toast, confirm, openModal, dismissActiveModal, closeActiveModalSync, promptForm } from "./components.js";
 import { editTrackMetadata, editAlbumMetadata, editSelectedTracksMetadata } from "./metadata-editor.js";
 import { openPlayerSoundModal } from "./view-player.js";
@@ -27,7 +27,7 @@ export async function mount(root, options = {}) {
   const key = params.key;
 
   if (!key) {
-    go("albums");
+    back("library", { tab: "albums" });
     return () => {};
   }
 
@@ -42,7 +42,7 @@ export async function mount(root, options = {}) {
 
   if (!album) {
     toast("アルバムが見つかりません", "err");
-    go("albums");
+    back("library", { tab: "albums" });
     return () => {};
   }
 
@@ -59,18 +59,14 @@ export async function mount(root, options = {}) {
   }
 
   refs.backBtn.addEventListener("click", () => {
-    if (window.history.length > 1) {
-      window.history.back();
-    } else {
-      go("library", { tab: "albums" });
-    }
+    back("library", { tab: "albums" });
   });
   refs.playAllBtn.addEventListener("click", () => playAlbum(false));
   refs.playShuffleBtn.addEventListener("click", () => playAlbum(true));
   const openAlbumEditor = () => {
     editAlbumMetadata(album, async (updatedAlb) => {
       if (!updatedAlb) {
-        go("library", { tab: "albums" });
+        back("library", { tab: "albums" });
         return;
       }
       // アルバム名やアルバムアーティストが変更された場合、新しいアルバムキーを計算して URL を更新してから再マウント
@@ -138,7 +134,7 @@ export async function mount(root, options = {}) {
               return;
             }
           }
-          go("library", { tab: "albums" });
+          back("library", { tab: "albums" });
         } else {
           await mount(root);
         }
@@ -158,7 +154,7 @@ export async function mount(root, options = {}) {
           releaseArtwork(t.id);
         }
         toast(`アルバムと全 ${album.tracks.length} 曲を削除しました`, "ok");
-        go("albums");
+        back("library", { tab: "albums" });
       }
     });
   }
@@ -263,7 +259,7 @@ async function reloadAlbumAfterTrackEdit(root, updatedTrack) {
         return;
       }
     }
-    go("library", { tab: "albums" });
+    back("library", { tab: "albums" });
   } else {
     await mount(root);
   }
@@ -745,7 +741,7 @@ function openTrackActionsModal(track, root) {
           toast("曲は削除されましたが、端末間同期用の削除履歴を保存できませんでした。別端末から曲が復活する可能性があります。", "warn");
         } else if (album.tracks.length === 0) {
           toast("アルバムの全曲が削除されました", "ok");
-          go("library", { tab: "albums" });
+          back("library", { tab: "albums" });
         } else {
           toast("削除しました", "ok");
           const savedY = typeof window !== "undefined" ? window.scrollY : 0;

@@ -73,6 +73,11 @@ export function bandLabel(freq) {
  * @param {boolean} enabled
  */
 export function applyEffectsSetting(audioEl, enabled) {
+  // 高速ストリーミング専用要素 (stream-audio-el) は CORS 無音化防止のため
+  // 絶対に Web Audio API (createMediaElementSource) に接続しない
+  if (audioEl && audioEl.id === "stream-audio-el") {
+    return;
+  }
   if (!enabled) {
     // 既に作成済みの場合は全パラメータを中立にしてバイパス相当に
     bypassAll();
@@ -474,6 +479,11 @@ async function ensurePitchShifterLoaded(audioCtx, sourceNode) {
 export function applyKeyShift(semitones, audioEl) {
   const shift = Math.max(-12, Math.min(12, Math.round(Number(semitones) || 0)));
   currentKeyShift = shift;
+
+  // 高速ストリーミング専用要素は Web Audio に接続しない
+  if (audioEl && audioEl.id === "stream-audio-el") {
+    return;
+  }
 
   // AudioContext 未初期化で shift !== 0 の場合、audioEl があればエフェクトチェーンを初期化
   if (!ctx && shift !== 0 && audioEl) {

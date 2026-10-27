@@ -537,13 +537,16 @@ export async function listDriveAudioFiles({ query = "", pageToken = null, pageSi
 /**
  * Google Drive から音源ファイルの Blob をダウンロード (リトライ機能付き)
  * @param {string} fileId
- * @param {{ onProgress?: (loaded: number, total: number) => void, maxRetries?: number }} [opts]
+ * @param {{ onProgress?: (loaded: number, total: number) => void, maxRetries?: number, signal?: AbortSignal|null }} [opts]
  * @returns {Promise<Blob>}
  */
-export async function fetchDriveAudioBlob(fileId, { onProgress, maxRetries = 3 } = {}) {
+export async function fetchDriveAudioBlob(fileId, { onProgress, maxRetries = 3, signal = null } = {}) {
   let lastError = null;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    if (signal?.aborted) {
+      throw new DOMException("The user aborted a request.", "AbortError");
+    }
     try {
       const token = await getDriveToken();
       if (!token) throw new Error("Google Drive に接続されていません。設定画面で接続してください。");
@@ -551,6 +554,7 @@ export async function fetchDriveAudioBlob(fileId, { onProgress, maxRetries = 3 }
       const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`;
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` },
+        signal: signal || undefined,
       });
 
       if (!res.ok) {
@@ -610,6 +614,9 @@ export async function fetchDriveAudioBlob(fileId, { onProgress, maxRetries = 3 }
       return await res.blob();
     } catch (err) {
       lastError = err;
+      if (err.name === "AbortError" || signal?.aborted) {
+        throw err;
+      }
       if (err.message && (err.message.includes("401") || err.message.includes("403") || err.message.includes("接続されていません"))) {
         throw err;
       }

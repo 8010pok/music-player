@@ -13,6 +13,7 @@ class AppState extends EventTarget {
       // 再生関連
       currentTrack: null,    // { id, title, artist, album, ... }
       isPlaying: false,
+      playbackStatus: "paused", // "paused" | "loading" | "playing" | "error"
       duration: 0,
       currentTime: 0,
       queue: [],             // 再生キュー（id列）

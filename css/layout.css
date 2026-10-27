@@ -374,6 +374,7 @@ body[data-route="player"] .mini-player {
 .mini-btn#mini-play .ic-pause { display: none; }
 .mini-btn#mini-play.is-playing .ic-play { display: none; }
 .mini-btn#mini-play.is-playing .ic-pause { display: block; }
+.mini-btn#mini-play.is-loading { opacity: 0.75; cursor: wait; }
 
 .icon-btn {
   width: 36px;

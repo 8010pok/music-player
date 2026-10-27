@@ -15,7 +15,7 @@ import { putTrack, getTrack, getAllTracks, updateTrack, setTracksOrder, deleteTr
 import { setQueueAndPlay, stopPlayback, prewarmTrack, prewarmTracks, playNextTrack, addToQueueEnd } from "../player/audio-engine.js";
 import { toast, confirm, openModal, dismissActiveModal, closeActiveModalSync, promptForm, escapeHtml, escapeAttr } from "./components.js";
 import { appState } from "../state.js";
-import { go, getLastView, saveLastView } from "../router.js";
+import { go, getLastView, saveLastView, getCurrentState, updateCurrentState } from "../router.js";
 import { getArtworkUrl, releaseArtwork, markArtworkBroken } from "./artwork-cache.js";
 import { editTrackMetadata, editSelectedTracksMetadata } from "./metadata-editor.js";
 import { openPlayerSoundModal } from "./view-player.js";
@@ -72,6 +72,20 @@ let storageInfo = "";
 // rescanProgress 要素で共有し tracksCache を書き換えるため、同時実行を禁止する。
 let bulkBusy = false;
 
+function persistLibraryState() {
+  updateCurrentState({
+    activeTab,
+    filterText,
+    albumFilterText,
+    artistFilterText,
+    sortKey,
+    albumSortKey,
+    artistSortKey,
+    showDisabled,
+    quickFilter,
+  });
+}
+
 export async function mount(root) {
   // --- ドラッグ並び替えの残置状態をリセット ---
   // モジュールスコープの dragState は SPA 内では他画面遷移を跨いで生存する。
@@ -81,10 +95,13 @@ export async function mount(root) {
   // mount 開始時に必ずクリアする。
   resetDragState();
 
-  // URL クエリまたは保存状態からタブ復元 (デフォルト: artists)
+  // URL クエリまたはスタック状態または保存状態からタブ復元 (デフォルト: artists)
   const tabMatch = location.hash.match(/\btab=([a-z]+)/);
+  const savedState = getCurrentState();
   if (tabMatch && ["tracks", "albums", "artists"].includes(tabMatch[1])) {
     activeTab = tabMatch[1];
+  } else if (savedState && ["tracks", "albums", "artists"].includes(savedState.activeTab)) {
+    activeTab = savedState.activeTab;
   } else {
     const last = getLastView();
     if (last && ["tracks", "albums", "artists"].includes(last.tab)) {
@@ -93,15 +110,38 @@ export async function mount(root) {
       activeTab = "artists";
     }
   }
-  albumFilterText = "";
-  albumSortKey = "title-asc";
-  artistFilterText = "";
-  artistSortKey = "name-asc";
+
+  // 検索・ソート状態をスタック状態から復元（無ければデフォルト初期値）
+  albumFilterText = typeof savedState?.albumFilterText === "string" ? savedState.albumFilterText : "";
+  albumSortKey = typeof savedState?.albumSortKey === "string" ? savedState.albumSortKey : "title-asc";
+  artistFilterText = typeof savedState?.artistFilterText === "string" ? savedState.artistFilterText : "";
+  artistSortKey = typeof savedState?.artistSortKey === "string" ? savedState.artistSortKey : "name-asc";
+  filterText = typeof savedState?.filterText === "string" ? savedState.filterText : "";
+  sortKey = typeof savedState?.sortKey === "string" ? savedState.sortKey : "manual-asc";
+  showDisabled = typeof savedState?.showDisabled === "boolean" ? savedState.showDisabled : true;
+  quickFilter = typeof savedState?.quickFilter === "string" ? savedState.quickFilter : "all";
+  isSelectMode = false;
+  selectedTrackIds = new Set();
+  storageInfo = "";
 
   root.innerHTML = render();
   const refs = collectRefs(root);
   // この画面を「現在表示中」として記録する(後追い完了処理/遅延失敗ハンドラの判定用)。
   activeRefs = refs;
+
+  // コントロールの初期値を復元値に同期
+  if (refs.search && filterText) refs.search.value = filterText;
+  if (refs.albumSearch && albumFilterText) refs.albumSearch.value = albumFilterText;
+  if (refs.artistSearch && artistFilterText) refs.artistSearch.value = artistFilterText;
+  if (refs.sort) refs.sort.value = sortKey;
+  if (refs.albumSort) refs.albumSort.value = albumSortKey;
+  if (refs.artistSort) refs.artistSort.value = artistSortKey;
+  if (refs.showDisabledChk) refs.showDisabledChk.checked = showDisabled;
+  if (refs.quickFilterBar) {
+    refs.quickFilterBar.querySelectorAll(".quick-filter-chip").forEach((c) => {
+      c.classList.toggle("is-active", c.dataset.filter === quickFilter);
+    });
+  }
 
   // 仮想スクロールの初期化（60件以上で発動、DOM要素削減 & スムーズ追従）
   if (refs.list) {
@@ -114,21 +154,6 @@ export async function mount(root) {
       scrollParent: window,
     });
   }
-
-  // ★ 検索/ソート/表示状態を、render() が描画したコントロールの初期値
-  //   (検索空・手動並び替え・無効も表示)に合わせてリセットする。これをしないと
-  //   別画面から戻ったとき、コントロール表示は初期値なのに一覧だけ前回の filter/
-  //   sort 状態で描画され(表示と操作が食い違い)、その誤った visibleTracks から
-  //   再生キューが作られてしまう(dragState を mount 冒頭でリセットするのと同じ理由)。
-  filterText = "";
-  sortKey = "manual-asc";
-  showDisabled = true;
-  quickFilter = "all";
-  isSelectMode = false;
-  selectedTrackIds = new Set();
-  // storageInfo も初期化する。これをしないと再マウント時、refreshStorage で
-  // 更新される前の最初の描画に前回マウントの古いストレージ文字列が一瞬出る。
-  storageInfo = "";
 
   // 初期描画。IDB エラー等で読込に失敗しても未処理例外にせず、空一覧+通知に留める
   // (他経路 onFiles/delete/rescanMeta と同じエラーハンドリング方針に揃える)。
@@ -155,6 +180,7 @@ export async function mount(root) {
       if (location.hash !== newHash) {
         history.replaceState(null, "", newHash);
       }
+      persistLibraryState();
       saveLastView({
         hash: newHash,
         name: "library",
@@ -180,12 +206,14 @@ export async function mount(root) {
   if (refs.albumSearch) {
     refs.albumSearch.addEventListener("input", () => {
       albumFilterText = refs.albumSearch.value.trim().toLowerCase();
+      persistLibraryState();
       renderAlbums(refs);
     });
   }
   if (refs.albumSort) {
     refs.albumSort.addEventListener("change", () => {
       albumSortKey = refs.albumSort.value;
+      persistLibraryState();
       renderAlbums(refs);
     });
   }
@@ -202,12 +230,14 @@ export async function mount(root) {
   if (refs.artistSearch) {
     refs.artistSearch.addEventListener("input", () => {
       artistFilterText = refs.artistSearch.value.trim().toLowerCase();
+      persistLibraryState();
       renderArtists(refs);
     });
   }
   if (refs.artistSort) {
     refs.artistSort.addEventListener("change", () => {
       artistSortKey = refs.artistSort.value;
+      persistLibraryState();
       renderArtists(refs);
     });
   }
@@ -355,14 +385,17 @@ export async function mount(root) {
   // 検索
   refs.search.addEventListener("input", () => {
     filterText = refs.search.value.trim().toLowerCase();
+    persistLibraryState();
     renderList(refs);
   });
   refs.sort.addEventListener("change", () => {
     sortKey = refs.sort.value;
+    persistLibraryState();
     renderList(refs);
   });
   refs.showDisabledChk.addEventListener("change", () => {
     showDisabled = refs.showDisabledChk.checked;
+    persistLibraryState();
     renderList(refs);
   });
 
@@ -429,6 +462,7 @@ export async function mount(root) {
       const f = chip.dataset.filter || "all";
       if (f === quickFilter) return;
       quickFilter = f;
+      persistLibraryState();
       refs.quickFilterBar.querySelectorAll(".quick-filter-chip").forEach((c) => {
         c.classList.toggle("is-active", c.dataset.filter === quickFilter);
       });
@@ -682,7 +716,7 @@ function render() {
       <!-- タブ 1: アーティスト (メイン画面) -->
       <div class="library-tab-panel" id="panel-artists" ${activeTab !== "artists" ? "hidden" : ""}>
         <div class="library-toolbar">
-          <input type="search" id="artist-search" placeholder="アーティスト名を検索" autocomplete="off" />
+          <input type="search" id="artist-search" placeholder="アーティスト名を検索" autocomplete="off" value="${escapeAttr(artistFilterText)}" />
           <select id="artist-sort">
             <option value="name-asc">名前 (昇順)</option>
             <option value="name-desc">名前 (降順)</option>
@@ -699,7 +733,7 @@ function render() {
       <!-- タブ 2: アルバム -->
       <div class="library-tab-panel" id="panel-albums" ${activeTab !== "albums" ? "hidden" : ""}>
         <div class="library-toolbar">
-          <input type="search" id="album-search" placeholder="アルバム・アーティスト・年を検索" autocomplete="off" />
+          <input type="search" id="album-search" placeholder="アルバム・アーティスト・年を検索" autocomplete="off" value="${escapeAttr(albumFilterText)}" />
           <select id="album-sort">
             <option value="title-asc">アルバム名 (昇順)</option>
             <option value="title-desc">アルバム名 (降順)</option>
@@ -716,7 +750,7 @@ function render() {
       <!-- タブ 3: 曲 -->
       <div class="library-tab-panel" id="panel-tracks" ${activeTab !== "tracks" ? "hidden" : ""}>
         <div class="library-toolbar">
-          <input type="search" id="lib-search" placeholder="検索: 曲タイトルなどを入力" />
+          <input type="search" id="lib-search" placeholder="検索: 曲タイトルなどを入力" value="${escapeAttr(filterText)}" />
           <select id="lib-sort">
             <option value="manual-asc">手動並び替え</option>
             <option value="year-desc">リリース年 (新しい順)</option>

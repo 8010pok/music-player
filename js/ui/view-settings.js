@@ -48,7 +48,12 @@ import {
   bandLabel,
   presetToGains,
 } from "../player/eq.js";
-import { getAudioElement, stopPlayback } from "../player/audio-engine.js";
+import {
+  getAudioElement,
+  getMainAudioElement,
+  getStreamAudioElement,
+  stopPlayback,
+} from "../player/audio-engine.js";
 
 let pendingToken = null;
 let pendingApiKey = null;
@@ -140,7 +145,7 @@ export async function mount(root) {
       // ★ mount() 時の pub スナップショットは古くなっている可能性があるため、
       //   getPublic() で常に最新の設定を取得してからエフェクトに反映する。
       //   (EQ スライダを動かした後に一度無効化 → 再有効化すると変更が失われるバグを防止)
-      const audioEl = getAudioElement();
+      const audioEl = getMainAudioElement();
       applyEffectsSetting(audioEl, true);
       applyAllEffects(getPublic());
       setPublic({ enableAudioEffects: true });
@@ -148,7 +153,7 @@ export async function mount(root) {
       remount();
     } else {
       // 無効化: 全パラメータを中立にバイパス
-      applyEffectsSetting(getAudioElement(), false);
+      applyEffectsSetting(getMainAudioElement(), false);
       setPublic({ enableAudioEffects: false });
       appState.set({ enableAudioEffects: false });
       toast("無効化しました（iOS バックグラウンド再生を完全に戻すにはページ再読込が必要）", "ok");
@@ -292,7 +297,10 @@ export async function mount(root) {
     refs.outputSel.addEventListener("change", async () => {
       const id = refs.outputSel.value;
       try {
-        await setAudioOutputDevice(getAudioElement(), id);
+        const m = getMainAudioElement();
+        const s = getStreamAudioElement();
+        if (m) await setAudioOutputDevice(m, id);
+        if (s) await setAudioOutputDevice(s, id).catch(() => {});
         setPublic({ audioOutputDeviceId: id });
         appState.set({ audioOutputDeviceId: id });
         toast("出力デバイスを変更しました", "ok");
