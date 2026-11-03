@@ -324,6 +324,11 @@ function scheduleSilenceCheck(session) {
           session.silenceSampleInterval = null;
 
           // ★ 4回すべて無音閾値未満かつ時間が進んでいる → Web Audio 出力スタックと確定
+          // ただしバックグラウンド中 (document.hidden) は User Gesture が無いため自動 play() 復旧を控え、
+          // フォアグラウンド復帰時または手動操作に委ねる（バックグラウンド再生強制停止防止）
+          if (typeof document !== "undefined" && document.hidden) {
+            return;
+          }
           if (!session.hasRecoveredSilence) {
             session.hasRecoveredSilence = true;
             console.warn(`[audio-engine] Web Audio 無音状態を確定検知（連続${SILENCE_SAMPLES_REQUIRED}回 RMS < ${SILENCE_RMS_THRESHOLD}）。自動復旧を実行 (1/1):`, session.trackId);
@@ -593,6 +598,7 @@ const state = {
   // 実際に再生が進んだかを 1 秒後に確認し、進んでいなければ自動で再試行する。
   // (iOS コールドスタート時の「1 回目の再開だけ失敗する」既知挙動への対策)
   resumeWatchdogTimer: null,
+  resumeWatchdogInnerTimer: null,
   // 「loadAndPlay / playPreloadedSync の最中」フラグ。
   // 遷移中に発火する pause/timeupdate 由来の setPositionState や
   // playbackState="paused" の誤通知 (iOS 無音化原因) を抑止する。
@@ -747,10 +753,16 @@ let audioEngineInitialized = false;
 
 // === 再生安定化ウォッチドッグ (iOS / モバイル ストール・バッファ待ちからの自動復旧) ===
 let stallRecoveryTimer = null;
+function clearStallRecoveryTimer() {
+  if (stallRecoveryTimer) {
+    clearTimeout(stallRecoveryTimer);
+    stallRecoveryTimer = null;
+  }
+}
 const onStallOrWaiting = (target) => {
   if (target !== getAudioElement()) return;
   if (state.userPausedExplicitly || !appState.get().isPlaying || state.transitioning) return;
-  if (stallRecoveryTimer) clearTimeout(stallRecoveryTimer);
+  clearStallRecoveryTimer();
   stallRecoveryTimer = setTimeout(() => {
     if (state.userPausedExplicitly || !appState.get().isPlaying || state.transitioning) return;
     const curEl = getAudioElement();
@@ -925,8 +937,16 @@ export function attachElementListeners(el) {
     if (state.transitioning || (curAudio?.src && curAudio.src.startsWith("data:audio/wav"))) return;
     const d = curAudio?.duration;
     if (isFinite(d) && d > 0.5) {
-      appState.set({ duration: d });
       const cur = appState.get().currentTrack;
+      // ★ Google Drive ストリーミング等で、ブラウザが一時的な部分 Range レスポンスの
+      //   短いバッファ長（例: 0.8秒 や 15秒）を duration に報告することがある。
+      //   既存の曲情報に 10秒以上の正常な duration がある場合、極端に短い d で破壊的に上書きしない。
+      const hasValidExistingDuration = cur && typeof cur.duration === "number" && cur.duration > 10;
+      if (hasValidExistingDuration && d < cur.duration * 0.75) {
+        return; // 不完全な部分バッファ長と判定して無視
+      }
+
+      appState.set({ duration: d });
       // DB 上の duration が未設定、または 1.5MB ヘッダ由来の 0:39 (39秒) 等で実測値とズレている場合は即座に修正・永続化
       if (cur && cur.id && (!cur.duration || isSuspectPartialHeaderDuration(cur) || Math.abs(cur.duration - d) > 1.5)) {
         cur.duration = d;
@@ -1996,8 +2016,17 @@ export async function togglePlay() {
     state.userPausedExplicitly = true;
     // 保留中の自動再試行がこの明示 pause を覆さないように解除
     clearResumeWatchdog();
+    clearStallRecoveryTimer();
+    if (navigator.mediaSession) {
+      try { navigator.mediaSession.playbackState = "paused"; } catch {}
+    }
+    const curTime = audioEl?.currentTime || 0;
+    const dur = audioEl?.duration || appState.get().duration || 0;
+    updateMediaPositionState({ position: curTime, duration: dur, playbackRate: 0 });
+    appState.set({ isPlaying: false, loadingTrackId: null, playbackStatus: "paused" });
     if (mainAudioEl) { try { mainAudioEl.pause(); } catch {} }
     if (streamAudioEl) { try { streamAudioEl.pause(); } catch {} }
+    saveSessionState();
   }
 }
 
@@ -2934,12 +2963,15 @@ function onTimeUpdate() {
   if (!track) return;
 
   const realAudioDur = (isFinite(audioEl.duration) && audioEl.duration > 0.5) ? audioEl.duration : 0;
-  if (realAudioDur > 0 && (!track.duration || isSuspectPartialHeaderDuration(track) || Math.abs(track.duration - realAudioDur) > 1.5)) {
+  const hasValidExistingDuration = track && typeof track.duration === "number" && track.duration > 10;
+  const isSuspiciousShortDur = hasValidExistingDuration && realAudioDur > 0 && realAudioDur < track.duration * 0.75;
+
+  if (realAudioDur > 0 && !isSuspiciousShortDur && (!track.duration || isSuspectPartialHeaderDuration(track) || Math.abs(track.duration - realAudioDur) > 1.5)) {
     track.duration = realAudioDur;
     appState.set({ duration: realAudioDur });
     updateTrack(track.id, { duration: realAudioDur }).catch(() => {});
   }
-  const dur = realAudioDur > 0
+  const dur = (realAudioDur > 0 && !isSuspiciousShortDur)
     ? realAudioDur
     : (isSuspectPartialHeaderDuration(track)
       ? Math.round(track.duration * (track.fileSize / 1572864))
@@ -2962,7 +2994,8 @@ function onTimeUpdate() {
     !state.isWaitingOrStalled &&
     isFinite(dur) &&
     dur > 0 &&
-    !audioEl.paused
+    !audioEl.paused &&
+    (audioEl.readyState >= 3 || audioEl.ended)
   ) {
     const endThreshold = Math.min(0.40, Math.max(0.08, dur * 0.015));
     if (cur >= dur - endThreshold) {
@@ -3145,6 +3178,10 @@ function clearResumeWatchdog() {
     clearTimeout(state.resumeWatchdogTimer);
     state.resumeWatchdogTimer = null;
   }
+  if (state.resumeWatchdogInnerTimer) {
+    clearTimeout(state.resumeWatchdogInnerTimer);
+    state.resumeWatchdogInnerTimer = null;
+  }
 }
 
 /**
@@ -3202,11 +3239,13 @@ function armResumeWatchdog(retryCount = 0) {
       try { audioEl.pause(); } catch {}
     }
     // pause 直後の play を iOS が無視することがあるため、わずかに間を置く
-    setTimeout(() => {
+    state.resumeWatchdogInnerTimer = setTimeout(() => {
+      state.resumeWatchdogInnerTimer = null;
       if (state.userPausedExplicitly || state.transitioning) return;
       state.userPausedExplicitly = false;
       try {
-        const p = audioEl.play();
+        const curEl = getAudioElement();
+        const p = curEl.play();
         if (p && typeof p.catch === "function") {
           p.catch((e) => console.warn("[audio-engine] 再開リトライの play 失敗", e));
         }
@@ -3296,11 +3335,16 @@ export function ensureMediaSessionActions() {
         return;
       }
       state.userPausedExplicitly = false;
+      clearResumeWatchdog();
+      if (navigator.mediaSession) {
+        try { navigator.mediaSession.playbackState = "playing"; } catch {}
+      }
       setupAudioSession();
       await resumeSessionActivator();
       armResumeWatchdog();
       try {
-        await audioEl.play();
+        const curEl = getAudioElement();
+        await curEl.play();
       } catch (e) {
         console.warn("[audio-engine] remote play 失敗(ウォッチドッグが再試行します)", e);
       }
@@ -3309,16 +3353,78 @@ export function ensureMediaSessionActions() {
     navigator.mediaSession.setActionHandler("pause", () => {
       state.userPausedExplicitly = true;
       clearResumeWatchdog();
+      clearStallRecoveryTimer();
+      // ★ iOS ロック画面でプレイヤーを持続させるため、同期的に playbackState="paused" を通知
+      if (navigator.mediaSession) {
+        try { navigator.mediaSession.playbackState = "paused"; } catch {}
+      }
+      const curEl = getAudioElement();
+      const curTime = curEl?.currentTime || 0;
+      const dur = curEl?.duration || appState.get().duration || 0;
+      updateMediaPositionState({ position: curTime, duration: dur, playbackRate: 0 });
+      appState.set({ isPlaying: false, loadingTrackId: null, playbackStatus: "paused" });
       if (mainAudioEl) { try { mainAudioEl.pause(); } catch {} }
       if (streamAudioEl) { try { streamAudioEl.pause(); } catch {} }
+      saveSessionState();
     });
 
     try {
       navigator.mediaSession.setActionHandler("stop", () => {
         state.userPausedExplicitly = true;
         clearResumeWatchdog();
+        clearStallRecoveryTimer();
+        if (navigator.mediaSession) {
+          try { navigator.mediaSession.playbackState = "paused"; } catch {}
+        }
+        const curEl = getAudioElement();
+        const curTime = curEl?.currentTime || 0;
+        const dur = curEl?.duration || appState.get().duration || 0;
+        updateMediaPositionState({ position: curTime, duration: dur, playbackRate: 0 });
+        appState.set({ isPlaying: false, loadingTrackId: null, playbackStatus: "paused" });
         if (mainAudioEl) { try { mainAudioEl.pause(); } catch {} }
         if (streamAudioEl) { try { streamAudioEl.pause(); } catch {} }
+        saveSessionState();
+      });
+    } catch {}
+
+    // 5. togglepause (イヤホンのリモコンや一部の iOS リモート操作用)
+    try {
+      navigator.mediaSession.setActionHandler("togglepause", async () => {
+        const curEl = getAudioElement();
+        const isPaused = !curEl || curEl.paused;
+        if (isPaused) {
+          if (!appState.get().currentTrack) {
+            await autoStartFirstTrack();
+            return;
+          }
+          state.userPausedExplicitly = false;
+          clearResumeWatchdog();
+          if (navigator.mediaSession) {
+            try { navigator.mediaSession.playbackState = "playing"; } catch {}
+          }
+          setupAudioSession();
+          await resumeSessionActivator();
+          armResumeWatchdog();
+          try {
+            await curEl.play();
+          } catch (e) {
+            console.warn("[audio-engine] remote toggle play 失敗", e);
+          }
+        } else {
+          state.userPausedExplicitly = true;
+          clearResumeWatchdog();
+          clearStallRecoveryTimer();
+          if (navigator.mediaSession) {
+            try { navigator.mediaSession.playbackState = "paused"; } catch {}
+          }
+          const curTime = curEl?.currentTime || 0;
+          const dur = curEl?.duration || appState.get().duration || 0;
+          updateMediaPositionState({ position: curTime, duration: dur, playbackRate: 0 });
+          appState.set({ isPlaying: false, loadingTrackId: null, playbackStatus: "paused" });
+          if (mainAudioEl) { try { mainAudioEl.pause(); } catch {} }
+          if (streamAudioEl) { try { streamAudioEl.pause(); } catch {} }
+          saveSessionState();
+        }
       });
     } catch {}
   } catch (e) {

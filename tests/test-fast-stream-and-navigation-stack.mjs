@@ -1758,4 +1758,78 @@ test("PlaybackSession と audio-engine: 無音復旧は1セッション1回ま�
   strictEqual(sessionB.hasRecoveredSilence, false, "新セッションでは復旧フラグがリフレッシュされる");
 });
 
+console.log("\n=== 14. iOS MediaSession 安定化・ロック画面持続・一時停止同期・部分Range Duration保護 ===");
+
+test("iOS MediaSession: pause / stop / togglepause で同期的に playbackState='paused' と positionState が設定されること", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+
+  // 1. pause ハンドラが同期的に playbackState="paused" と updateMediaPositionState を呼んでいること
+  strictEqual(
+    /navigator\.mediaSession\.setActionHandler\("pause",\s*\(\)\s*=>\s*\{[\s\S]*?playbackState\s*=\s*"paused"[\s\S]*?updateMediaPositionState[\s\S]*?mainAudioEl\.pause/.test(aeCode),
+    true,
+    "pause ハンドラで同期的に playbackState='paused' と updateMediaPositionState が実行されること"
+  );
+
+  // 2. togglepause ハンドラが登録されていること
+  strictEqual(
+    aeCode.includes('navigator.mediaSession.setActionHandler("togglepause"'),
+    true,
+    "togglepause ハンドラが登録されていること"
+  );
+
+  // 3. resumeWatchdogInnerTimer がクリアされること
+  strictEqual(
+    aeCode.includes("state.resumeWatchdogInnerTimer"),
+    true,
+    "内側タイマー ID が管理されていること"
+  );
+
+  // 4. clearStallRecoveryTimer が pause 時に呼ばれること
+  strictEqual(
+    aeCode.includes("clearStallRecoveryTimer();"),
+    true,
+    "ストール復旧タイマーがクリアされること"
+  );
+});
+
+test("togglePlay: 一時停止時に同期的に playbackState='paused' と positionState が設定されること", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+
+  // togglePlay 内の pause 側で同期的に playbackState="paused" と updateMediaPositionState が呼ばれること
+  strictEqual(
+    /export async function togglePlay[\s\S]*?playbackState\s*=\s*"paused"[\s\S]*?updateMediaPositionState[\s\S]*?mainAudioEl\.pause/.test(aeCode),
+    true,
+    "togglePlay で同期的に playbackState='paused' と updateMediaPositionState が実行されること"
+  );
+});
+
+test("部分Range Duration保護: 既存の曲情報 (duration > 10) が一時的な短い Range レスポンスで上書きされないシミュレーション", () => {
+  const evaluateDurationGuard = (existingDuration, incomingD) => {
+    const hasValidExistingDuration = typeof existingDuration === "number" && existingDuration > 10;
+    if (hasValidExistingDuration && incomingD < existingDuration * 0.75) {
+      return false; // 上書き拒否
+    }
+    return true; // 上書き許可
+  };
+
+  // 通常曲（240秒）に、部分 Range レスポンスの 15秒 が来た場合 → 拒否
+  strictEqual(evaluateDurationGuard(240, 15), false, "4分曲に15秒のRangeヘッダが来ても上書きしない");
+  strictEqual(evaluateDurationGuard(240, 0.8), false, "4分曲に0.8秒の極小Rangeヘッダが来ても上書きしない");
+
+  // 正常なメタデータ更新（240秒 → 240.5秒）→ 許可
+  strictEqual(evaluateDurationGuard(240, 240.5), true, "同等尺の実測値は上書き許可");
+
+  // 未設定の曲（0秒）に初回実測値（180秒）が来た場合 → 許可
+  strictEqual(evaluateDurationGuard(0, 180), true, "未設定曲への初回実測値反映は許可");
+});
+
+test("無音検知: document.hidden (バックグラウンド再生中) の自動 play() 復旧除外ガードが存在すること", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  strictEqual(
+    aeCode.includes("typeof document !== \"undefined\" && document.hidden"),
+    true,
+    "バックグラウンド中の自動 play() 復旧ガードが存在すること"
+  );
+});
+
 console.log(`\n高速再生 & ナビゲーションスタックテスト: ${passed} 件 PASSED ✓`);
