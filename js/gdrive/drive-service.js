@@ -12,7 +12,6 @@ import { putTrack, getTrack, getAllTracks } from "../store/library-db.js";
 import { extractMetadata, readDurationViaAudio } from "../metadata/index.js";
 import { formatFromName, mimeFromName } from "../metadata/util.js";
 import { openModal, toast, escapeHtml, escapeAttr } from "../ui/components.js";
-import { findDuplicateInList } from "../store/dedup-service.js";
 import { processAudioNormalization } from "../audio/normalize-service.js";
 import { isPlaceholderArtist, parseArtistAndTitle } from "../lastfm/scrobble-cleaner.js";
 
@@ -680,7 +679,7 @@ export async function listDriveItems({ folderId = "root", query = "", pageToken 
  * @returns {Promise<Array<object>>}
  */
 export async function fetchFolderAudioFilesRecursive(rootFolderId, { onProgress } = {}) {
-  const token = await getDriveToken();
+  let token = await getDriveToken();
   if (!token) throw new Error("Google Drive に接続されていません");
 
   const audioFiles = [];
@@ -698,12 +697,41 @@ export async function fetchFolderAudioFilesRecursive(rootFolderId, { onProgress 
 
     let pageToken = null;
     do {
-      const q = `trashed = false and '${curFolderId}' in parents and (mimeType = 'application/vnd.google-apps.folder' or mimeType contains 'audio/' or name contains '.mp3' or name contains '.m4a' or name contains '.flac' or name contains '.ogg' or name contains '.wav' or name contains '.aac' or name contains '.opus' or name contains '.webm')`;
-      let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=100&fields=nextPageToken,files(id,name,mimeType,size)&orderBy=folder,name`;
+      const q = `trashed = false and '${curFolderId}' in parents and (mimeType = 'application/vnd.google-apps.folder' or mimeType contains 'audio/' or name contains '.mp3' or name contains '.m4a' or name contains '.flac' or name contains '.ogg' or name contains '.wav' or name contains '.aac' or name contains '.opus' or name contains '.webm' or name contains '.alac' or name contains '.aiff' or name contains '.wma')`;
+      let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=100&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime)&orderBy=folder,name`;
       if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
 
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-      if (!res.ok) break;
+      let res = null;
+      let attempt = 0;
+      const maxRetries = 3;
+      while (attempt < maxRetries) {
+        attempt++;
+        try {
+          res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+          if (res.status === 401) {
+            const refreshed = await getDriveToken({ forceRefresh: true }).catch(() => null);
+            if (refreshed) {
+              token = refreshed;
+              res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+            }
+          }
+          if (res.ok) break;
+          if (res.status === 403 || res.status === 429 || res.status >= 500) {
+            await new Promise((r) => setTimeout(r, attempt * 800));
+            continue;
+          }
+          break;
+        } catch (fetchErr) {
+          if (attempt >= maxRetries) throw fetchErr;
+          await new Promise((r) => setTimeout(r, attempt * 800));
+        }
+      }
+
+      if (!res || !res.ok) {
+        const errMsg = res ? await parseGoogleApiError(res, "フォルダ探索エラー") : "ネットワークエラー";
+        throw new Error(`フォルダ「${curFolderName || "マイドライブ"}」の探索に失敗しました: ${errMsg}`);
+      }
+
       const data = await res.json();
       const items = data.files || [];
       for (const item of items) {
@@ -1379,6 +1407,187 @@ export function inferMetadataFromFileName(filename, folderName = "") {
 }
 
 /**
+ * Drive ファイルからライブラリ保存用トラックオブジェクトを安全に生成
+ * - 同一 Drive file ID の既存トラックが存在する場合は、ユーザーデータ（再生回数、お気に入り、評価、追加日時、手動編集メタデータ、キー変更、歌詞、メモ、カスタム画像）を完全に保持
+ * - 別の Drive file ID の曲は、タイトルやアーティストが似ていても絶対に既存IDを奪わない
+ * @param {object} params
+ * @returns {object}
+ */
+export function buildDriveTrackRecord({
+  file,
+  existing = null,
+  extractedMeta = null,
+  inferred = null,
+  folder = "",
+  normResult = null,
+  blob = null,
+  isCached = false,
+}) {
+  const trackId = trackIdFromDriveFileId(file.id);
+  const isNumeric = (s) => typeof s === "string" && /^\d+$/.test(s.trim());
+
+  // 1. タイトルの決定
+  const validMetaTitle = extractedMeta && extractedMeta.title && extractedMeta.title !== "(無題)" && extractedMeta.title !== stripExt(file.name) ? extractedMeta.title : null;
+  const validExistingTitle = existing && typeof existing.title === "string" && existing.title !== "(無題)" && existing.title !== "true" ? existing.title : null;
+  const title =
+    (existing && existing.userEdited && validExistingTitle ? validExistingTitle : null) ||
+    validMetaTitle ||
+    validExistingTitle ||
+    (inferred && inferred.title) ||
+    (extractedMeta && extractedMeta.title) ||
+    stripExt(file.name) ||
+    "(無題)";
+
+  // 2. アーティストの決定
+  const validExistingArtist = existing && typeof existing.artist === "string" && !isPlaceholderArtist(existing.artist) && !isNumeric(existing.artist) ? existing.artist : null;
+  const validMetaArtist = extractedMeta && typeof extractedMeta.artist === "string" && !isPlaceholderArtist(extractedMeta.artist) && !isNumeric(extractedMeta.artist) ? extractedMeta.artist : null;
+  const validInferredArtist = inferred && inferred.artist && !isPlaceholderArtist(inferred.artist) && !isNumeric(inferred.artist) ? inferred.artist : null;
+  const fallbackParsed = parseArtistAndTitle(file.name);
+  const validParsedArtist = fallbackParsed && fallbackParsed.artist && !isPlaceholderArtist(fallbackParsed.artist) && !isNumeric(fallbackParsed.artist) ? fallbackParsed.artist : null;
+
+  const artist =
+    (existing && existing.userEdited && validExistingArtist ? validExistingArtist : null) ||
+    validMetaArtist ||
+    validExistingArtist ||
+    validInferredArtist ||
+    validParsedArtist ||
+    "(不明アーティスト)";
+
+  // 3. アルバムの決定
+  const validExistingAlbum = existing && typeof existing.album === "string" && !isInvalidDriveAlbum(existing.album) ? existing.album : null;
+  const validMetaAlbum = extractedMeta && typeof extractedMeta.album === "string" && !isInvalidDriveAlbum(extractedMeta.album) ? extractedMeta.album : null;
+  const validInferredAlbum = inferred && inferred.album && !isInvalidDriveAlbum(inferred.album) ? inferred.album : null;
+  const validFolderAlbum = folder && !isInvalidDriveAlbum(folder) ? folder : null;
+
+  const album =
+    (existing && existing.userEdited && validExistingAlbum ? validExistingAlbum : null) ||
+    validMetaAlbum ||
+    validExistingAlbum ||
+    validInferredAlbum ||
+    validFolderAlbum ||
+    "Google Drive";
+
+  // 4. その他メタデータ（ユーザー編集時は既存優先）
+  const albumArtist = (existing && existing.userEdited && existing.albumArtist != null ? existing.albumArtist : null) ||
+    (extractedMeta && extractedMeta.albumArtist) ||
+    (existing && existing.albumArtist) ||
+    "";
+  const year = (existing && existing.userEdited && existing.year != null ? existing.year : null) ||
+    (extractedMeta && extractedMeta.year) ||
+    (existing && existing.year) ||
+    "";
+  const genre = (existing && existing.userEdited && existing.genre != null ? existing.genre : null) ||
+    (extractedMeta && extractedMeta.genre) ||
+    (existing && existing.genre) ||
+    "";
+  const trackNo = (existing && existing.userEdited && existing.trackNo != null ? existing.trackNo : null) ||
+    (extractedMeta && extractedMeta.trackNo) ||
+    (existing && existing.trackNo) ||
+    (inferred && inferred.trackNo) ||
+    "";
+  const discNo = (existing && existing.userEdited && existing.discNo != null ? existing.discNo : null) ||
+    (extractedMeta && extractedMeta.discNo) ||
+    (existing && existing.discNo) ||
+    "";
+  const duration = (normResult && normResult.duration) ||
+    (extractedMeta && extractedMeta.duration) ||
+    (existing && existing.duration) ||
+    0;
+
+  // 5. フォーマット・MIME
+  const format = normResult ? "mp3" : ((extractedMeta && extractedMeta.format) || formatFromName(file.name) || "unknown");
+  const mime = normResult ? "audio/mp3" : ((extractedMeta && extractedMeta.mime) || file.mimeType || mimeFromName(file.name));
+
+  // 6. アートワーク（手動変更済み、または明示削除済みの場合はそれを厳格に保護）
+  const hasUserArtwork = Boolean(
+    existing &&
+    (existing.artworkUpdatedAt ||
+      existing._noEmbeddedArt ||
+      (existing.userEdited && (existing.artworkDataUrl || existing.artworkBlob)))
+  );
+  const artworkBlob = hasUserArtwork
+    ? (existing.artworkBlob || null)
+    : ((extractedMeta && extractedMeta.artworkBlob) || (existing && existing.artworkBlob) || null);
+  const artworkDataUrl = hasUserArtwork
+    ? (existing.artworkDataUrl || "")
+    : ((extractedMeta && extractedMeta.artworkDataUrl) || (existing && existing.artworkDataUrl) || "");
+  const _noEmbeddedArt = hasUserArtwork
+    ? Boolean(existing._noEmbeddedArt)
+    : false;
+  const artworkUpdatedAt = hasUserArtwork
+    ? existing.artworkUpdatedAt
+    : undefined;
+
+  // 7. トラックレコードの組み立て
+  const track = {
+    id: trackId,
+    title,
+    artist,
+    album,
+    albumArtist,
+    year,
+    genre,
+    trackNo,
+    discNo,
+    duration,
+    mime,
+    format,
+    addedAt: existing ? (existing.addedAt || Date.now()) : Date.now(),
+    playCount: existing ? (existing.playCount || 0) : 0,
+    lastPlayedAt: existing ? (existing.lastPlayedAt || 0) : 0,
+    enabled: existing ? (existing.enabled !== false) : true,
+    loved: existing ? Boolean(existing.loved) : false,
+    fileSize: (blob && blob.size) || parseInt(file.size, 10) || (existing && existing.fileSize) || 0,
+    originalName: file.name,
+    artworkBlob,
+    artworkDataUrl,
+    _noEmbeddedArt,
+    source: "gdrive",
+    driveFileId: file.id,
+    cached: Boolean(isCached || (existing && existing.cached)),
+  };
+
+  if (artworkUpdatedAt) track.artworkUpdatedAt = artworkUpdatedAt;
+  if (existing && existing.rating != null) track.rating = existing.rating;
+  if (existing && existing.memo != null) track.memo = existing.memo;
+  if (existing && existing.keyShift != null) track.keyShift = existing.keyShift;
+  if (existing && typeof existing.order === "number") track.order = existing.order;
+  if (existing && existing.lyrics) {
+    track.lyrics = existing.lyrics;
+  } else if (extractedMeta && extractedMeta.lyrics) {
+    track.lyrics = extractedMeta.lyrics;
+  }
+  if (existing && existing.userEdited) {
+    track.userEdited = true;
+  }
+  if (file.modifiedTime) {
+    track.driveModifiedTime = file.modifiedTime;
+  } else if (existing && existing.driveModifiedTime) {
+    track.driveModifiedTime = existing.driveModifiedTime;
+  }
+
+  if (normResult) {
+    track.normalized = true;
+    track.normalizedGainDb = normResult.gainDb;
+    track.normalizedAt = Date.now();
+    track.originalRmsDb = normResult.sourceLoudness?.rmsDb;
+    track.originalPeakDb = normResult.sourceLoudness?.peakDb;
+    track.normalizedRmsDb = normResult.finalRmsDb;
+    track.normalizedPeakDb = normResult.finalPeakDb;
+  } else if (existing && existing.normalized) {
+    track.normalized = existing.normalized;
+    track.normalizedGainDb = existing.normalizedGainDb;
+    track.normalizedAt = existing.normalizedAt;
+    track.originalRmsDb = existing.originalRmsDb;
+    track.originalPeakDb = existing.originalPeakDb;
+    track.normalizedRmsDb = existing.normalizedRmsDb;
+    track.normalizedPeakDb = existing.normalizedPeakDb;
+  }
+
+  return track;
+}
+
+/**
  * 選択した Drive ファイル群を IndexedDB ライブラリにインポート
  * @param {Array<object>} driveFiles
  * @param {{ cacheBlobs?: boolean, normalizeAudio?: boolean, defaultAlbumName?: string, onProgress?: (current: number, total: number, file: object) => void }} [opts]
@@ -1388,6 +1597,12 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
   let added = 0;
   let failed = 0;
   const allExistingTracks = await getAllTracks().catch(() => []);
+  const existingByIdMap = new Map();
+  const existingByDriveIdMap = new Map();
+  for (const t of allExistingTracks) {
+    if (t && t.id) existingByIdMap.set(t.id, t);
+    if (t && t.driveFileId) existingByDriveIdMap.set(t.driveFileId, t);
+  }
 
   for (let i = 0; i < driveFiles.length; i++) {
     const file = driveFiles[i];
@@ -1396,34 +1611,17 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
     }
 
     try {
-      let trackId = trackIdFromDriveFileId(file.id);
-      let existing = await getTrack(trackId);
+      const trackId = trackIdFromDriveFileId(file.id);
+      // 同一 Drive file ID の既存レコードのみを引き継ぐ（別ファイルIDの曲は絶対に引き継がない！）
+      let existing = existingByIdMap.get(trackId) || existingByDriveIdMap.get(file.id) || (await getTrack(trackId).catch(() => null));
       const folder = file.folderName || defaultAlbumName || "";
       const inferred = inferMetadataFromFileName(file.name, folder);
-
-      // ★ 重複防止チェック: すでに同じ曲がライブラリに存在する場合は既存曲を引き継ぐ
-      if (!existing && Array.isArray(allExistingTracks)) {
-        const candidate = {
-          title: inferred.title || stripExt(file.name),
-          artist: inferred.artist,
-          album: folder,
-          driveFileId: file.id,
-          originalName: file.name,
-          fileSize: parseInt(file.size, 10) || 0,
-        };
-        const dup = findDuplicateInList(candidate, allExistingTracks);
-        if (dup) {
-          existing = dup;
-          trackId = dup.id;
-        }
-      }
 
       const shouldFetchBlob = cacheBlobs || normalizeAudio;
 
       if (shouldFetchBlob) {
         // Blob をダウンロードして完全メタデータを抽出
         let blob = await fetchDriveAudioBlob(file.id);
-
         let normResult = null;
         if (normalizeAudio) {
           if (typeof onProgress === "function") {
@@ -1452,71 +1650,27 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
         if ((!duration || duration <= 0) && typeof document !== "undefined") {
           duration = await readDurationViaAudio(blob);
         }
-
-        const isNumeric = (s) => typeof s === "string" && /^\d+$/.test(s.trim());
-        const title = meta.title || inferred.title || stripExt(file.name) || "(無題)";
-        const candidateMetaArtist = meta.artist && !isPlaceholderArtist(meta.artist) && !isNumeric(meta.artist) ? meta.artist : null;
-        const candidateInferredArtist = inferred.artist && !isPlaceholderArtist(inferred.artist) && !isNumeric(inferred.artist) ? inferred.artist : null;
-        const validExistingArtist = existing && typeof existing.artist === "string" && !isPlaceholderArtist(existing.artist) && !isNumeric(existing.artist) ? existing.artist : null;
-        const artist = (existing && existing.userEdited && validExistingArtist ? validExistingArtist : null) || candidateMetaArtist || validExistingArtist || candidateInferredArtist || "(不明アーティスト)";
-
-        const validMetaAlbum = meta.album && !isInvalidDriveAlbum(meta.album) ? meta.album : null;
-        const validExistingAlbum = existing && typeof existing.album === "string" && !isInvalidDriveAlbum(existing.album) ? existing.album : null;
-        const validInferredAlbum = inferred.album && !isInvalidDriveAlbum(inferred.album) ? inferred.album : null;
-        const album = (existing && existing.userEdited && validExistingAlbum ? validExistingAlbum : null) || validMetaAlbum || validExistingAlbum || validInferredAlbum || "Google Drive";
-
-        const track = {
-          id: trackId,
-          title,
-          artist,
-          album,
-          albumArtist: meta.albumArtist || (existing && typeof existing.albumArtist === "string" ? existing.albumArtist : "") || "",
-          year: meta.year || (existing && existing.year) || "",
-          genre: meta.genre || (existing && existing.genre) || "",
-          trackNo: meta.trackNo || inferred.trackNo || (existing && existing.trackNo) || "",
-          discNo: meta.discNo || (existing && existing.discNo) || "",
-          duration: duration || (existing && existing.duration) || 0,
-          mime: normResult ? "audio/mp3" : (meta.mime || file.mimeType || mimeFromName(file.name)),
-          format: normResult ? "mp3" : (meta.format || formatFromName(file.name) || "unknown"),
-          addedAt: existing ? (existing.addedAt || Date.now()) : Date.now(),
-          playCount: existing ? (existing.playCount || 0) : 0,
-          lastPlayedAt: existing ? (existing.lastPlayedAt || 0) : 0,
-          enabled: existing ? (existing.enabled !== false) : true,
-          loved: existing ? !!existing.loved : false,
-          fileSize: blob.size || parseInt(file.size, 10) || 0,
-          originalName: file.name,
-          artworkBlob: meta.artworkBlob || (existing && existing.artworkBlob) || null,
-          artworkDataUrl: meta.artworkDataUrl || (existing && existing.artworkDataUrl) || "",
-          source: "gdrive",
-          driveFileId: file.id,
-          cached: true,
-          ...(normResult ? {
-            normalized: true,
-            normalizedGainDb: normResult.gainDb,
-            normalizedAt: Date.now(),
-            originalRmsDb: normResult.sourceLoudness?.rmsDb,
-            originalPeakDb: normResult.sourceLoudness?.peakDb,
-            normalizedRmsDb: normResult.finalRmsDb,
-            normalizedPeakDb: normResult.finalPeakDb,
-          } : {}),
-        };
-        if (existing && typeof existing.order === "number") track.order = existing.order;
-        if (existing && existing.userEdited) {
-          track.userEdited = true;
-          if (existing.title) track.title = existing.title;
-          if (validExistingArtist) track.artist = validExistingArtist;
-          if (validExistingAlbum) track.album = validExistingAlbum;
-          if (existing.albumArtist && typeof existing.albumArtist === "string") track.albumArtist = existing.albumArtist;
+        if (duration > 0 && (!meta.duration || meta.duration <= 0)) {
+          meta.duration = duration;
         }
 
+        const track = buildDriveTrackRecord({
+          file,
+          existing,
+          extractedMeta: meta,
+          inferred,
+          folder,
+          normResult,
+          blob,
+          isCached: true,
+        });
+
         await putTrack(track, blob);
+        existingByIdMap.set(track.id, track);
+        existingByDriveIdMap.set(file.id, track);
         added++;
       } else {
         // メタデータレコードを作成（音源 Blob は再生時にオンデマンドで取得・ストリーミング）
-        // Range リクエストで先頭 1.5MB のみ取得し、本体ダウンロード（ストレージ消費）なしでメタデータを高速解析
-        const format = formatFromName(file.name) || "unknown";
-        const mime = file.mimeType || mimeFromName(file.name);
-
         let extractedMeta = null;
         try {
           const headerBlob = await fetchDriveAudioHeader(file.id, 1572864, parseInt(file.size, 10) || 0);
@@ -1527,87 +1681,20 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           console.warn("[drive-service] 先頭ヘッダメタデータ抽出失敗、推測へフォールバック:", file.name, e);
         }
 
-        const validMetaTitle = extractedMeta && extractedMeta.title && extractedMeta.title !== "(無題)" && extractedMeta.title !== stripExt(file.name) ? extractedMeta.title : null;
-        const validExistingTitle = existing && typeof existing.title === "string" && existing.title !== "(無題)" && existing.title !== "true" ? existing.title : null;
-
-        const title =
-          (existing && existing.userEdited && validExistingTitle ? validExistingTitle : null) ||
-          validMetaTitle ||
-          validExistingTitle ||
-          inferred.title ||
-          (extractedMeta && extractedMeta.title) ||
-          stripExt(file.name) ||
-          "(無題)";
-
-        const isNumeric = (s) => typeof s === "string" && /^\d+$/.test(s.trim());
-        const validExistingArtist = existing && typeof existing.artist === "string" && !isPlaceholderArtist(existing.artist) && !isNumeric(existing.artist) ? existing.artist : null;
-        const validMetaArtist = extractedMeta && typeof extractedMeta.artist === "string" && !isPlaceholderArtist(extractedMeta.artist) && !isNumeric(extractedMeta.artist) ? extractedMeta.artist : null;
-        const validInferredArtist = inferred && inferred.artist && !isPlaceholderArtist(inferred.artist) && !isNumeric(inferred.artist) ? inferred.artist : null;
-        const fallbackParsed = parseArtistAndTitle(file.name);
-        const validParsedArtist = fallbackParsed && fallbackParsed.artist && !isPlaceholderArtist(fallbackParsed.artist) && !isNumeric(fallbackParsed.artist) ? fallbackParsed.artist : null;
-
-        const artist =
-          (existing && existing.userEdited && validExistingArtist ? validExistingArtist : null) ||
-          validMetaArtist ||
-          validExistingArtist ||
-          validInferredArtist ||
-          validParsedArtist ||
-          "(不明アーティスト)";
-
-        const validExistingAlbum = existing && typeof existing.album === "string" && !isInvalidDriveAlbum(existing.album) ? existing.album : null;
-        const validMetaAlbum = extractedMeta && typeof extractedMeta.album === "string" && !isInvalidDriveAlbum(extractedMeta.album) ? extractedMeta.album : null;
-        const validInferredAlbum = inferred.album && !isInvalidDriveAlbum(inferred.album) ? inferred.album : null;
-        const validFolderAlbum = file.folderName && !isInvalidDriveAlbum(file.folderName) ? file.folderName : null;
-        const validDefaultAlbum = defaultAlbumName && !isInvalidDriveAlbum(defaultAlbumName) ? defaultAlbumName : null;
-
-        const album =
-          (existing && existing.userEdited && validExistingAlbum ? validExistingAlbum : null) ||
-          validMetaAlbum ||
-          validExistingAlbum ||
-          validInferredAlbum ||
-          validFolderAlbum ||
-          validDefaultAlbum ||
-          "Google Drive";
-
-        const albumArtist = (extractedMeta && extractedMeta.albumArtist) || (existing && typeof existing.albumArtist === "string" ? existing.albumArtist : "") || "";
-        const year = (extractedMeta && extractedMeta.year) || (existing && existing.year) || "";
-        const genre = (extractedMeta && extractedMeta.genre) || (existing && existing.genre) || "";
-        const trackNo = (extractedMeta && extractedMeta.trackNo) || (existing && existing.trackNo) || inferred.trackNo || "";
-        const discNo = (extractedMeta && extractedMeta.discNo) || (existing && existing.discNo) || "";
-        const duration = (extractedMeta && extractedMeta.duration) || (existing && existing.duration) || 0;
-        const artworkBlob = (extractedMeta && extractedMeta.artworkBlob) || (existing && existing.artworkBlob) || null;
-        const artworkDataUrl = (extractedMeta && extractedMeta.artworkDataUrl) || (existing && existing.artworkDataUrl) || "";
-
-        const track = {
-          id: trackId,
-          title,
-          artist,
-          album,
-          albumArtist,
-          year,
-          genre,
-          trackNo,
-          discNo,
-          duration,
-          mime,
-          format: (extractedMeta && extractedMeta.format) || format,
-          addedAt: existing ? (existing.addedAt || Date.now()) : Date.now(),
-          playCount: existing ? (existing.playCount || 0) : 0,
-          lastPlayedAt: existing ? (existing.lastPlayedAt || 0) : 0,
-          enabled: existing ? (existing.enabled !== false) : true,
-          loved: existing ? !!existing.loved : false,
-          fileSize: parseInt(file.size, 10) || 0,
-          originalName: file.name,
-          artworkBlob,
-          artworkDataUrl,
-          source: "gdrive",
-          driveFileId: file.id,
-          cached: false,
-        };
-        if (existing && typeof existing.order === "number") track.order = existing.order;
-        if (existing && existing.userEdited) track.userEdited = true;
+        const track = buildDriveTrackRecord({
+          file,
+          existing,
+          extractedMeta,
+          inferred,
+          folder,
+          normResult: null,
+          blob: null,
+          isCached: false,
+        });
 
         await putTrack(track, null);
+        existingByIdMap.set(track.id, track);
+        existingByDriveIdMap.set(file.id, track);
         added++;
       }
     } catch (e) {
@@ -1857,7 +1944,11 @@ export async function openDriveImportModal({ onImported } = {}) {
               },
             });
 
-            toast(`✅ ${added} 件の音源を追加しました（続けてインポートできます）`, "ok");
+            if (failed > 0) {
+              toast(`⚠️ ${added} 件を追加しましたが、${failed} 件の追加に失敗しました`, "warn");
+            } else {
+              toast(`✅ ${added} 件の音源を追加しました（続けてインポートできます）`, "ok");
+            }
             for (const f of selectedFiles) {
               existingTrackIds.add(trackIdFromDriveFileId(f.id));
             }
@@ -1865,7 +1956,9 @@ export async function openDriveImportModal({ onImported } = {}) {
             renderItems(displayedItems, false);
             updateCount();
             if (typeof onImported === "function") onImported();
-            progressEl.textContent = `✅ ${added} 件を追加しました！続けて別のフォルダや曲もインポートできます`;
+            progressEl.textContent = failed > 0
+              ? `⚠️ ${added} 件を追加、${failed} 件失敗しました。続けて別のフォルダや曲もインポートできます`
+              : `✅ ${added} 件を追加しました！続けて別のフォルダや曲もインポートできます`;
           } catch (err) {
             toast(`インポート中にエラーが発生しました: ${err.message}`, "err");
             progressEl.style.display = "none";
@@ -2015,7 +2108,11 @@ export async function openDriveImportModal({ onImported } = {}) {
         },
       });
 
-      toast(`「${folderName}」から ${added} 曲を追加しました`, "ok");
+      if (failed > 0) {
+        toast(`⚠️ 「${folderName}」から ${added} 曲を追加しましたが、${failed} 件の追加に失敗しました`, "warn");
+      } else {
+        toast(`「${folderName}」から ${added} 曲を追加しました`, "ok");
+      }
       for (const f of audioFiles) {
         existingTrackIds.add(trackIdFromDriveFileId(f.id));
       }
