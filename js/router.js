@@ -27,6 +27,7 @@ let navStack = loadNavStack();
 let _pendingNavAction = null;
 let _backInsuranceTimer = null;
 let _activeRoot = null;
+let _fallbackRoute = "player";
 
 function loadNavStack() {
   try {
@@ -87,6 +88,19 @@ export function updateCurrentState(stateUpdates) {
   const cur = getCurrentStackEntry();
   if (cur) {
     cur.state = { ...(cur.state || {}), ...stateUpdates };
+    // ライブラリ画面のタブ切替時（history.replaceState 等）はスタック最上位の hash / query / params も同期する
+    if (cur.name === "library" && typeof stateUpdates.activeTab === "string" && stateUpdates.activeTab) {
+      cur.params = { ...(cur.params || {}), tab: stateUpdates.activeTab };
+      const qs = new URLSearchParams(cur.params).toString();
+      cur.query = qs;
+      cur.hash = qs ? `#/${cur.name}?${qs}` : `#/${cur.name}`;
+      if (currentRoute === "library") {
+        currentQuery = qs;
+      }
+    }
+    if (_activeRoot && typeof _activeRoot.scrollTop === "number") {
+      cur.scrollTop = _activeRoot.scrollTop;
+    }
     persistNavStack();
     saveLastView({
       hash: cur.hash,
@@ -157,6 +171,25 @@ function parseHashParams(queryString) {
  */
 export function start(root, fallback = "player") {
   _activeRoot = root;
+  _fallbackRoute = fallback;
+
+  // ボトムナビゲーションのクリックを明示的な push 遷移としてマーク（ブラウザ戻る判定との混同を防止）
+  if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
+    document.querySelectorAll(".bottom-nav .nav-item").forEach((el) => {
+      el.addEventListener("click", () => {
+        const route = el.dataset?.route;
+        if (route) {
+          _pendingNavAction = {
+            type: "push",
+            name: route,
+            params: {},
+            state: { view: route },
+            hash: `#/${route}`,
+          };
+        }
+      });
+    });
+  }
 
   // スクロール位置の自動追従保存（スクロール中のストレージ同期書き込みを排除し、600ms デバウンスまたは画面離脱時のみ保存）
   let scrollSaveTimer = null;
@@ -177,7 +210,7 @@ export function start(root, fallback = "player") {
             persistNavStack();
           }
           saveLastView({
-            hash: location.hash || `"#/${currentRoute}"`,
+            hash: location.hash || `#/${currentRoute}`,
             name: currentRoute,
             query: currentQuery || "",
             scrollTop: root.scrollTop || 0,
@@ -193,11 +226,18 @@ export function start(root, fallback = "player") {
     // 形式: #/name または #/name?query
     const m = hash.match(/^#\/([^?]+)(?:\?(.*))?$/);
     const name = (m && m[1]) || fallback;
-    const query = (m && m[2]) || "";
-    const params = parseHashParams(query);
+    let query = (m && m[2]) || "";
+    let params = parseHashParams(query);
 
     // ナビゲーションスタックの同期
     syncNavStackOnTransition(name, query, params, hash || `#/${name}`);
+
+    // ブラウザ戻る等でスタック上のエントリに query/params が保存されている場合はそれを優先反映
+    const top = getCurrentStackEntry();
+    if (top && top.name === name && top.query && !query) {
+      query = top.query;
+      params = top.params || parseHashParams(query);
+    }
 
     await navigate(name, query, root, fallback);
   };
@@ -222,8 +262,18 @@ function syncNavStackOnTransition(name, query, params, hash) {
   }
 
   if (_pendingNavAction?.type === "replace") {
-    const st = _pendingNavAction.state || (navStack.length > 0 ? navStack[navStack.length - 1].state : {});
-    const entry = { name, query, params, hash, scrollTop: 0, state: st, timestamp: Date.now() };
+    const prevState = navStack.length > 0 ? (navStack[navStack.length - 1].state || {}) : {};
+    const st = { view: name, ...(params || {}), ...prevState, ...(_pendingNavAction.state || {}) };
+    const entry = {
+      name,
+      query,
+      params,
+      hash,
+      scrollTop: 0,
+      state: st,
+      openedOrder: navStack.length || 1,
+      timestamp: Date.now(),
+    };
     if (navStack.length > 0) {
       navStack[navStack.length - 1] = entry;
     } else {
@@ -235,13 +285,14 @@ function syncNavStackOnTransition(name, query, params, hash) {
       navStack.pop();
     }
     _pendingNavAction = null;
-  } else {
-    // 同一ハッシュへの再入・同一画面連打はスタックを増やさず上書き
+  } else if (_pendingNavAction?.type === "push") {
+    // 明示的な go() による前進遷移:
+    // 同一ハッシュ（例: 既に player 表示中に曲切替やミニプレイヤー再タップ）は重複 push せず状態のみ更新
     if (navStack.length > 0 && navStack[navStack.length - 1].hash === hash) {
       navStack[navStack.length - 1].timestamp = Date.now();
-      if (_pendingNavAction?.state) {
+      if (_pendingNavAction.state) {
         navStack[navStack.length - 1].state = {
-          ...navStack[navStack.length - 1].state,
+          ...(navStack[navStack.length - 1].state || {}),
           ..._pendingNavAction.state,
         };
       }
@@ -249,26 +300,55 @@ function syncNavStackOnTransition(name, query, params, hash) {
       persistNavStack();
       return;
     }
+    // 離脱元画面のスクロール位置を現在のスタック先頭に記録してから 1 段 push する
+    // （過去の同一URL走査による切り詰めや pop は絶対に行わない）
+    if (navStack.length > 0 && _activeRoot) {
+      navStack[navStack.length - 1].scrollTop = _activeRoot.scrollTop || 0;
+    }
+    const st = { view: name, ...(params || {}), ...(_pendingNavAction.state || {}) };
+    navStack.push({
+      name,
+      query,
+      params,
+      hash,
+      scrollTop: 0,
+      state: st,
+      openedOrder: navStack.length + 1,
+      timestamp: Date.now(),
+    });
+    _pendingNavAction = null;
+  } else {
+    // _pendingNavAction === null:
+    // 1. すでに go() / back() で同期済みの hashchange イベント到着時は何もしない
+    if (navStack.length > 0 && navStack[navStack.length - 1].hash === hash) {
+      navStack[navStack.length - 1].timestamp = Date.now();
+      persistNavStack();
+      return;
+    }
 
-    // ブラウザの戻る/進む、または通常の遷移
-    if (navStack.length >= 2 && navStack[navStack.length - 2].hash === hash) {
-      // ブラウザの「戻る」ボタンによる遷移を検知
+    // 2. ブラウザ/OSの「戻る」操作による遷移（1回の操作につき直前の1段だけ戻る）
+    if (
+      navStack.length >= 2 &&
+      (navStack[navStack.length - 2].hash === hash || navStack[navStack.length - 2].name === name)
+    ) {
       navStack.pop();
     } else {
-      // 過去のスタックに同一URLが存在するか走査（複数画面ジャンプ戻り）
-      const prevIdx = navStack.slice(0, -1).findIndex((e) => e.hash === hash);
-      if (prevIdx !== -1) {
-        navStack = navStack.slice(0, prevIdx + 1);
-      } else {
-        // 新規画面遷移: 離脱元画面のスクロール位置を現在のスタック先頭に記録
-        if (navStack.length > 0 && _activeRoot) {
-          navStack[navStack.length - 1].scrollTop = _activeRoot.scrollTop || 0;
-        }
-        const st = _pendingNavAction?.state || {};
-        navStack.push({ name, query, params, hash, scrollTop: 0, state: st, timestamp: Date.now() });
+      // 3. 初期表示または直接ハッシュ変更による新規遷移
+      if (navStack.length > 0 && _activeRoot) {
+        navStack[navStack.length - 1].scrollTop = _activeRoot.scrollTop || 0;
       }
+      const st = { view: name, ...(params || {}) };
+      navStack.push({
+        name,
+        query,
+        params,
+        hash,
+        scrollTop: 0,
+        state: st,
+        openedOrder: navStack.length + 1,
+        timestamp: Date.now(),
+      });
     }
-    _pendingNavAction = null;
   }
   if (navStack.length > MAX_STACK_SIZE) {
     navStack = navStack.slice(-MAX_STACK_SIZE);
@@ -402,36 +482,48 @@ function updateNavActive(name) {
  */
 export function go(name, params = null, { replace = false, state = null } = {}) {
   let hash = `#/${name}`;
+  let query = "";
   if (params) {
     const qs = new URLSearchParams(params).toString();
-    if (qs) hash += `?${qs}`;
+    if (qs) {
+      query = qs;
+      hash += `?${qs}`;
+    }
   }
+  const resolvedParams = params ? parseHashParams(query) : {};
 
   if (replace) {
-    _pendingNavAction = { type: "replace", name, params, state, hash };
+    _pendingNavAction = { type: "replace", name, params: resolvedParams, state, hash };
     if (typeof history !== "undefined" && typeof history.replaceState === "function") {
       try {
         history.replaceState(null, "", hash);
       } catch {}
     }
+    if (typeof location !== "undefined" && location.hash !== hash) {
+      try { location.hash = hash; } catch {}
+    }
     // replaceState は hashchange イベントを発火させないため直接同期・遷移を実行
-    const query = (hash.match(/^#\/[^?]+(?:\?(.*))?$/) || [])[1] || "";
-    syncNavStackOnTransition(name, query, params || {}, hash);
+    syncNavStackOnTransition(name, query, resolvedParams, hash);
     if (_activeRoot) {
-      navigate(name, query, _activeRoot, "library");
+      navigate(name, query, _activeRoot, _fallbackRoute);
     }
   } else {
-    _pendingNavAction = { type: "push", name, params, state, hash };
-    if (location.hash === hash) {
-      if (state) updateCurrentState(state);
-    } else {
+    _pendingNavAction = { type: "push", name, params: resolvedParams, state, hash };
+    // 同期的にスタックを更新（後続の hashchange 発火時は既に最上位が一致しているため二重 push にならない）
+    syncNavStackOnTransition(name, query, resolvedParams, hash);
+    if (typeof location !== "undefined" && location.hash !== hash) {
       location.hash = hash;
+    } else if (state) {
+      updateCurrentState(state);
+    }
+    if (_activeRoot) {
+      navigate(name, query, _activeRoot, _fallbackRoute);
     }
   }
 }
 
 /**
- * ナビゲーションスタックに基づき直前の画面へ戻る（統一バックハンドラ）
+ * ナビゲーションスタックに基づき直前の画面へ1段だけ戻る（統一バックハンドラ）
  * @param {string} [fallback="library"]
  * @param {Record<string,string>} [fallbackParams=null]
  */
@@ -443,31 +535,25 @@ export function back(fallback = "library", fallbackParams = null) {
 
   if (navStack.length > 1) {
     const prev = navStack[navStack.length - 2];
+    const prevQuery = prev.query || "";
+    const prevParams = prev.params || parseHashParams(prevQuery);
     _pendingNavAction = { type: "back", targetHash: prev.hash };
 
-    if (typeof window !== "undefined" && window.history && window.history.length > 1) {
-      window.history.back();
-      // 万が一 history.back() で hashchange が即時発火しない環境（スタンドアロンPWA等）の保険
-      _backInsuranceTimer = setTimeout(() => {
-        if (_pendingNavAction?.type === "back") {
-          _pendingNavAction = null;
-          navStack.pop();
-          persistNavStack();
-          location.hash = prev.hash;
-        }
-      }, 150);
-      return;
-    }
+    // 1回の操作につき確実に1段だけスタックを戻し、直前の画面・クエリ・状態・スクロール位置を復元する
+    syncNavStackOnTransition(prev.name, prevQuery, prevParams, prev.hash);
 
-    // history.length <= 1 の場合（再起動後・直接リンク起動時）
-    navStack.pop();
-    persistNavStack();
-    location.hash = prev.hash;
-    return;
+    if (typeof location !== "undefined" && location.hash !== prev.hash) {
+      location.hash = prev.hash;
+    }
+    if (_activeRoot) {
+      navigate(prev.name, prevQuery, _activeRoot, _fallbackRoute);
+    }
+    return prev;
   }
 
   // スタックが空または1件のみの場合、安全なフォールバック先へ replace で遷移
   navStack = [];
   persistNavStack();
   go(fallback, fallbackParams, { replace: true });
+  return getCurrentStackEntry();
 }

@@ -123,6 +123,7 @@ export async function mount(root) {
   isSelectMode = false;
   selectedTrackIds = new Set();
   storageInfo = "";
+  persistLibraryState();
 
   root.innerHTML = render();
   const refs = collectRefs(root);
@@ -221,6 +222,7 @@ export async function mount(root) {
     refs.albumGrid.addEventListener("click", (e) => {
       const card = e.target.closest(".album-card");
       if (card && card.dataset.key) {
+        persistLibraryState();
         go("album", { key: card.dataset.key });
       }
     });
@@ -245,6 +247,7 @@ export async function mount(root) {
     refs.artistList.addEventListener("click", (e) => {
       const row = e.target.closest(".artist-row");
       if (row && row.dataset.name) {
+        persistLibraryState();
         go("artist", { name: row.dataset.name });
       }
     });
