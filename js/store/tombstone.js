@@ -235,6 +235,30 @@ export function isTombstoned(id, entityTimestamp = 0, type = "track") {
 }
 
 /**
+ * 特定のアイテムのTombstoneを解除（ユーザーによる明示的な再追加・復元時）
+ * @param {string} id
+ * @param {"track"|"playlist"} [type="track"]
+ * @returns {boolean} 解除が行われたか
+ */
+export function removeTombstone(id, type = "track") {
+  if (!id || typeof id !== "string") return false;
+  try {
+    if (typeof localStorage === "undefined") return false;
+    const list = getTombstones();
+    const normType = type === "playlist" ? "playlist" : "track";
+    const targetKey = makeTombstoneKey(normType, id);
+    const filtered = list.filter((t) => makeTombstoneKey(t.type, t.id) !== targetKey);
+    if (filtered.length !== list.length) {
+      safeSaveTombstones(filtered);
+      return true;
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
  * Tombstoneをすべて消去（全データ初期化用）
  */
 export function clearTombstones() {

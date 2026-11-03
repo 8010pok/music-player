@@ -14,6 +14,7 @@ import { formatFromName, mimeFromName } from "../metadata/util.js";
 import { openModal, toast, escapeHtml, escapeAttr } from "../ui/components.js";
 import { processAudioNormalization } from "../audio/normalize-service.js";
 import { isPlaceholderArtist, parseArtistAndTitle } from "../lastfm/scrobble-cleaner.js";
+import { removeTombstone, isTombstoned } from "../store/tombstone.js";
 
 let _cachedToken = null;
 let _gisTokenClient = null;
@@ -673,83 +674,393 @@ export async function listDriveItems({ folderId = "root", query = "", pageToken 
 }
 
 /**
- * フォルダ（およびその全サブフォルダ）内の全音源ファイルを再帰的に取得
- * @param {string} rootFolderId
- * @param {{ onProgress?: (msg: string) => void }} [opts]
- * @returns {Promise<Array<object>>}
+ * サポート確認済み音声拡張子（iPhone PWA / ブラウザ対応形式）
+ * ※ 未確認形式 (.alac, .aiff, .wma 等) は再生保証がないため検索およびインポート対象から除外
  */
-export async function fetchFolderAudioFilesRecursive(rootFolderId, { onProgress } = {}) {
+export const CONFIRMED_AUDIO_EXTENSIONS = [
+  "mp3", "flac", "m4a", "wav", "aac", "ogg", "opus", "webm"
+];
+
+/**
+ * ファイル名から小文字拡張子を取得
+ * @param {string} filename
+ * @returns {string}
+ */
+export function getFileExtension(filename) {
+  if (!filename || typeof filename !== "string") return "";
+  const match = filename.toLowerCase().match(/\.([a-z0-9]+)$/);
+  return match ? match[1] : "";
+}
+
+/**
+ * Google Drive アイテムがサポート対象音源ファイルか判定
+ * @param {object} file
+ * @returns {boolean}
+ */
+export function isSupportedDriveAudioFile(file) {
+  if (!file || typeof file !== "object") return false;
+  if (file.mimeType === "application/vnd.google-apps.folder") return false;
+  const ext = getFileExtension(file.name);
+  const hasSupportedExt = CONFIRMED_AUDIO_EXTENSIONS.includes(ext);
+
+  // 1. application/octet-stream: 音声拡張子を持つ場合のみ許可
+  if (file.mimeType === "application/octet-stream") {
+    return hasSupportedExt;
+  }
+
+  // 2. 拡張子が確認済み音声形式（大文字小文字問わず）
+  if (hasSupportedExt) {
+    return true;
+  }
+
+  // 3. MIME タイプが audio/ で始まる場合
+  if (file.mimeType && typeof file.mimeType === "string" && file.mimeType.startsWith("audio/")) {
+    // 明示的に非対応/未確認拡張子が付与されている場合は除外
+    if (ext && !hasSupportedExt) {
+      return false;
+    }
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * 機密情報（トークン、Authorization ヘッダ、URL 引数等）を除去した安全なエラー情報を生成
+ * @param {any} err
+ * @param {object} context
+ * @returns {object}
+ */
+export function sanitizeDriveSafeError(err, { folderName = "", folderId = "", stage = "request", pageToken = null } = {}) {
+  const rawMsg = err && err.message ? String(err.message) : "Unknown error";
+  let safeMsg = rawMsg
+    .replace(/ya29\.[a-zA-Z0-9_\-]+/g, "[REDACTED_TOKEN]")
+    .replace(/Bearer\s+[a-zA-Z0-9_\-]+/gi, "Bearer [REDACTED]")
+    .replace(/access_token=[a-zA-Z0-9_\-]+/gi, "access_token=[REDACTED]");
+
+  const status = (err && typeof err.status === "number") ? err.status : (err && err.code ? Number(err.code) : null);
+  let errorCode = err && err.errorCode ? err.errorCode : (status ? `HTTP_${status}` : "NETWORK_ERROR");
+  if (err && err.name === "AbortError") errorCode = "ABORTED";
+
+  const folderIdSuffix = folderId ? (folderId.length > 8 ? `...${folderId.slice(-6)}` : folderId) : "";
+
+  return {
+    stage,
+    folderName: folderName || "マイドライブ",
+    folderIdSuffix,
+    status,
+    errorCode,
+    message: safeMsg,
+    ...(pageToken ? { pageTokenSuffix: `...${String(pageToken).slice(-6)}` } : {}),
+  };
+}
+
+/**
+ * フォルダ（およびその全サブフォルダ）内の全音源ファイルを再帰的に取得
+ * - 部分成功に対応: 一部フォルダやページの取得に失敗しても取得済み曲を保持して返却
+ * - 循環参照防止 (visitedFolderIds)、重複音源防止 (discoveredFileIds)、最大深度ガード
+ * - HTTP 再試行規則: 401 (トークン再取得1回), 403 (レート制限のみ指数バックオフ再試行・権限不足はリトライなし), 429 (Retry-After尊重), 5xx / ネットワーク例外 (最大2回再試行), AbortError (即中断)
+ * - 機密情報 (トークン、秘密URL) をエラーに一切含めない安全設計
+ * @param {string} rootFolderId
+ * @param {{ onProgress?: (msg: string) => void, signal?: AbortSignal|null, maxDepth?: number, maxFolders?: number, sleepFn?: (ms: number) => Promise<void> }} [opts]
+ * @returns {Promise<{ files: Array<object>, foldersVisited: number, pagesFetched: number, failedFolders: Array<object>, failedPages: Array<object>, warnings: Array<string>, aborted: boolean, authRequired: boolean, partial: boolean }>}
+ */
+export async function fetchFolderAudioFilesRecursive(
+  rootFolderId,
+  {
+    onProgress,
+    signal = null,
+    maxDepth = 20,
+    maxFolders = 500,
+    sleepFn = null,
+  } = {}
+) {
+  const sleep = typeof sleepFn === "function" ? sleepFn : (ms) => new Promise((r) => setTimeout(r, ms));
   let token = await getDriveToken();
-  if (!token) throw new Error("Google Drive に接続されていません");
 
   const audioFiles = [];
-  const folderQueue = [{ id: rootFolderId, name: "" }];
-  const visitedFolders = new Set([rootFolderId]);
+  const folderQueue = [{ id: rootFolderId, name: "", depth: 0 }];
+  const visitedFolderIds = new Set([rootFolderId]);
+  const discoveredFileIds = new Set();
+  const failedFolders = [];
+  const failedPages = [];
+  const warnings = [];
+  let authRequired = !token;
+  let aborted = false;
+  let totalPagesFetched = 0;
+
+  if (!token) {
+    const safeErr = sanitizeDriveSafeError(new Error("Google Drive に接続されていません"), {
+      folderName: "マイドライブ",
+      folderId: rootFolderId,
+      stage: "init",
+    });
+    failedFolders.push(safeErr);
+    const res = audioFiles;
+    res.files = audioFiles;
+    res.foldersVisited = visitedFolderIds.size;
+    res.pagesFetched = 0;
+    res.failedFolders = failedFolders;
+    res.failedPages = failedPages;
+    res.warnings = warnings;
+    res.aborted = false;
+    res.authRequired = true;
+    res.partial = true;
+    return res;
+  }
 
   while (folderQueue.length > 0) {
+    if (signal?.aborted) {
+      aborted = true;
+      break;
+    }
     const curFolder = folderQueue.shift();
     const curFolderId = curFolder.id;
-    const curFolderName = curFolder.name;
+    const curFolderName = curFolder.name || "";
+    const curDepth = curFolder.depth || 0;
 
     if (typeof onProgress === "function") {
       onProgress(`フォルダを探索中 (検出: ${audioFiles.length} 曲)…`);
     }
 
     let pageToken = null;
+    let folderFailed = false;
+
     do {
-      const q = `trashed = false and '${curFolderId}' in parents and (mimeType = 'application/vnd.google-apps.folder' or mimeType contains 'audio/' or name contains '.mp3' or name contains '.m4a' or name contains '.flac' or name contains '.ogg' or name contains '.wav' or name contains '.aac' or name contains '.opus' or name contains '.webm' or name contains '.alac' or name contains '.aiff' or name contains '.wma')`;
-      let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=100&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime)&orderBy=folder,name`;
+      if (signal?.aborted) {
+        aborted = true;
+        break;
+      }
+
+      const q = `trashed = false and '${curFolderId}' in parents and (mimeType = 'application/vnd.google-apps.folder' or mimeType contains 'audio/' or name contains '.mp3' or name contains '.m4a' or name contains '.flac' or name contains '.ogg' or name contains '.wav' or name contains '.aac' or name contains '.opus' or name contains '.webm')`;
+      let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=100&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime,shortcutDetails)&orderBy=folder,name`;
       if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
 
       let res = null;
       let attempt = 0;
       const maxRetries = 3;
+      let lastAttemptError = null;
+
       while (attempt < maxRetries) {
+        if (signal?.aborted) {
+          aborted = true;
+          break;
+        }
         attempt++;
         try {
-          res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+          res = await fetch(url, {
+            headers: { Authorization: `Bearer ${token}` },
+            signal: signal || undefined,
+          });
+
+          // 1. 401 Unauthorized: トークン再取得は最大1回のみ試行
           if (res.status === 401) {
             const refreshed = await getDriveToken({ forceRefresh: true }).catch(() => null);
             if (refreshed) {
               token = refreshed;
-              res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+              res = await fetch(url, {
+                headers: { Authorization: `Bearer ${token}` },
+                signal: signal || undefined,
+              });
+            } else {
+              authRequired = true;
+              break;
             }
           }
-          if (res.ok) break;
-          if (res.status === 403 || res.status === 429 || res.status >= 500) {
-            await new Promise((r) => setTimeout(r, attempt * 800));
-            continue;
+
+          if (res.ok) {
+            lastAttemptError = null;
+            break;
           }
+
+          // 2. 403 Forbidden
+          if (res.status === 403) {
+            let isRateLimit = false;
+            try {
+              const errBody = await res.clone().json();
+              const reason = errBody?.error?.errors?.[0]?.reason || errBody?.error?.details?.[0]?.reason || "";
+              const msg = errBody?.error?.message || "";
+              if (reason === "rateLimitExceeded" || reason === "userRateLimitExceeded" || msg.includes("Rate Limit Exceeded")) {
+                isRateLimit = true;
+              }
+            } catch (_) {}
+
+            if (isRateLimit && attempt < maxRetries) {
+              const waitMs = Math.min(5000, 800 * Math.pow(2, attempt) + Math.floor(Math.random() * 200));
+              await sleep(waitMs);
+              continue;
+            }
+            lastAttemptError = new Error(`403 Forbidden: 権限がないかAPIが無効です`);
+            lastAttemptError.status = 403;
+            break;
+          }
+
+          // 3. 429 Too Many Requests
+          if (res.status === 429) {
+            if (attempt < maxRetries) {
+              const retryAfter = res.headers?.get?.("Retry-After");
+              let waitMs = 0;
+              if (retryAfter) {
+                const parsedSec = parseInt(retryAfter, 10);
+                if (!isNaN(parsedSec) && parsedSec > 0) {
+                  waitMs = Math.min(10000, parsedSec * 1000);
+                }
+              }
+              if (waitMs <= 0) {
+                waitMs = Math.min(5000, 800 * Math.pow(2, attempt) + Math.floor(Math.random() * 300));
+              }
+              await sleep(waitMs);
+              continue;
+            }
+            lastAttemptError = new Error(`429 Too Many Requests`);
+            lastAttemptError.status = 429;
+            break;
+          }
+
+          // 4. 5xx Server Error
+          if (res.status >= 500) {
+            if (attempt < maxRetries) {
+              const waitMs = Math.min(5000, 800 * Math.pow(2, attempt) + Math.floor(Math.random() * 200));
+              await sleep(waitMs);
+              continue;
+            }
+            lastAttemptError = new Error(`HTTP ${res.status} サーバー一時エラー`);
+            lastAttemptError.status = res.status;
+            break;
+          }
+
+          // その他 HTTP エラー
+          lastAttemptError = new Error(`HTTP ${res.status} エラー`);
+          lastAttemptError.status = res.status;
           break;
         } catch (fetchErr) {
-          if (attempt >= maxRetries) throw fetchErr;
-          await new Promise((r) => setTimeout(r, attempt * 800));
+          lastAttemptError = fetchErr;
+          if (fetchErr.name === "AbortError" || signal?.aborted) {
+            aborted = true;
+            break;
+          }
+          if (attempt >= maxRetries) break;
+          const waitMs = Math.min(5000, 800 * Math.pow(2, attempt) + Math.floor(Math.random() * 200));
+          await sleep(waitMs);
         }
       }
+
+      if (aborted) break;
 
       if (!res || !res.ok) {
-        const errMsg = res ? await parseGoogleApiError(res, "フォルダ探索エラー") : "ネットワークエラー";
-        throw new Error(`フォルダ「${curFolderName || "マイドライブ"}」の探索に失敗しました: ${errMsg}`);
+        const safeErr = sanitizeDriveSafeError(lastAttemptError || new Error(`ページ取得失敗`), {
+          folderName: curFolderName,
+          folderId: curFolderId,
+          stage: "page_fetch",
+          pageToken,
+        });
+        failedPages.push(safeErr);
+        if (!failedFolders.some((f) => f.folderIdSuffix === safeErr.folderIdSuffix)) {
+          failedFolders.push(safeErr);
+        }
+        warnings.push(`フォルダ「${curFolderName || "マイドライブ"}」のページ取得をスキップしました (${safeErr.errorCode})`);
+        folderFailed = true;
+        break;
       }
 
-      const data = await res.json();
-      const items = data.files || [];
+      let data = null;
+      try {
+        data = await res.json();
+      } catch (jsonErr) {
+        const safeErr = sanitizeDriveSafeError(jsonErr, {
+          folderName: curFolderName,
+          folderId: curFolderId,
+          stage: "json_parse",
+          pageToken,
+        });
+        failedPages.push(safeErr);
+        warnings.push(`フォルダ「${curFolderName || "マイドライブ"}」のレスポンス解析に失敗しました`);
+        folderFailed = true;
+        break;
+      }
+
+      totalPagesFetched++;
+      const items = data?.files || [];
+
       for (const item of items) {
+        if (!item || !item.id) continue;
+
+        // フォルダ
         if (item.mimeType === "application/vnd.google-apps.folder") {
-          if (!visitedFolders.has(item.id)) {
-            visitedFolders.add(item.id);
-            folderQueue.push({ id: item.id, name: item.name });
+          if (curDepth + 1 > maxDepth) {
+            warnings.push(`最大深度 (${maxDepth}) に達したためサブフォルダ「${item.name || ""}」をスキップしました`);
+            continue;
           }
-        } else {
-          item.folderName = curFolderName;
-          audioFiles.push(item);
+          if (visitedFolderIds.size >= maxFolders) {
+            warnings.push(`最大探索フォルダ数 (${maxFolders}) に達したためサブフォルダ「${item.name || ""}」をスキップしました`);
+            continue;
+          }
+          if (visitedFolderIds.has(item.id)) {
+            warnings.push(`循環フォルダ参照を検出したためスキップしました (フォルダ名: ${item.name || ""})`);
+            continue;
+          }
+          visitedFolderIds.add(item.id);
+          folderQueue.push({ id: item.id, name: item.name || "", depth: curDepth + 1 });
+          continue;
+        }
+
+        // ショートカット
+        if (item.mimeType === "application/vnd.google-apps.shortcut") {
+          const targetMime = item.shortcutDetails?.targetMimeType;
+          const targetId = item.shortcutDetails?.targetId;
+          if (targetId && targetMime === "application/vnd.google-apps.folder") {
+            if (curDepth + 1 <= maxDepth && visitedFolderIds.size < maxFolders) {
+              if (!visitedFolderIds.has(targetId)) {
+                visitedFolderIds.add(targetId);
+                folderQueue.push({ id: targetId, name: item.name || "", depth: curDepth + 1 });
+              }
+            }
+          } else if (targetId && isSupportedDriveAudioFile({ name: item.name, mimeType: targetMime })) {
+            if (!discoveredFileIds.has(targetId)) {
+              discoveredFileIds.add(targetId);
+              audioFiles.push({
+                ...item,
+                id: targetId,
+                mimeType: targetMime || item.mimeType,
+                folderName: curFolderName,
+              });
+            }
+          }
+          continue;
+        }
+
+        // 音源ファイル
+        if (isSupportedDriveAudioFile(item)) {
+          if (!discoveredFileIds.has(item.id)) {
+            discoveredFileIds.add(item.id);
+            item.folderName = curFolderName;
+            audioFiles.push(item);
+          }
         }
       }
+
       pageToken = data.nextPageToken;
-    } while (pageToken);
+    } while (pageToken && !folderFailed && !aborted && !authRequired);
+
+    if (authRequired) {
+      warnings.push("認証の有効期限が切れ、再認証が必要です");
+      break;
+    }
   }
 
-  return audioFiles;
+  const partial = failedFolders.length > 0 || failedPages.length > 0 || aborted || authRequired;
+  const result = audioFiles;
+  result.files = audioFiles;
+  result.foldersVisited = visitedFolderIds.size;
+  result.pagesFetched = totalPagesFetched;
+  result.failedFolders = failedFolders;
+  result.failedPages = failedPages;
+  result.warnings = warnings;
+  result.aborted = aborted;
+  result.authRequired = authRequired;
+  result.partial = partial;
+
+  return result;
 }
 
 /**
@@ -760,7 +1071,7 @@ export async function fetchFolderAudioFilesRecursive(rootFolderId, { onProgress 
 export async function listDriveAudioFiles({ query = "", pageToken = null, pageSize = 100 } = {}) {
   const res = await listDriveItems({ query, pageToken, pageSize });
   return {
-    files: res.files.filter((f) => f.mimeType !== "application/vnd.google-apps.folder"),
+    files: res.files.filter((f) => isSupportedDriveAudioFile(f)),
     nextPageToken: res.nextPageToken,
   };
 }
@@ -1589,13 +1900,28 @@ export function buildDriveTrackRecord({
 
 /**
  * 選択した Drive ファイル群を IndexedDB ライブラリにインポート
+ * - サポート確認済み形式のみインポートし、未対応形式は除外して failures に記録
+ * - 同一 Drive file ID の既存曲がある場合はユーザー設定（再生回数、お気に入り、評価、歌詞、キー変更、カスタム画像等）を完全保持
+ * - 削除済みアイテム (Tombstone) をユーザーが明示的に再インポートした場合は Tombstone を安全に解除
+ * - 詳細な構造化戻り値 { selected, discovered, attempted, added, updated, skippedSameFile, restored, failed, unsupported, tombstoned, partialFolders, failures } を返却
  * @param {Array<object>} driveFiles
  * @param {{ cacheBlobs?: boolean, normalizeAudio?: boolean, defaultAlbumName?: string, onProgress?: (current: number, total: number, file: object) => void }} [opts]
- * @returns {Promise<{ added: number, failed: number }>}
+ * @returns {Promise<{ selected: number, discovered: number, attempted: number, added: number, updated: number, skippedSameFile: number, restored: number, failed: number, unsupported: number, tombstoned: number, partialFolders: number, failures: Array<object> }>}
  */
 export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false, normalizeAudio = false, defaultAlbumName = "", onProgress } = {}) {
   let added = 0;
+  let updated = 0;
+  let restored = 0;
   let failed = 0;
+  let unsupported = 0;
+  let tombstoned = 0;
+  const skippedSameFile = 0;
+  const failures = [];
+  const selected = Array.isArray(driveFiles) ? driveFiles.length : 0;
+  const discovered = selected;
+  const attempted = selected;
+  let partialFolders = 0;
+
   const allExistingTracks = await getAllTracks().catch(() => []);
   const existingByIdMap = new Map();
   const existingByDriveIdMap = new Map();
@@ -1610,10 +1936,33 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
       onProgress(i + 1, driveFiles.length, file);
     }
 
+    // 1. サポート音声形式チェック
+    if (!isSupportedDriveAudioFile(file)) {
+      unsupported++;
+      failures.push({
+        name: file?.name || "unknown",
+        stage: "format_check",
+        errorCode: "UNSUPPORTED_FORMAT",
+        message: `非対応または未確認の音声形式です (${file?.mimeType || getFileExtension(file?.name)})`,
+      });
+      continue;
+    }
+
     try {
       const trackId = trackIdFromDriveFileId(file.id);
       // 同一 Drive file ID の既存レコードのみを引き継ぐ（別ファイルIDの曲は絶対に引き継がない！）
       let existing = existingByIdMap.get(trackId) || existingByDriveIdMap.get(file.id) || (await getTrack(trackId).catch(() => null));
+      const isExisting = Boolean(existing);
+
+      // 2. ユーザーによる明示的な再インポート時、該当トラックの Tombstone を安全に解除
+      if (isTombstoned(trackId, 0, "track")) {
+        tombstoned++;
+        const didRemove = removeTombstone(trackId, "track");
+        if (didRemove) {
+          restored++;
+        }
+      }
+
       const folder = file.folderName || defaultAlbumName || "";
       const inferred = inferMetadataFromFileName(file.name, folder);
 
@@ -1668,7 +2017,11 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
         await putTrack(track, blob);
         existingByIdMap.set(track.id, track);
         existingByDriveIdMap.set(file.id, track);
-        added++;
+        if (isExisting) {
+          updated++;
+        } else {
+          added++;
+        }
       } else {
         // メタデータレコードを作成（音源 Blob は再生時にオンデマンドで取得・ストリーミング）
         let extractedMeta = null;
@@ -1695,18 +2048,46 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
         await putTrack(track, null);
         existingByIdMap.set(track.id, track);
         existingByDriveIdMap.set(file.id, track);
-        added++;
+        if (isExisting) {
+          updated++;
+        } else {
+          added++;
+        }
       }
     } catch (e) {
-      console.warn("[drive-service] インポート失敗:", file.name, e);
+      console.warn("[drive-service] インポート失敗:", file?.name, e);
       failed++;
+      const safeErr = sanitizeDriveSafeError(e, {
+        folderName: file?.folderName || defaultAlbumName || "",
+        folderId: file?.id || "",
+        stage: "import",
+      });
+      failures.push({
+        name: file?.name || "unknown",
+        stage: safeErr.stage,
+        errorCode: safeErr.errorCode,
+        message: safeErr.message,
+      });
     }
 
     // イベントループに譲る
     await new Promise((r) => setTimeout(r, 0));
   }
 
-  return { added, failed };
+  return {
+    selected,
+    discovered,
+    attempted,
+    added,
+    updated,
+    skippedSameFile,
+    restored,
+    failed,
+    unsupported,
+    tombstoned,
+    partialFolders,
+    failures,
+  };
 }
 
 function stripExt(name) {
@@ -1935,7 +2316,7 @@ export async function openDriveImportModal({ onImported } = {}) {
           }
 
           try {
-            const { added, failed } = await importDriveFilesToLibrary(selectedFiles, {
+            const importRes = await importDriveFilesToLibrary(selectedFiles, {
               cacheBlobs: cacheNow,
               normalizeAudio: normalizeNow,
               defaultAlbumName: currentFolderName,
@@ -1944,11 +2325,24 @@ export async function openDriveImportModal({ onImported } = {}) {
               },
             });
 
-            if (failed > 0) {
-              toast(`⚠️ ${added} 件を追加しましたが、${failed} 件の追加に失敗しました`, "warn");
+            const { added, updated, failed, unsupported, attempted } = importRes;
+            const totalSuccess = (added || 0) + (updated || 0);
+            const totalFailed = (failed || 0) + (unsupported || 0);
+
+            if (totalFailed === 0) {
+              if (updated > 0 && added > 0) {
+                toast(`✅ ${added} 曲を追加、${updated} 曲を更新しました`, "ok");
+              } else if (updated > 0 && added === 0) {
+                toast(`✅ ${updated} 曲を更新しました`, "ok");
+              } else {
+                toast(`✅ ${added} 曲を追加しました`, "ok");
+              }
+            } else if (totalSuccess > 0) {
+              toast(`⚠️ ${attempted} 曲中 ${totalSuccess} 曲を追加しました。${totalFailed} 曲は追加できませんでした`, "warn");
             } else {
-              toast(`✅ ${added} 件の音源を追加しました（続けてインポートできます）`, "ok");
+              toast("❌ 曲を追加できませんでした", "err");
             }
+
             for (const f of selectedFiles) {
               existingTrackIds.add(trackIdFromDriveFileId(f.id));
             }
@@ -1956,9 +2350,9 @@ export async function openDriveImportModal({ onImported } = {}) {
             renderItems(displayedItems, false);
             updateCount();
             if (typeof onImported === "function") onImported();
-            progressEl.textContent = failed > 0
-              ? `⚠️ ${added} 件を追加、${failed} 件失敗しました。続けて別のフォルダや曲もインポートできます`
-              : `✅ ${added} 件を追加しました！続けて別のフォルダや曲もインポートできます`;
+            progressEl.textContent = totalFailed > 0
+              ? `⚠️ ${totalSuccess} 件を追加/更新、${totalFailed} 件失敗しました。続けて別のフォルダや曲もインポートできます`
+              : `✅ ${totalSuccess} 件を追加/更新しました！続けて別のフォルダや曲もインポートできます`;
           } catch (err) {
             toast(`インポート中にエラーが発生しました: ${err.message}`, "err");
             progressEl.style.display = "none";
@@ -2084,12 +2478,21 @@ export async function openDriveImportModal({ onImported } = {}) {
     if (folderBtn) folderBtn.disabled = true;
 
     try {
-      const audioFiles = await fetchFolderAudioFilesRecursive(folderId, {
+      const folderRes = await fetchFolderAudioFilesRecursive(folderId, {
         onProgress: (msg) => { progressEl.textContent = msg; },
       });
 
+      const audioFiles = Array.isArray(folderRes) ? folderRes : (folderRes?.files || []);
+      if (folderRes?.partial) {
+        toast("⚠️ フォルダの一部を取得できませんでした。取得できた曲のみ表示しています", "warn");
+      }
+
       if (audioFiles.length === 0) {
-        toast(`フォルダ「${folderName}」内に音源ファイルは見つかりませんでした`, "info");
+        if (folderRes?.partial) {
+          toast(`⚠️ フォルダ「${folderName}」の取得に一部失敗し、追加可能な音源は見つかりませんでした`, "warn");
+        } else {
+          toast(`フォルダ「${folderName}」内に音源ファイルは見つかりませんでした`, "info");
+        }
         progressEl.style.display = "none";
         if (folderBtn) folderBtn.disabled = false;
         return;
@@ -2099,7 +2502,7 @@ export async function openDriveImportModal({ onImported } = {}) {
       const cacheNow = normalizeNow || !!container.querySelector("#chk-drive-cache-now")?.checked;
       progressEl.textContent = `追加中 0 / ${audioFiles.length}…`;
 
-      const { added, failed } = await importDriveFilesToLibrary(audioFiles, {
+      const importRes = await importDriveFilesToLibrary(audioFiles, {
         cacheBlobs: cacheNow,
         normalizeAudio: normalizeNow,
         defaultAlbumName: folderName,
@@ -2108,11 +2511,24 @@ export async function openDriveImportModal({ onImported } = {}) {
         },
       });
 
-      if (failed > 0) {
-        toast(`⚠️ 「${folderName}」から ${added} 曲を追加しましたが、${failed} 件の追加に失敗しました`, "warn");
+      const { added, updated, failed, unsupported, attempted } = importRes;
+      const totalSuccess = (added || 0) + (updated || 0);
+      const totalFailed = (failed || 0) + (unsupported || 0);
+
+      if (totalFailed === 0) {
+        if (updated > 0 && added > 0) {
+          toast(`✅ ${added} 曲を追加、${updated} 曲を更新しました`, "ok");
+        } else if (updated > 0 && added === 0) {
+          toast(`✅ ${updated} 曲を更新しました`, "ok");
+        } else {
+          toast(`✅ 「${folderName}」から ${added} 曲を追加しました`, "ok");
+        }
+      } else if (totalSuccess > 0) {
+        toast(`⚠️ ${attempted} 曲中 ${totalSuccess} 曲を追加しました。${totalFailed} 曲は追加できませんでした`, "warn");
       } else {
-        toast(`「${folderName}」から ${added} 曲を追加しました`, "ok");
+        toast("❌ 曲を追加できませんでした", "err");
       }
+
       for (const f of audioFiles) {
         existingTrackIds.add(trackIdFromDriveFileId(f.id));
       }

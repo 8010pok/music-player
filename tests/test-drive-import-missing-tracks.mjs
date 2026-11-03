@@ -253,13 +253,14 @@ await asyncTest("同一 Drive file ID の再インポート時、ユーザーデ
     mimeType: "audio/mpeg",
   };
 
-  const { added, failed } = await driveMod.importDriveFilesToLibrary([updatedDriveFile], {
+  const res = await driveMod.importDriveFilesToLibrary([updatedDriveFile], {
     cacheBlobs: false,
     defaultAlbumName: "Different Folder",
   });
 
-  strictEqual(added, 1);
-  strictEqual(failed, 0);
+  strictEqual(res.updated, 1, "既存曲の再インポートは updated=1 となること");
+  strictEqual(res.added, 0, "既存曲の再インポートは added=0 となること");
+  strictEqual(res.failed, 0, "failed=0 であること");
 
   const updated = await libDbMod.getTrack("gd-existing_song_123");
   ok(updated, "トラックが存在すること");
