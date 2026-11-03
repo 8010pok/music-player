@@ -3110,20 +3110,43 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
         session.hasToken = Boolean(token);
         session.isFlacDetected = isFlacTrack(track);
 
-        // ★ iOS / PWA standalone、または FLAC 音源における未キャッシュ音源のゼロ遅延最適化:
-        // iOS WebKit は Google Drive の application/octet-stream を直接再生できず、
-        // 10〜15秒の stall / watchdog 待ちが発生することが実証されているため、
-        // 最初から安全かつ最速な Blob フォールバックで即時取得・即時再生を開始する。
+        // ★ iOS / PWA standalone、または FLAC 音源における未キャッシュ音源の最適化:
         if (shouldBypassDriveStreaming(track)) {
-          logPerfMark(track.id, "drive_fast_fallback", t0);
-          const fastErr = new Error("Fast Drive fetch");
-          fastErr.isFastFallback = true;
-          const recovered = await attemptDriveFlacBlobFallback(session, track, myAttemptId, fastErr);
-          if (recovered) {
+          // 【段階B】driveProxyStreamEnabled が有効な場合、同一オリジン Range 中継 (/api/drive-stream) を安全に試行
+          if (pub.driveProxyStreamEnabled) {
+            try {
+              logPerfMark(track.id, "proxy_session_started", t0);
+              const { ensureDriveStreamSession, getDriveProxyStreamUrl } = await import("../gdrive/drive-service.js");
+              const sessionOk = await ensureDriveStreamSession(token);
+              if (sessionOk && myToken === state.transitionToken) {
+                logPerfMark(track.id, "proxy_session_done", t0);
+                const proxyUrl = getDriveProxyStreamUrl(track);
+                if (proxyUrl) {
+                  targetUrl = proxyUrl;
+                  isDirectStream = true;
+                  isUncachedDirectStream = true;
+                  state.isDirectStream = true;
+                  session.sourceType = "drive_proxy_stream";
+                  logPerfMark(track.id, "proxy_url_ready", t0);
+                  if (needsWebAudio) notifyUncachedFastStreamOnce();
+                }
+              }
+            } catch (proxySetupErr) {
+              console.warn("[audio-engine] drive-stream プロキシセッション準備失敗、Blobフォールバックへ移行:", proxySetupErr);
+            }
+          }
+
+          if (!targetUrl) {
+            logPerfMark(track.id, "drive_fast_fallback", t0);
+            const fastErr = new Error("Fast Drive fetch");
+            fastErr.isFastFallback = true;
+            const recovered = await attemptDriveFlacBlobFallback(session, track, myAttemptId, fastErr);
+            if (recovered) {
+              return;
+            }
+            handlePlaybackFinalFailure(myAttemptId, track, session.fallbackError || fastErr);
             return;
           }
-          handlePlaybackFinalFailure(myAttemptId, track, session.fallbackError || fastErr);
-          return;
         }
 
         // ダイレクトストリーミング URL を取得して即座に再生開始（FLAC 全量 DL を待たない）
@@ -3265,6 +3288,11 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
     const triggerBgCache = () => {
       if (bgCacheTriggered) return;
       bgCacheTriggered = true;
+      // ★ Section 9: driveProxyStreamEnabled の検証中は、二重通信と帯域競合を防止するため
+      // バックグラウンド全量キャッシュを即座に開始せず、まずは中継ストリーミング単体の安定性と速度を検証
+      if (pub.driveProxyStreamEnabled) {
+        return;
+      }
       if (isUncachedDirectStream && isDriveTrack && myToken === state.transitionToken) {
         startBackgroundDriveCache(track.id, t0);
       }

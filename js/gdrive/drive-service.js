@@ -237,6 +237,7 @@ export async function clearExpiredDriveToken() {
  * Google Drive 連携を明示的に切断（設定画面の「切断」ボタン用）
  */
 export async function disconnectDrive() {
+  clearDriveStreamSession().catch(() => {});
   _cachedToken = null;
   setLocalStorageToken(null, 0);
   await setSecret({ gdriveAccessToken: "" });
@@ -780,6 +781,60 @@ export async function getDriveStreamUrl(fileId, tokenOverride = null) {
   return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(cleanId)}?alt=media&access_token=${encodeURIComponent(token)}`;
 }
 
+/**
+ * Vercel Edge 中継用のセキュアストリーミングセッションを初期化
+ * - クライアントから POST /api/drive-session へトークンを送り、HttpOnly Cookie を設定
+ * - audio.src の URL にトークンを含めない安全な設計
+ * @param {string} [tokenOverride]
+ * @returns {Promise<boolean>}
+ */
+export async function ensureDriveStreamSession(tokenOverride = null) {
+  if (typeof fetch === "undefined") return false;
+  const token = tokenOverride || (await getDriveToken());
+  if (!token) return false;
+  try {
+    const pub = getPublic() || {};
+    const remainingSec = pub.gdriveTokenExpiry
+      ? Math.max(60, Math.floor((pub.gdriveTokenExpiry - Date.now()) / 1000))
+      : 3600;
+
+    const res = await fetch("/api/drive-session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, expiresIn: remainingSec }),
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn("[drive-service] drive-session 接続失敗:", err);
+    return false;
+  }
+}
+
+/**
+ * ストリーミングセッション Cookie を破棄
+ */
+export async function clearDriveStreamSession() {
+  if (typeof fetch === "undefined") return;
+  try {
+    await fetch("/api/drive-session", { method: "DELETE" });
+  } catch (_) {}
+}
+
+/**
+ * 同一オリジン Range 中継用ストリーミング URL を生成
+ * ★ URL にアクセストークンを一切含めない（認証は HttpOnly Cookie 経由）
+ * @param {string|object} fileIdOrTrack
+ * @param {string} [extHint]
+ * @returns {string|null}
+ */
+export function getDriveProxyStreamUrl(fileIdOrTrack, extHint = "flac") {
+  if (!fileIdOrTrack) return null;
+  const cleanId = resolveDriveFileId(fileIdOrTrack) || driveFileIdFromTrackId(fileIdOrTrack);
+  if (!cleanId || cleanId === "undefined" || cleanId === "null") return null;
+  const ext = (typeof fileIdOrTrack === "object" ? (fileIdOrTrack.format || fileIdOrTrack.extension) : null) || extHint || "flac";
+  return `/api/drive-stream?fileId=${encodeURIComponent(cleanId)}&ext=${encodeURIComponent(ext)}`;
+}
+
 let _activeReconnectModalPromise = null;
 
 /**
@@ -789,6 +844,7 @@ let _activeReconnectModalPromise = null;
  * @returns {Promise<string|null>} 再連携成功時は新しいアクセストークン、キャンセル時は null
  */
 export async function promptDriveReconnectModal({ track = null, reason = "", forceModal = false } = {}) {
+  clearDriveStreamSession().catch(() => {});
   if (typeof document === "undefined") return Promise.resolve(null);
   if (_activeReconnectModalPromise) return _activeReconnectModalPromise;
 

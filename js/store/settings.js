@@ -40,6 +40,8 @@ const PUBLIC_DEFAULTS = {
   gdriveAutoCache: true,      // 再生時に自動でローカル IndexedDB にキャッシュ
   gdriveUserEmail: "",        // 連携中アカウントのメール/表示名
   gdriveTokenExpiry: 0,       // トークン有効期限タイムスタンプ
+  // === 実験的機能フラグ (Stage B: デフォルト false) ===
+  driveProxyStreamEnabled: false, // Google Drive 音源の同一オリジン Range ストリーミング中継 (Beta)
   // === YouTube 音源取得設定 ===
   customInvidiousUrl: "",     // カスタム Invidious インスタンス URL (任意)
   // === 音量ノーマライズ基準曲設定 ===

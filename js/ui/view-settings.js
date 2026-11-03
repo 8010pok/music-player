@@ -552,6 +552,11 @@ export async function mount(root) {
     toast(refs.gdriveAutoCacheChk.checked ? "再生時自動キャッシュを有効にしました" : "再生時自動キャッシュを無効にしました（本体ストレージ消費ゼロ）", "ok");
   });
 
+  refs.gdriveProxyStreamChk?.addEventListener("change", () => {
+    setPublic({ driveProxyStreamEnabled: refs.gdriveProxyStreamChk.checked });
+    toast(refs.gdriveProxyStreamChk.checked ? "⚡ Drive 高速ストリーミング中継 (Beta) を有効にしました" : "Drive 高速ストリーミング中継を無効にしました", "ok");
+  });
+
   refs.btnGdriveClearCache?.addEventListener("click", async () => {
     const ok = await confirm("端末内に一時保存された Google Drive の音源キャッシュをすべて消去して本体容量を空けますか？\n（曲一覧やプレイリスト、お気に入りは保持されます）", { okLabel: "消去" });
     if (!ok) return;
@@ -922,6 +927,16 @@ function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices, dr
         </div>
         <div class="settings-row">
           <div>
+            <div class="label" style="display:flex; align-items:center; gap:6px;">
+              <span>Drive 高速ストリーミング中継</span>
+              <span style="font-size:11px; padding:1px 5px; border-radius:4px; background:rgba(234,179,8,0.2); color:#eab308; font-weight:700;">Beta (検証用)</span>
+            </div>
+            <div class="help">未キャッシュ音源の全量ダウンロード待機をスキップし、同一オリジン Range 中継で再生開始します。(デフォルト: OFF)</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="gdrive-proxy-stream-chk" ${pub.driveProxyStreamEnabled === true ? "checked" : ""} /><span class="slider"></span></label>
+        </div>
+        <div class="settings-row">
+          <div>
             <div class="label">Google Drive 音源キャッシュを消去</div>
             <div class="help">再生時に一時保存された音源データを端末から消去して本体容量を解放します（曲一覧やプレイリスト、お気に入りは保持されます）</div>
           </div>
@@ -1252,6 +1267,7 @@ function collect(root) {
     btnGdriveConnect: root.querySelector("#btn-gdrive-connect"),
     btnGdriveDisconnect: root.querySelector("#btn-gdrive-disconnect"),
     gdriveAutoCacheChk: root.querySelector("#gdrive-autocache-chk"),
+    gdriveProxyStreamChk: root.querySelector("#gdrive-proxy-stream-chk"),
     btnGdriveClearCache: root.querySelector("#btn-gdrive-clear-cache"),
     btnSettingsYouTube: root.querySelector("#btn-settings-youtube"),
     customInvidiousInput: root.querySelector("#custom-invidious-input"),
