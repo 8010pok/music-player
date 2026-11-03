@@ -301,9 +301,12 @@ function syncNavStackOnTransition(name, query, params, hash) {
       return;
     }
     // 離脱元画面のスクロール位置を現在のスタック先頭に記録してから 1 段 push する
-    // （過去の同一URL走査による切り詰めや pop は絶対に行わない）
+    // （途中の artist / album / playlist / library(search) は一切削除せず、過去の古い player 重複のみ除去して肥大化を防ぐ）
     if (navStack.length > 0 && _activeRoot) {
       navStack[navStack.length - 1].scrollTop = _activeRoot.scrollTop || 0;
+    }
+    if (name === "player") {
+      navStack = navStack.filter((e) => e.name !== "player");
     }
     const st = { view: name, ...(params || {}), ...(_pendingNavAction.state || {}) };
     navStack.push({
@@ -336,6 +339,9 @@ function syncNavStackOnTransition(name, query, params, hash) {
       // 3. 初期表示または直接ハッシュ変更による新規遷移
       if (navStack.length > 0 && _activeRoot) {
         navStack[navStack.length - 1].scrollTop = _activeRoot.scrollTop || 0;
+      }
+      if (name === "player") {
+        navStack = navStack.filter((e) => e.name !== "player");
       }
       const st = { view: name, ...(params || {}) };
       navStack.push({

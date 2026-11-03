@@ -24,6 +24,7 @@ import {
 import { setQueueAndPlay, setShuffleMode, setRepeatMode, prewarmTrack, prewarmTracks } from "../player/audio-engine.js";
 import { go, back } from "../router.js";
 import { toast, confirm, promptForm, escapeHtml, escapeAttr } from "./components.js";
+import { openArtworkFetcherModal } from "./artwork-fetcher-modal.js";
 
 /**
  * プレイリスト合計時間の表示用フォーマッタ。
@@ -90,6 +91,19 @@ export async function mount(root) {
   refs.shufflePlayBtn.addEventListener("click", () => playPlaylist(true));
   refs.repeatBtn.addEventListener("click", () => toggleRepeat(refs));
   refs.addBtn.addEventListener("click", () => go("playlist-add", { id: playlist.id }));
+  if (refs.fetchArtBtn) {
+    refs.fetchArtBtn.addEventListener("click", () => {
+      openArtworkFetcherModal({
+        tracks: tracksInOrder,
+        albumName: playlist.name,
+        targetType: "playlist",
+        onUpdated: async () => {
+          await reloadTracks();
+          renderList(refs);
+        },
+      });
+    });
+  }
   refs.list.addEventListener("click", (e) => onListClick(e, refs));
   refs.list.addEventListener("pointerdown", (e) => {
     const row = e.target.closest(".track-row");
@@ -190,6 +204,7 @@ function render() {
         <button class="btn" id="btn-pl-shuffle-play" ${tracksInOrder.length === 0 ? "disabled" : ""}>🔀 シャッフル再生</button>
         <button class="btn" id="btn-pl-repeat" aria-pressed="false">🔁 リピート</button>
         <button class="btn" id="btn-pl-add">＋ 曲を追加</button>
+        <button class="btn" id="btn-pl-fetch-art" ${tracksInOrder.length === 0 ? "disabled" : ""}>🖼 画像変更</button>
       </div>
 
       <ul class="track-list" id="track-list"></ul>
@@ -208,6 +223,7 @@ function collectRefs(root) {
     shufflePlayBtn: root.querySelector("#btn-pl-shuffle-play"),
     repeatBtn: root.querySelector("#btn-pl-repeat"),
     addBtn: root.querySelector("#btn-pl-add"),
+    fetchArtBtn: root.querySelector("#btn-pl-fetch-art"),
     list: root.querySelector("#track-list"),
   };
 }

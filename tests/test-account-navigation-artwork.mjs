@@ -140,18 +140,14 @@ globalThis.requestAnimationFrame = (cb) => {
 
 let objectUrlSeq = 0;
 const activeObjectUrls = new Set();
-if (!globalThis.URL.createObjectURL) {
-  globalThis.URL.createObjectURL = (blob) => {
-    const u = `blob:mock-art-${++objectUrlSeq}-${blob?.size || 0}`;
-    activeObjectUrls.add(u);
-    return u;
-  };
-}
-if (!globalThis.URL.revokeObjectURL) {
-  globalThis.URL.revokeObjectURL = (u) => {
-    activeObjectUrls.delete(u);
-  };
-}
+globalThis.URL.createObjectURL = (blob) => {
+  const u = `blob:mock-art-${++objectUrlSeq}-${blob?.size || 0}`;
+  activeObjectUrls.add(u);
+  return u;
+};
+globalThis.URL.revokeObjectURL = (u) => {
+  activeObjectUrls.delete(u);
+};
 
 let passed = 0;
 async function asyncTest(name, fn) {
@@ -382,6 +378,117 @@ await asyncTest("Drive連携解除 (disconnectDrive) でトークン・接続ア
   strictEqual(libraryTracksBefore.length, 2, "Existing library tracks must not be deleted on account switch/disconnect");
 });
 
+await asyncTest("GIS エラー・キャンセル検証: popup_closed / popup_failed_to_open / access_denied / interaction_required / user_cancel でも既存接続とProxy Sessionを破壊しないこと", async () => {
+  // まず Account A で正常接続しておく
+  await driveMod.setDriveToken("ya29.existing_valid_token", {
+    expiresIn: 3600,
+    email: "keep-me@example.com",
+    displayName: "Keep Me",
+  });
+  const beforeInfo = await driveMod.getDriveAccountInfo();
+  strictEqual(beforeInfo.connected, true);
+  strictEqual(beforeInfo.email, "keep-me@example.com");
+
+  // 1) error_callback: popup_closed (ユーザーがアカウント選択ポップアップを閉じた場合)
+  globalThis.google.accounts.oauth2.initTokenClient = (cfg) => ({
+    requestAccessToken() {
+      setTimeout(() => {
+        cfg.error_callback({ type: "popup_closed" });
+      }, 5);
+    },
+  });
+  await rejects(
+    async () => {
+      await driveMod.switchDriveAccount("test-client-id.apps.googleusercontent.com");
+    },
+    (err) => {
+      ok(err.message.includes("閉じられました"), "popup_closed must reject cleanly");
+      return true;
+    }
+  );
+  // キャンセル後も既存の keep-me@example.com の接続が破壊されていないこと
+  const afterCancelInfo = await driveMod.getDriveAccountInfo();
+  strictEqual(afterCancelInfo.connected, true, "Existing connection must survive popup_closed cancel");
+  strictEqual(afterCancelInfo.email, "keep-me@example.com", "Existing email must survive popup_closed cancel");
+
+  // 2) error_callback: popup_failed_to_open
+  globalThis.google.accounts.oauth2.initTokenClient = (cfg) => ({
+    requestAccessToken() {
+      setTimeout(() => {
+        cfg.error_callback({ type: "popup_failed_to_open" });
+      }, 5);
+    },
+  });
+  await rejects(
+    async () => {
+      await driveMod.requestGisToken("test-client-id.apps.googleusercontent.com");
+    },
+    (err) => {
+      ok(err.message.includes("ポップアップ"), "popup_failed_to_open must reject with popup message");
+      return true;
+    }
+  );
+
+  // 3) callback error: access_denied / interaction_required / user_cancel
+  for (const errCode of ["access_denied", "interaction_required", "user_cancel"]) {
+    globalThis.google.accounts.oauth2.initTokenClient = (cfg) => ({
+      requestAccessToken() {
+        setTimeout(() => {
+          cfg.callback({ error: errCode });
+        }, 5);
+      },
+    });
+    await rejects(
+      async () => {
+        await driveMod.requestGisToken("test-client-id.apps.googleusercontent.com");
+      },
+      (err) => {
+        ok(err.message.includes(errCode), `Must include ${errCode}`);
+        return true;
+      }
+    );
+  }
+  strictEqual((await driveMod.getDriveAccountInfo()).email, "keep-me@example.com");
+});
+
+await asyncTest("setDriveToken 単体監査: token / expiry / email / displayName 保存、空ユーザー情報での安全性、Proxy Session 連動が例外なく動作すること", async () => {
+  settingsMod.setPublic({ driveProxyStreamEnabled: true });
+  let proxySessionCalledWith = null;
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).includes("/api/drive-session") && opts?.method === "POST") {
+      const bodyObj = JSON.parse(opts.body || "{}");
+      proxySessionCalledWith = bodyObj.token;
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+
+  await driveMod.setDriveToken("ya29.unit_test_token_999", {
+    expiresIn: 1800,
+    email: "unit@example.com",
+    displayName: "Unit User",
+  });
+  await new Promise((r) => setTimeout(r, 15));
+
+  const pub1 = settingsMod.getPublic();
+  strictEqual(pub1.gdriveUserEmail, "unit@example.com");
+  strictEqual(pub1.gdriveUserDisplayName, "Unit User");
+  ok(pub1.gdriveTokenExpiry > Date.now() + 1700 * 1000, "Expiry must be saved accurately");
+  strictEqual(proxySessionCalledWith, "ya29.unit_test_token_999", "Proxy session must be updated with new token");
+
+  // 空のユーザー情報で呼んでも既存の email / displayName を空文字で潰さず token 自体は安全に扱うこと
+  await driveMod.setDriveToken("ya29.unit_test_token_1000", {
+    expiresIn: 3600,
+    email: "",
+    displayName: "",
+  });
+  const pub2 = settingsMod.getPublic();
+  strictEqual(pub2.gdriveUserEmail, "unit@example.com", "Empty email arg must not wipe existing saved email");
+  strictEqual(pub2.gdriveUserDisplayName, "Unit User", "Empty displayName arg must not wipe existing saved displayName");
+  strictEqual(await driveMod.getDriveToken({ allowSilentRefresh: false }), "ya29.unit_test_token_1000");
+  settingsMod.setPublic({ driveProxyStreamEnabled: false });
+});
+
 console.log("\n=== 2. Apple Music型 戻るナビゲーションテスト (7シナリオ完全検証) ===");
 
 // ルーター初期化とダミーView登録
@@ -401,38 +508,66 @@ for (const name of ["library", "artist", "album", "playlist", "player", "setting
 }
 routerMod.start(mockRoot);
 
-await asyncTest("シナリオ1 (アーティスト経由): アーティスト一覧 → アーティスト詳細 → アルバム詳細 → プレイヤー から1段ずつ逆順に戻ること", async () => {
+await asyncTest("シナリオ1 (アーティスト経由): アーティスト一覧 → アーティスト詳細 → アルバム詳細 → プレイヤー から1段ずつ逆順に戻り、各段階の navStack が正確であること", async () => {
   routerMod.clearNavStack();
   routerMod.go("library", { tab: "artists" });
   await new Promise((r) => setTimeout(r, 10));
   strictEqual(location.hash, "#/library?tab=artists");
+  deepStrictEqual(routerMod.getNavStack().map((e) => e.hash), ["#/library?tab=artists"]);
 
   routerMod.go("artist", { name: "YOASOBI" });
   await new Promise((r) => setTimeout(r, 10));
   strictEqual(location.hash, "#/artist?name=YOASOBI");
+  deepStrictEqual(routerMod.getNavStack().map((e) => e.hash), [
+    "#/library?tab=artists",
+    "#/artist?name=YOASOBI",
+  ]);
 
   routerMod.go("album", { key: "the-book___yoasobi" });
   await new Promise((r) => setTimeout(r, 10));
   strictEqual(location.hash, "#/album?key=the-book___yoasobi");
+  deepStrictEqual(routerMod.getNavStack().map((e) => e.hash), [
+    "#/library?tab=artists",
+    "#/artist?name=YOASOBI",
+    "#/album?key=the-book___yoasobi",
+  ]);
 
   routerMod.go("player");
   await new Promise((r) => setTimeout(r, 10));
   strictEqual(location.hash, "#/player");
+  deepStrictEqual(routerMod.getNavStack().map((e) => e.hash), [
+    "#/library?tab=artists",
+    "#/artist?name=YOASOBI",
+    "#/album?key=the-book___yoasobi",
+    "#/player",
+  ]);
 
   // 1回目の戻る: プレイヤー → アルバム詳細
   routerMod.back("library");
   await new Promise((r) => setTimeout(r, 10));
   strictEqual(location.hash, "#/album?key=the-book___yoasobi", "1st back from player must return to album detail");
+  deepStrictEqual(routerMod.getNavStack().map((e) => e.hash), [
+    "#/library?tab=artists",
+    "#/artist?name=YOASOBI",
+    "#/album?key=the-book___yoasobi",
+  ]);
 
   // 2回目の戻る: アルバム詳細 → アーティスト詳細
   routerMod.back("library", { tab: "albums" });
   await new Promise((r) => setTimeout(r, 10));
   strictEqual(location.hash, "#/artist?name=YOASOBI", "2nd back from album must return to artist detail");
+  deepStrictEqual(routerMod.getNavStack().map((e) => e.hash), [
+    "#/library?tab=artists",
+    "#/artist?name=YOASOBI",
+  ]);
 
   // 3回目の戻る: アーティスト詳細 → アーティスト一覧
   routerMod.back("library", { tab: "artists" });
   await new Promise((r) => setTimeout(r, 10));
   strictEqual(location.hash, "#/library?tab=artists", "3rd back from artist must return to artists tab");
+  deepStrictEqual(routerMod.getNavStack().map((e) => e.hash), [
+    "#/library?tab=artists",
+  ]);
 });
 
 await asyncTest("シナリオ2 (アルバム一覧経由): アルバム一覧 → アルバム詳細 → プレイヤー から アルバム詳細 → アルバム一覧 へ戻ること", async () => {
@@ -446,14 +581,26 @@ await asyncTest("シナリオ2 (アルバム一覧経由): アルバム一覧 �
   routerMod.go("player");
   await new Promise((r) => setTimeout(r, 10));
   strictEqual(location.hash, "#/player");
+  deepStrictEqual(routerMod.getNavStack().map((e) => e.hash), [
+    "#/library?tab=albums",
+    "#/album?key=album-xyz",
+    "#/player",
+  ]);
 
   routerMod.back("library");
   await new Promise((r) => setTimeout(r, 10));
   strictEqual(location.hash, "#/album?key=album-xyz", "Player back must return to album-xyz");
+  deepStrictEqual(routerMod.getNavStack().map((e) => e.hash), [
+    "#/library?tab=albums",
+    "#/album?key=album-xyz",
+  ]);
 
   routerMod.back("library", { tab: "albums" });
   await new Promise((r) => setTimeout(r, 10));
   strictEqual(location.hash, "#/library?tab=albums", "Album back must return to albums list");
+  deepStrictEqual(routerMod.getNavStack().map((e) => e.hash), [
+    "#/library?tab=albums",
+  ]);
 });
 
 await asyncTest("シナリオ3 (プレイリスト経由): プレイリスト一覧 → プレイリスト詳細 → プレイヤー から プレイリスト詳細 → プレイリスト一覧 へ戻ること", async () => {
@@ -466,6 +613,11 @@ await asyncTest("シナリオ3 (プレイリスト経由): プレイリスト一
 
   routerMod.go("player");
   await new Promise((r) => setTimeout(r, 10));
+  deepStrictEqual(routerMod.getNavStack().map((e) => e.hash), [
+    "#/library?tab=playlists",
+    "#/playlist?id=pl-fav-001",
+    "#/player",
+  ]);
 
   routerMod.back("library");
   await new Promise((r) => setTimeout(r, 10));
@@ -476,57 +628,75 @@ await asyncTest("シナリオ3 (プレイリスト経由): プレイリスト一
   strictEqual(location.hash, "#/library?tab=playlists", "Playlist back must return to playlists tab");
 });
 
-await asyncTest("シナリオ4 (検索経由): 曲一覧(検索・ソート・スクロール状態) → プレイヤー から戻った際、検索語・ソート・スクロール位置が維持されること", async () => {
+await asyncTest("シナリオ4 (検索経由): 検索状態(query, sort, filter, scrollTop) → album-detail → player → back → album-detail → back → 同じ検索状態が維持されること", async () => {
   routerMod.clearNavStack();
   routerMod.go("library", { tab: "tracks" });
   await new Promise((r) => setTimeout(r, 10));
 
-  // 検索語・ソート・スクロール位置を記録
+  // 検索語・ソート・フィルタ・スクロール位置を記録
   mockRoot.scrollTop = 480;
   routerMod.updateCurrentState({
     activeTab: "tracks",
     searchQuery: "米津玄師",
     sortBy: "artist",
     sortDir: "desc",
+    filterText: "米津玄師",
   });
+
+  routerMod.go("album", { key: "lost-corner___kenshi" });
+  await new Promise((r) => setTimeout(r, 10));
 
   routerMod.go("player");
   await new Promise((r) => setTimeout(r, 10));
   strictEqual(location.hash, "#/player");
+  deepStrictEqual(routerMod.getNavStack().map((e) => e.hash), [
+    "#/library?tab=tracks",
+    "#/album?key=lost-corner___kenshi",
+    "#/player",
+  ]);
 
+  // 1回目の back -> album-detail
+  routerMod.back("library");
+  await new Promise((r) => setTimeout(r, 10));
+  strictEqual(location.hash, "#/album?key=lost-corner___kenshi");
+
+  // 2回目の back -> 検索状態のある library(tracks)
   routerMod.back("library");
   await new Promise((r) => setTimeout(r, 10));
   strictEqual(location.hash, "#/library?tab=tracks");
 
   const stack = routerMod.getNavStack();
-  const top = stack[stack.length - 1];
+  strictEqual(stack.length, 1);
+  const top = stack[0];
   strictEqual(top.state.searchQuery, "米津玄師", "Search query must be preserved");
   strictEqual(top.state.sortBy, "artist", "Sort field must be preserved");
   strictEqual(top.state.sortDir, "desc", "Sort direction must be preserved");
   strictEqual(top.scrollTop, 480, "Scroll position must be preserved");
 });
 
-await asyncTest("シナリオ5 & 6 (ミニプレイヤー経由 & プレイヤー内で次曲へ移動後): 過去に一度プレイヤーを開いた後でも、アーティスト→アルバム→ミニプレイヤー展開→次曲移動→閉じる で直前のアルバム詳細へ戻ること", async () => {
+await asyncTest("シナリオ5 & 6 (同一player再表示・ミニプレイヤー経由・次曲切替): 古いplayer重複だけを整理し、中間のartist/albumを削除しないこと", async () => {
   routerMod.clearNavStack();
-  // 最初に一度プレイヤーを開いて閉じた履歴を作る（旧バグの再現条件）
+  // album-detail -> player -> album-detail (go前進で戻ったケースも含む) -> player の検証
   routerMod.go("library", { tab: "artists" });
   await new Promise((r) => setTimeout(r, 10));
-  routerMod.go("player");
-  await new Promise((r) => setTimeout(r, 10));
-  routerMod.back("library");
-  await new Promise((r) => setTimeout(r, 10));
-  strictEqual(location.hash, "#/library?tab=artists");
-
-  // その後 アーティスト詳細 → アルバム詳細 へ進む
   routerMod.go("artist", { name: "Aimer" });
   await new Promise((r) => setTimeout(r, 10));
   routerMod.go("album", { key: "daydream___aimer" });
   await new Promise((r) => setTimeout(r, 10));
-
-  // ミニプレイヤーをタップしてフルプレイヤーを開く
   routerMod.go("player");
   await new Promise((r) => setTimeout(r, 10));
-  strictEqual(location.hash, "#/player");
+
+  // 仮に back() ではなく go("album") で album-detail に遷移した後、再度 go("player") した場合でも、
+  // 古い player だけが整理され、中間の artist / album は保持されること
+  routerMod.go("album", { key: "daydream___aimer" });
+  await new Promise((r) => setTimeout(r, 10));
+  routerMod.go("player");
+  await new Promise((r) => setTimeout(r, 10));
+
+  const stackHashes = routerMod.getNavStack().map((e) => e.hash);
+  strictEqual(stackHashes.filter((h) => h === "#/player").length, 1, "Only one player entry must exist at top of stack");
+  ok(stackHashes.includes("#/artist?name=Aimer"), "Intermediate artist view must not be truncated");
+  strictEqual(stackHashes[stackHashes.length - 2], "#/album?key=daydream___aimer", "Immediate predecessor must be album-detail");
 
   // プレイヤーを開いたまま次の曲（別アルバムの曲など）へ切り替わった状態をシミュレート
   stateMod.appState.set({
@@ -543,7 +713,7 @@ await asyncTest("シナリオ5 & 6 (ミニプレイヤー経由 & プレイヤ�
   );
 });
 
-await asyncTest("シナリオ7 (ブラウザ/OSの戻る操作): history.back() 1操作につき1段だけ戻ること", async () => {
+await asyncTest("シナリオ7 (ブラウザ/OSの戻る操作 & ルートからの安全なフォールバック): 1操作で1段だけ戻り、ルートで戻っても安全に処理されること", async () => {
   routerMod.clearNavStack();
   routerMod.go("library", { tab: "artists" });
   await new Promise((r) => setTimeout(r, 10));
@@ -558,11 +728,25 @@ await asyncTest("シナリオ7 (ブラウザ/OSの戻る操作): history.back() 
   history.back();
   await new Promise((r) => setTimeout(r, 10));
   strictEqual(location.hash, "#/album?key=ceremony___king_gnu", "1st browser back must return to album");
+  strictEqual(routerMod.getNavStack().length, 3);
 
   // OS/ブラウザの2回目の戻る
   history.back();
   await new Promise((r) => setTimeout(r, 10));
   strictEqual(location.hash, "#/artist?name=King+Gnu", "2nd browser back must return to artist");
+  strictEqual(routerMod.getNavStack().length, 2);
+
+  // OS/ブラウザの3回目の戻る -> ルート (#/library?tab=artists)
+  history.back();
+  await new Promise((r) => setTimeout(r, 10));
+  strictEqual(location.hash, "#/library?tab=artists", "3rd browser back must return to library root");
+  strictEqual(routerMod.getNavStack().length, 1);
+
+  // ルートでさらに back() を呼んでもクラッシュせずフォールバックへ安全に留まること
+  routerMod.back("library", { tab: "artists" });
+  await new Promise((r) => setTimeout(r, 10));
+  strictEqual(location.hash, "#/library?tab=artists");
+  strictEqual(routerMod.getNavStack().length, 1);
 });
 
 console.log("\n=== 3. アートワーク画像変更・検証・診断・永続化テスト ===");
@@ -573,6 +757,18 @@ const VALID_PNG_BYTES = new Uint8Array([
   0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
   0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
   0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
+]);
+
+// JPEG (FF D8 FF E0)
+const VALID_JPEG_BYTES = new Uint8Array([
+  0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46,
+  0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+]);
+
+// WebP (RIFF .... WEBP)
+const VALID_WEBP_BYTES = new Uint8Array([
+  0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00,
+  0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x20,
 ]);
 
 // HEIC (ftypheic) の先頭バイト列
@@ -720,6 +916,72 @@ await asyncTest("非対応形式 (HEIC/HEIF)、破損画像、20MB超過ファ�
       return true;
     }
   );
+
+  // 4) JPEG, WebP, MIMEが空のiPhone画像 (マジックバイトがJPEG), 拡張子と実データが異なる画像 (.jpg だが中身が PNG / HEIC)
+  const jpegBlob = new Blob([VALID_JPEG_BYTES], { type: "image/jpeg" });
+  const decJpeg = await utilMod.validateAndDecodeArtworkBlob(jpegBlob);
+  strictEqual(decJpeg.fileType, "image/jpeg");
+
+  const webpBlob = new Blob([VALID_WEBP_BYTES], { type: "image/webp" });
+  const decWebp = await utilMod.validateAndDecodeArtworkBlob(webpBlob);
+  strictEqual(decWebp.fileType, "image/webp");
+
+  // MIMEが空 ("") の iPhone 画像でもマジックバイトで JPEG と正しく判定されること
+  const emptyMimeIphoneImg = new Blob([VALID_JPEG_BYTES], { type: "" });
+  const decEmptyMime = await utilMod.validateAndDecodeArtworkBlob(emptyMimeIphoneImg);
+  strictEqual(decEmptyMime.fileType, "image/jpeg", "Empty MIME iPhone image must be detected via magic bytes");
+
+  // 拡張子が .jpg に偽装されていても中身が HEIC ならマジックバイトで検出して拒否すること
+  const disguisedHeic = new Blob([HEIC_BYTES], { type: "image/jpeg" });
+  disguisedHeic.name = "renamed.jpg";
+  await rejects(
+    async () => {
+      await utilMod.validateAndDecodeArtworkBlob(disguisedHeic);
+    },
+    (err) => {
+      strictEqual(err.name, "UnsupportedImageFormatError");
+      return true;
+    }
+  );
+});
+
+await asyncTest("Object URL とメモリ解放監査: 同じIDはキャッシュ再利用し、releaseArtwork で古いURLのみ解放、DataURL保存時はObject URLが増え続けないこと", async () => {
+  artworkCacheMod.releaseAllArtwork();
+  const initialCount = activeObjectUrls.size;
+
+  const trackWithBlob = {
+    id: "trk-obj-url-1",
+    artworkBlob: new Blob([VALID_PNG_BYTES], { type: "image/png" }),
+  };
+
+  const url1 = artworkCacheMod.getArtworkUrl(trackWithBlob);
+  const url2 = artworkCacheMod.getArtworkUrl(trackWithBlob);
+  strictEqual(url1, url2, "Same track ID must reuse cached Object URL");
+  strictEqual(activeObjectUrls.size, initialCount + 1, "Only 1 Object URL created");
+
+  // 別トラックの Object URL は維持したまま、指定トラックの古い URL だけ解放する
+  const otherTrack = {
+    id: "trk-obj-url-2",
+    artworkBlob: new Blob([VALID_JPEG_BYTES], { type: "image/jpeg" }),
+  };
+  const otherUrl = artworkCacheMod.getArtworkUrl(otherTrack);
+  strictEqual(activeObjectUrls.size, initialCount + 2);
+
+  // trk-obj-url-1 の画像を Data URL に更新し releaseArtwork を呼ぶ
+  artworkCacheMod.releaseArtwork("trk-obj-url-1");
+  strictEqual(activeObjectUrls.has(url1), false, "Old Object URL for updated track must be revoked");
+  strictEqual(activeObjectUrls.has(otherUrl), true, "Other track Object URL must NOT be revoked");
+
+  // 画像変更を繰り返しても Data URL 方式のため Object URL が増え続けないこと
+  for (let i = 0; i < 5; i++) {
+    artworkCacheMod.releaseArtwork("trk-obj-url-1");
+    trackWithBlob.artworkBlob = null;
+    trackWithBlob.artworkDataUrl = `data:image/jpeg;base64,ITER_${i}`;
+    const u = artworkCacheMod.getArtworkUrl(trackWithBlob);
+    strictEqual(u, `data:image/jpeg;base64,ITER_${i}`);
+  }
+  strictEqual(activeObjectUrls.size, initialCount + 1, "Repeated artwork changes must not leak Object URLs");
+  artworkCacheMod.releaseAllArtwork();
 });
 
 await asyncTest("同期処理 (recordLibraryModified) で dirty 状態と最終変更時刻が登録され、アートワーク変更が端末間同期対象になること", async () => {

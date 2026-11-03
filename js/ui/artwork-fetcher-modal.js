@@ -13,6 +13,7 @@ import { validateAndDecodeArtworkBlob } from "../metadata/util.js";
 import { bulkUpdateTracks } from "../store/library-db.js";
 import { releaseArtwork, recordArtworkDiagnostics } from "./artwork-cache.js";
 import { recordLibraryModified } from "../store/sync-service.js";
+import { appState } from "../state.js";
 
 /**
  * ジャケット画像単独取得・変更モーダルを開く（端末内の画像選択 + オンライン検索の両対応）
@@ -172,6 +173,11 @@ export async function openArtworkFetcherModal({ tracks = [], albumName = "", art
             for (const t of targetTracks) {
               Object.assign(t, patch);
               releaseArtwork(t.id);
+            }
+            const cur = appState.get().currentTrack;
+            if (cur && targetTracks.some((t) => t.id === cur.id)) {
+              releaseArtwork(cur.id);
+              appState.set({ currentTrack: { ...cur, ...patch } });
             }
             recordLibraryModified();
             recordArtworkDiagnostics({ syncQueued: true });

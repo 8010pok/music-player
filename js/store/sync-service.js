@@ -422,31 +422,62 @@ async function doImportLibraryData(data, { deleteMissing = false } = {}) {
       }
 
       // artworkBlob は既存のものがあれば維持し、artworkDataUrl はタイムスタンプと明示削除を考慮してマージ
-      if (existing.artworkBlob instanceof Blob && !incoming._noEmbeddedArt) {
+      const incomingArtTime = incoming.artworkUpdatedAt || 0;
+      const existingArtTime = existing.artworkUpdatedAt || 0;
+      let isIncomingArtNewer = false;
+      if (incomingArtTime > 0 || existingArtTime > 0) {
+        if (incomingArtTime > existingArtTime) {
+          isIncomingArtNewer = true;
+        } else if (incomingArtTime === existingArtTime) {
+          isIncomingArtNewer = isIncomingNewer;
+        } else {
+          isIncomingArtNewer = false;
+        }
+      } else {
+        isIncomingArtNewer = isIncomingNewer;
+      }
+
+      if (existing.artworkBlob instanceof Blob && !(incoming._noEmbeddedArt && isIncomingArtNewer)) {
         merged.artworkBlob = existing.artworkBlob;
-      } else if (incoming._noEmbeddedArt && isIncomingNewer) {
+      } else if (incoming._noEmbeddedArt && isIncomingArtNewer) {
         merged.artworkBlob = null;
       }
-      const isIncomingArtNewer =
-        (incoming.artworkUpdatedAt || 0) > (existing.artworkUpdatedAt || 0) ||
-        ((incoming.artworkUpdatedAt || 0) === (existing.artworkUpdatedAt || 0) && isIncomingNewer);
 
       if (incoming._noEmbeddedArt && !incomingArt && isIncomingArtNewer) {
+        // 送信元で明示的に画像が削除されており、かつ画像更新時刻が最新の場合のみ削除を反映
         merged.artworkDataUrl = null;
         merged._noEmbeddedArt = true;
-        merged.artworkUpdatedAt = Math.max(existing.artworkUpdatedAt || 0, incoming.artworkUpdatedAt || 0);
+        merged.artworkUpdatedAt = Math.max(existingArtTime, incomingArtTime, incoming.updatedAt || 0);
       } else if (incomingArt && isValidArtworkDataUrl(incomingArt)) {
-        if (!existing.artworkDataUrl || !isValidArtworkDataUrl(existing.artworkDataUrl) || isIncomingArtNewer) {
+        if (!existing.artworkDataUrl || !isValidArtworkDataUrl(existing.artworkDataUrl)) {
+          // ローカルに有効な画像が無い場合: ローカル側がより新しい明示削除でない限り受信画像を採用
+          if (existing._noEmbeddedArt && existingArtTime > 0 && !isIncomingArtNewer) {
+            merged.artworkDataUrl = null;
+            merged._noEmbeddedArt = true;
+            merged.artworkUpdatedAt = existingArtTime;
+          } else {
+            merged.artworkDataUrl = incomingArt;
+            merged._noEmbeddedArt = false;
+            if (incomingArtTime) {
+              merged.artworkUpdatedAt = Math.max(existingArtTime, incomingArtTime);
+            }
+          }
+        } else if (isIncomingArtNewer) {
           merged.artworkDataUrl = incomingArt;
           merged._noEmbeddedArt = false;
-          if (incoming.artworkUpdatedAt) {
-            merged.artworkUpdatedAt = Math.max(existing.artworkUpdatedAt || 0, incoming.artworkUpdatedAt || 0);
+          if (incomingArtTime) {
+            merged.artworkUpdatedAt = Math.max(existingArtTime, incomingArtTime);
           }
         } else {
           merged.artworkDataUrl = existing.artworkDataUrl;
+          merged._noEmbeddedArt = false;
+          if (existingArtTime) merged.artworkUpdatedAt = existingArtTime;
         }
       } else if (existing.artworkDataUrl && isValidArtworkDataUrl(existing.artworkDataUrl)) {
+        // 受信データに画像が無い（画像なしまたは欠損）が明示削除ではない場合は、ローカルの有効な画像を保持優先
         merged.artworkDataUrl = existing.artworkDataUrl;
+        merged._noEmbeddedArt = false;
+        if (existingArtTime) merged.artworkUpdatedAt = existingArtTime;
       }
       delete merged.artworkId;
 

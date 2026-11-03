@@ -531,6 +531,9 @@ export function editTrackMetadata(track, onUpdated) {
           },
         },
       ],
+    }).then(() => {
+      if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+      resolve(null);
     });
   });
 }
@@ -1047,6 +1050,9 @@ export function editAlbumMetadata(album, onUpdated) {
           },
         },
       ],
+    }).then(() => {
+      if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+      resolve(null);
     });
   });
 }
@@ -1574,6 +1580,9 @@ export function editSelectedTracksMetadata(tracks, onUpdated) {
           },
         },
       ],
+    }).then(() => {
+      if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
+      resolve(null);
     });
   });
 }

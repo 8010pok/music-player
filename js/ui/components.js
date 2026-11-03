@@ -159,8 +159,9 @@ export function openModal({ title, body, bodyHtml, actions, buttons } = {}) {
         const primary = modal.querySelector(".modal-actions .btn.primary");
         if (primary) { e.preventDefault(); primary.click(); }
       } else if (e.key === "Escape") {
-        const firstBtn = modal.querySelector(".modal-actions .btn");
-        if (firstBtn) { e.preventDefault(); firstBtn.click(); }
+        const cancelBtn = modal.querySelector(".modal-actions .btn:not(.danger):not(.primary)") || modal.querySelector(".modal-actions .btn:not(.danger)");
+        if (cancelBtn) { e.preventDefault(); cancelBtn.click(); }
+        else { close(); }
       }
     };
 
@@ -263,9 +264,9 @@ export function closeActiveModalSync() {
 export function dismissActiveModal() {
   const root = document.getElementById("modal-root");
   if (!root || root.hidden) return;
-  const firstBtn = root.querySelector(".modal-actions .btn");
-  if (firstBtn) {
-    firstBtn.click();
+  const cancelBtn = root.querySelector(".modal-actions .btn:not(.danger):not(.primary)") || root.querySelector(".modal-actions .btn:not(.danger)");
+  if (cancelBtn) {
+    cancelBtn.click();
   } else {
     // 共通モーダル以外(独自構造のモーダル)が開いている場合のフォールバック: 直接閉じる。
     closeActiveModalSync();
@@ -287,6 +288,8 @@ export function confirm(message, { title = "確認", okLabel = "OK", cancelLabel
         { label: cancelLabel, onClick: () => { resolve(false); } },
         { label: okLabel, primary: !danger, danger, onClick: () => { resolve(true); } },
       ],
+    }).then(() => {
+      resolve(false);
     });
   });
 }
@@ -331,6 +334,8 @@ export function promptForm(title, fields, { okLabel = "OK", cancelLabel = "キ�
           resolve(out);
         }},
       ],
+    }).then(() => {
+      resolve(null);
     });
     // 最初の入力にフォーカス
     setTimeout(() => {

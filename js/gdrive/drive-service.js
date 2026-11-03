@@ -563,30 +563,41 @@ export function requestGisToken(clientId) {
                 return;
               }
               if (resp.access_token) {
-                const expiresIn = resp.expires_in ? parseInt(resp.expires_in, 10) : 3600;
-                // ユーザー情報取得を試行し、選択されたアカウントのメールアドレス/表示名を確実に記録
-                const test = await testConnection(resp.access_token);
-                const actualEmail = (test.ok && test.user && test.user.emailAddress) ? test.user.emailAddress.trim() : "";
-                const actualName = (test.ok && test.user && test.user.displayName) ? test.user.displayName.trim() : "";
-                const primaryIdentity = actualEmail || actualName || "";
-                // 旧アカウントの情報が残らないよう明示更新
-                setPublic({
-                  gdriveClientId: resolvedClientId,
-                  gdriveUserEmail: primaryIdentity,
-                  gdriveUserDisplayName: actualName,
-                });
-                await setDriveToken(resp.access_token, {
-                  expiresIn,
-                  email: primaryIdentity,
-                  displayName: actualName,
-                });
-                resolve(resp.access_token);
+                try {
+                  const expiresIn = resp.expires_in ? parseInt(resp.expires_in, 10) : 3600;
+                  // ユーザー情報取得を試行し、選択されたアカウントのメールアドレス/表示名を確実に記録
+                  const test = await testConnection(resp.access_token);
+                  const actualEmail = (test.ok && test.user && test.user.emailAddress) ? test.user.emailAddress.trim() : "";
+                  const actualName = (test.ok && test.user && test.user.displayName) ? test.user.displayName.trim() : "";
+                  const primaryIdentity = actualEmail || actualName || "";
+                  // 旧アカウントの情報が残らないよう明示更新
+                  setPublic({
+                    gdriveClientId: resolvedClientId,
+                    gdriveUserEmail: primaryIdentity,
+                    gdriveUserDisplayName: actualName,
+                  });
+                  await setDriveToken(resp.access_token, {
+                    expiresIn,
+                    email: primaryIdentity,
+                    displayName: actualName,
+                  });
+                  resolve(resp.access_token);
+                } catch (cbErr) {
+                  reject(cbErr);
+                }
               } else {
                 reject(new Error("アクセストークンが取得できませんでした"));
               }
             },
             error_callback: (err) => {
-              reject(new Error(err && err.message ? err.message : "認証ウィンドウが閉じられたか失敗しました"));
+              const errType = err && err.type ? String(err.type) : "";
+              if (errType === "popup_closed") {
+                reject(new Error("認証ウィンドウが閉じられました（キャンセル）"));
+              } else if (errType === "popup_failed_to_open") {
+                reject(new Error("認証ポップアップを開けませんでした。ブラウザのポップアップブロック設定を確認してください"));
+              } else {
+                reject(new Error((err && (err.message || err.type)) ? String(err.message || err.type) : "認証ウィンドウが閉じられたか失敗しました"));
+              }
             },
           });
           client.requestAccessToken({ prompt: "select_account" });
@@ -608,7 +619,6 @@ export async function switchDriveAccount(clientId) {
   if (!targetClientId) {
     throw new Error("Google OAuth Client ID が未設定です。「接続 / 追加」から Client ID を設定してください。");
   }
-  await clearDriveStreamSession().catch(() => {});
   return requestGisToken(targetClientId);
 }
 
