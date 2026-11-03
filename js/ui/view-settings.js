@@ -25,7 +25,7 @@ import { wipeAll as wipeStats } from "../lastfm/stats-storage.js";
 import { cancel as cancelStatsService, reset as resetStatsService, startIfNeeded as startStatsIfNeeded } from "../lastfm/stats-service.js";
 import { toast, confirm, promptForm, escapeHtml, escapeAttr } from "./components.js";
 import { releaseAllArtwork } from "./artwork-cache.js";
-import { isDriveConnected, disconnectDrive, openDriveImportModal } from "../gdrive/drive-service.js";
+import { isDriveConnected, disconnectDrive, openDriveImportModal, getDriveStreamSessionStatus } from "../gdrive/drive-service.js";
 import { openYouTubeDownloadModal } from "./youtube-modal.js";
 import { shareOrDownloadLibrary, importLibraryData, exportLibraryToDrive, importLibraryFromDrive, getDriveSyncFileInfo } from "../store/sync-service.js";
 import { findDuplicateGroups, cleanDuplicateTracks } from "../store/dedup-service.js";
@@ -53,6 +53,8 @@ import {
   getMainAudioElement,
   getStreamAudioElement,
   stopPlayback,
+  getLastPlaybackDiagnostics,
+  showDiagnosticsModal,
 } from "../player/audio-engine.js";
 
 let pendingToken = null;
@@ -556,18 +558,53 @@ export async function mount(root) {
     const enabled = refs.gdriveProxyStreamChk.checked;
     setPublic({ driveProxyStreamEnabled: enabled });
     if (enabled) {
+      toast("⚡ Drive 高速ストリーミング中継 (Beta) を有効にしました。セッションを確立しています…", "info", 2000);
       try {
         const { ensureDriveStreamSession } = await import("../gdrive/drive-service.js");
-        ensureDriveStreamSession().catch(() => {});
-      } catch {}
-      toast("⚡ Drive 高速ストリーミング中継 (Beta) を有効にしました", "ok");
+        const ok = await ensureDriveStreamSession(null, { force: true, timeoutMs: 3500 });
+        if (ok) {
+          toast("⚡ 中継セッションを確立しました (即時再生可能)", "ok", 2500);
+        } else {
+          toast("セッション確立を保留しました (再生時に再試行します)", "info", 2500);
+        }
+      } catch (err) {
+        console.warn("[settings] セッション事前確立失敗:", err);
+      }
+      remount();
     } else {
       try {
         const { clearDriveStreamSession } = await import("../gdrive/drive-service.js");
         clearDriveStreamSession().catch(() => {});
       } catch {}
       toast("Drive 高速ストリーミング中継を無効にしました", "ok");
+      remount();
     }
+  });
+
+  refs.btnGdriveProxyReconnect?.addEventListener("click", async () => {
+    toast("中継セッションを再接続しています…", "info", 2000);
+    try {
+      const { ensureDriveStreamSession } = await import("../gdrive/drive-service.js");
+      const ok = await ensureDriveStreamSession(null, { force: true, timeoutMs: 4000 });
+      if (ok) {
+        toast("中継セッションを確立しました 🟢", "ok", 2500);
+      } else {
+        toast("セッション確立に失敗しました (Google Drive と再接続してください) 🔴", "err", 3500);
+      }
+      remount();
+    } catch (e) {
+      toast("再接続エラー: " + (e?.message || e), "err", 3000);
+      remount();
+    }
+  });
+
+  refs.btnCopyPlaybackDiag?.addEventListener("click", () => {
+    const diag = getLastPlaybackDiagnostics();
+    if (!diag) {
+      toast("まだ再生診断ログがありません。曲を再生した後に再度お試しください。", "info", 3000);
+      return;
+    }
+    showDiagnosticsModal(diag);
   });
 
   refs.btnGdriveClearCache?.addEventListener("click", async () => {
@@ -948,6 +985,36 @@ function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices, dr
           </div>
           <label class="switch"><input type="checkbox" id="gdrive-proxy-stream-chk" ${pub.driveProxyStreamEnabled === true ? "checked" : ""} /><span class="slider"></span></label>
         </div>
+        ${pub.driveProxyStreamEnabled ? `
+        <div class="settings-row" id="gdrive-proxy-session-row" style="background:rgba(255,255,255,0.03); border-radius:8px; padding:10px 12px; margin-top:-4px;">
+          <div style="flex:1;">
+            <div class="label" style="font-size:12px;">中継セッション状態</div>
+            <div class="help" id="gdrive-proxy-session-status-text" style="font-size:11px; margin-top:2px;">
+              ${(() => {
+                const s = typeof getDriveStreamSessionStatus === "function" ? getDriveStreamSessionStatus() : "unknown";
+                if (s === "ready") return "🟢 準備完了 (Cookie セッション有効)";
+                if (s === "expired") return "🟡 期限切れ (タップ時または再接続で自動更新)";
+                if (s === "no_token") return "⚪ Google Drive 未連携";
+                if (s === "connecting") return "🔄 接続中…";
+                return "⚪ 未確立 (タップ時に自動確立)";
+              })()}
+            </div>
+          </div>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <button class="btn" id="btn-gdrive-proxy-reconnect" style="font-size:11px; padding:4px 8px; white-space:nowrap;">🔄 再接続</button>
+            <button class="btn" id="btn-copy-playback-diag" style="font-size:11px; padding:4px 8px; white-space:nowrap;">📋 診断コピー</button>
+          </div>
+        </div>
+        ` : `
+        <div class="settings-row" style="margin-top:-6px; opacity:0.85;">
+          <div style="flex:1;">
+            <div class="help" style="font-size:11px;">再生トラブル時の調査用データを出力できます</div>
+          </div>
+          <div>
+            <button class="btn" id="btn-copy-playback-diag" style="font-size:11px; padding:4px 8px; white-space:nowrap;">📋 診断コピー</button>
+          </div>
+        </div>
+        `}
         <div class="settings-row">
           <div>
             <div class="label">Google Drive 音源キャッシュを消去</div>
@@ -1281,6 +1348,8 @@ function collect(root) {
     btnGdriveDisconnect: root.querySelector("#btn-gdrive-disconnect"),
     gdriveAutoCacheChk: root.querySelector("#gdrive-autocache-chk"),
     gdriveProxyStreamChk: root.querySelector("#gdrive-proxy-stream-chk"),
+    btnGdriveProxyReconnect: root.querySelector("#btn-gdrive-proxy-reconnect"),
+    btnCopyPlaybackDiag: root.querySelector("#btn-copy-playback-diag"),
     btnGdriveClearCache: root.querySelector("#btn-gdrive-clear-cache"),
     btnSettingsYouTube: root.querySelector("#btn-settings-youtube"),
     customInvidiousInput: root.querySelector("#custom-invidious-input"),

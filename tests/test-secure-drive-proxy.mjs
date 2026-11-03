@@ -338,7 +338,8 @@ async function run() {
   // --- 5. Google Drive Redirect (.googleusercontent.com) and Streaming Test ---
   await testAsync("drive-stream: Follows redirect to .googleusercontent.com and maintains 206 stream", async () => {
     let redirectCount = 0;
-    globalThis.fetch = async (url) => {
+    let redirectedHeaders = null;
+    globalThis.fetch = async (url, opts) => {
       redirectCount++;
       if (url.includes("googleapis.com")) {
         return new Response(null, {
@@ -348,6 +349,7 @@ async function run() {
           },
         });
       }
+      redirectedHeaders = opts?.headers;
       return new Response(new Uint8Array([0x66, 0x4c, 0x61, 0x43]), {
         status: 206,
         headers: {
@@ -361,12 +363,17 @@ async function run() {
 
     try {
       const req = new Request("https://example.com/api/drive-stream?fileId=1RedirectFile_12345&ext=flac", {
-        headers: { "Cookie": "drive_stream_token=ya29.valid_token_12345" },
+        headers: {
+          "Cookie": "drive_stream_token=ya29.valid_token_12345",
+          "Range": "bytes=0-100",
+        },
       });
       const res = await streamHandler(req);
       strictEqual(res.status, 206);
       strictEqual(res.headers.get("content-type"), "audio/flac");
       strictEqual(redirectCount, 2, "Must follow 302 redirect to googleusercontent.com");
+      strictEqual(redirectedHeaders?.["Authorization"], undefined, "Authorization header must be stripped on Google CDN redirect");
+      strictEqual(redirectedHeaders?.["Range"], "bytes=0-100", "Range header must be preserved on Google CDN redirect");
     } finally {
       globalThis.fetch = originalFetch;
     }

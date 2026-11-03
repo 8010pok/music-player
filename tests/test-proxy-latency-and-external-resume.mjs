@@ -138,6 +138,9 @@ test("generatePlaybackDiagnostics: 要件の全必須項目が含まれ、機密
     "networkState",
     "bufferedEnd",
     "displayMode",
+    "timeline",
+    "timelineRaw",
+    "sessionStatus",
   ];
   for (const key of requiredKeys) {
     ok(engineContent.includes(`${key}:`) || engineContent.includes(`${key},`), `Diagnostics must contain ${key}`);
@@ -151,6 +154,11 @@ test("drive-stream: リダイレクト先ホストとして .googleusercontent.c
   ok(streamContent.includes(".googleusercontent.com"), "Must allow googleusercontent.com redirect");
 });
 
+test("drive-stream: Google CDN リダイレクト時に Authorization ヘッダーが剥離されていること", () => {
+  const streamContent = fs.readFileSync(path.join(__dirname, "../api/drive-stream.js"), "utf-8");
+  ok(streamContent.includes("isCdnOrDifferentHost") || streamContent.includes("delete currentHeaders"), "Must strip Authorization header on CDN redirect");
+});
+
 test("drive-session: Cookie 属性が SameSite=Lax かつ Path=/api に限定され静的資産へ露出しないこと", () => {
   const sessionContent = fs.readFileSync(path.join(__dirname, "../api/drive-session.js"), "utf-8");
   ok(sessionContent.includes("SameSite=Lax"), "Must be SameSite=Lax for CoreMedia audio requests");
@@ -161,6 +169,28 @@ test("drive-stream: Cache-Control に private, no-store, no-transform が設定�
   const streamContent = fs.readFileSync(path.join(__dirname, "../api/drive-stream.js"), "utf-8");
   ok(streamContent.includes("private, no-store, no-transform"), "Must set no-transform");
   ok(streamContent.includes("Content-Disposition"), "Must set Content-Disposition inline");
+});
+
+console.log("=== 6. 30秒待機の根絶 (セッション事前確立 & Watchdog誤爆遮断) ===");
+
+test("drive-service: セッション事前確立とメモリキャッシュ関数が実装されていること", () => {
+  const driveServiceContent = fs.readFileSync(path.join(__dirname, "../js/gdrive/drive-service.js"), "utf-8");
+  ok(driveServiceContent.includes("getDriveStreamSessionStatus"), "Must export getDriveStreamSessionStatus");
+  ok(driveServiceContent.includes("isDriveStreamSessionReady"), "Must export isDriveStreamSessionReady");
+  ok(driveServiceContent.includes("_driveSessionPromise"), "Must deduplicate in-flight session requests");
+});
+
+test("audio-engine: 中継再生時の 10秒 watchdog が直接ストリームで再試行せず停止すること", () => {
+  const engineContent = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf-8");
+  ok(engineContent.includes("isProxyStream"), "Watchdog must check isProxyStream");
+  ok(engineContent.includes("中継ストリーミングが10秒以内に再生開始しなかったため停止します"), "Watchdog must not fallback to direct stream on proxy timeout");
+});
+
+test("view-settings: セッション状態表示と再接続・診断コピーボタンが提供されていること", () => {
+  const settingsContent = fs.readFileSync(path.join(__dirname, "../js/ui/view-settings.js"), "utf-8");
+  ok(settingsContent.includes("btn-gdrive-proxy-reconnect"), "Settings must have reconnect button");
+  ok(settingsContent.includes("btn-copy-playback-diag"), "Settings must have copy diagnostics button");
+  ok(settingsContent.includes("gdrive-proxy-session-status-text"), "Settings must display session status");
 });
 
 console.log(`\nLatency & External Resume テスト: ${passed} 件 PASSED ✓`);

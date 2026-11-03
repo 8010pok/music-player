@@ -219,12 +219,16 @@ export async function setDriveToken(token, { expiresIn = 3600, email } = {}) {
     patch.gdriveUserEmail = email;
   }
   setPublic(patch);
+  if (token && pub.driveProxyStreamEnabled) {
+    ensureDriveStreamSession(token).catch(() => {});
+  }
 }
 
 /**
  * トークンのみをクリア（Client ID やユーザーメールアドレスは保持し、ワンタップ再連携を可能にする）
  */
 export async function clearExpiredDriveToken() {
+  clearDriveStreamSession().catch(() => {});
   _cachedToken = null;
   setLocalStorageToken(null, 0);
   await setSecret({ gdriveAccessToken: "" });
@@ -781,39 +785,106 @@ export async function getDriveStreamUrl(fileId, tokenOverride = null) {
   return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(cleanId)}?alt=media&access_token=${encodeURIComponent(token)}`;
 }
 
+let _driveSessionToken = null;
+let _driveSessionExpiry = 0;
+let _driveSessionPromise = null;
+
+/**
+ * ストリーミングセッションの状態を取得
+ * @returns {"ready"|"expired"|"no_token"|"uninitialized"|"connecting"}
+ */
+export function getDriveStreamSessionStatus() {
+  if (_driveSessionPromise) return "connecting";
+  if (!_cachedToken && !getLocalStorageToken()?.token) return "no_token";
+  if (!_driveSessionToken || !_driveSessionExpiry) return "uninitialized";
+  if (Date.now() >= _driveSessionExpiry - 30000) return "expired";
+  return "ready";
+}
+
+/**
+ * ストリーミングセッションが即座に利用可能か確認
+ * @returns {boolean}
+ */
+export function isDriveStreamSessionReady() {
+  return getDriveStreamSessionStatus() === "ready";
+}
+
 /**
  * Vercel Edge 中継用のセキュアストリーミングセッションを初期化
  * - クライアントから POST /api/drive-session へトークンを送り、HttpOnly Cookie を設定
  * - audio.src の URL にトークンを含めない安全な設計
+ * - セッション確立済みの場合は 0ms で完了し、曲タップごとの遅延を根絶
+ * - in-flight Promise の共有により同一トークンへの多重 POST を完全排除
  * @param {string} [tokenOverride]
+ * @param {{ force?: boolean, timeoutMs?: number }} [opts]
  * @returns {Promise<boolean>}
  */
-export async function ensureDriveStreamSession(tokenOverride = null) {
+export async function ensureDriveStreamSession(tokenOverride = null, { force = false, timeoutMs = 3500 } = {}) {
   if (typeof fetch === "undefined") return false;
   const token = tokenOverride || (await getDriveToken());
-  if (!token) return false;
-  try {
-    const pub = getPublic() || {};
-    const remainingSec = pub.gdriveTokenExpiry
-      ? Math.max(60, Math.floor((pub.gdriveTokenExpiry - Date.now()) / 1000))
-      : 3600;
-
-    const res = await fetch("/api/drive-session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, expiresIn: remainingSec }),
-    });
-    return res.ok;
-  } catch (err) {
-    console.warn("[drive-service] drive-session 接続失敗:", err);
+  if (!token) {
+    _driveSessionToken = null;
+    _driveSessionExpiry = 0;
     return false;
   }
+
+  const now = Date.now();
+  // すでに同じトークンでセッション確立済みかつ有効期限内なら、POST せず即座に true を返す
+  if (!force && _driveSessionToken === token && now < _driveSessionExpiry - 60000) {
+    return true;
+  }
+
+  // 多重呼び出し時は既存の進行中 Promise を共有
+  if (_driveSessionPromise && !force) {
+    return _driveSessionPromise;
+  }
+
+  _driveSessionPromise = (async () => {
+    try {
+      const pub = getPublic() || {};
+      const remainingSec = pub.gdriveTokenExpiry
+        ? Math.max(60, Math.floor((pub.gdriveTokenExpiry - Date.now()) / 1000))
+        : 3600;
+
+      const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      let timer = null;
+      if (controller && timeoutMs > 0) {
+        timer = setTimeout(() => controller.abort(), timeoutMs);
+      }
+
+      const res = await fetch("/api/drive-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, expiresIn: remainingSec }),
+        signal: controller ? controller.signal : undefined,
+      });
+
+      if (timer) clearTimeout(timer);
+
+      if (res.ok) {
+        _driveSessionToken = token;
+        _driveSessionExpiry = Date.now() + remainingSec * 1000;
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.warn("[drive-service] drive-session 接続失敗:", err);
+      return false;
+    } finally {
+      _driveSessionPromise = null;
+    }
+  })();
+
+  return _driveSessionPromise;
 }
 
 /**
  * ストリーミングセッション Cookie を破棄
  */
 export async function clearDriveStreamSession() {
+  _driveSessionToken = null;
+  _driveSessionExpiry = 0;
+  _driveSessionPromise = null;
   if (typeof fetch === "undefined") return;
   try {
     await fetch("/api/drive-session", { method: "DELETE" });

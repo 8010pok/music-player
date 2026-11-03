@@ -59,6 +59,8 @@ import {
   resolveDriveFileId,
   isFlacMagic,
   checkBlobFlac,
+  getDriveStreamSessionStatus,
+  isDriveStreamSessionReady,
 } from "../gdrive/drive-service.js";
 
 /**
@@ -167,9 +169,10 @@ export function generatePlaybackDiagnostics(session, track, error) {
     : 0;
 
   const diag = {
-    appVersion: "1.11.7",
+    appVersion: "1.11.8",
     displayMode: isPwaStandalone() ? "standalone" : "browser",
     proxyEnabled: Boolean(getPublic()?.driveProxyStreamEnabled),
+    sessionStatus: getDriveStreamSessionStatus ? getDriveStreamSessionStatus() : "unknown",
     sourceType: session?.sourceType || (state.isDirectStream ? "direct_stream" : (state.currentObjectUrl ? "blob" : "none")),
     proxySessionCreated: Boolean(session?.proxySessionCreated),
     proxyRequestStarted: Boolean(session?.proxyRequestStarted),
@@ -198,6 +201,10 @@ export function generatePlaybackDiagnostics(session, track, error) {
     mediaErrorCode: curEl?.error?.code || (typeof error?.code === "number" ? error.code : null),
     canPlayType: curEl && typeof curEl.canPlayType === "function" ? curEl.canPlayType("audio/flac") : null,
     sessionId: session?.id ? session.id.slice(-4) : "",
+    timeline: (session?.timeline && session.timeline.length > 0)
+      ? session.timeline.map((item) => `+${item.ms}ms: ${item.event}${item.detail ? ` (${item.detail})` : ""}`)
+      : [],
+    timelineRaw: session?.timeline || [],
   };
   lastPlaybackDiagnostics = diag;
   if (typeof window !== "undefined") {
@@ -460,6 +467,8 @@ export class PlaybackSession {
     this.silenceSampleInterval = null;
     this.silenceSamples = [];
     this.hasRecoveredSilence = false;
+    this.t0 = (typeof performance !== "undefined" && typeof performance.now === "function") ? performance.now() : Date.now();
+    this.timeline = [{ event: "session_created", ms: 0 }];
     this.nearEndCheckPos = null;
     this.nearEndCheckAt = null;
     this.objectUrl = null;
@@ -830,8 +839,14 @@ function logPlaybackEvent(event, { targetEl = activeAudioEl, track = null, attem
 }
 
 function logPerfMark(trackId, markName, startTime) {
+  if (activePlaybackSession && Array.isArray(activePlaybackSession.timeline)) {
+    const t0 = startTime || activePlaybackSession.t0;
+    const now = (typeof performance !== "undefined" && typeof performance.now === "function") ? performance.now() : Date.now();
+    const ms = Math.max(0, Math.round(now - t0));
+    activePlaybackSession.timeline.push({ event: markName, ms });
+  }
   if (!isPerfDebugEnabled()) return;
-  const elapsed = (performance.now() - startTime).toFixed(1);
+  const elapsed = startTime ? (performance.now() - startTime).toFixed(1) : "0.0";
   console.log(`[AudioPerf] [${trackId}] ${markName}: +${elapsed}ms`);
 }
 
@@ -1162,6 +1177,7 @@ export async function attemptDriveFlacBlobFallback(session, track, myAttemptId, 
   // ★ 10秒ウォッチドッグタイマーを直ちに完全解除（FLACの全量取得中にタイムアウトで殺されないようにする）
   clearPlayingWatchdog();
 
+  logPerfMark(track?.id, "blob_fallback_start", session.t0);
   console.warn("[audio-engine] 未キャッシュDrive FLACのダイレクトストリーミングが失敗したため、Blobフォールバックを実行します:", track?.id, triggerError);
 
   session.blobFallbackPromise = (async () => {
@@ -1212,6 +1228,7 @@ export async function attemptDriveFlacBlobFallback(session, track, myAttemptId, 
 
       const fetchElapsedSec = (((typeof performance !== "undefined" && performance.now ? performance.now() : Date.now()) - fetchStart) / 1000).toFixed(1);
       const blobSizeMb = (blob.size / (1024 * 1024)).toFixed(1);
+      logPerfMark(track?.id, "blob_fallback_done", session.t0);
       toast(`⏱ 音源取得完了: ${fetchElapsedSec}秒 (${blobSizeMb}MB) - 再生開始`, "ok", 2500);
 
       // レスポンスが JSON や HTML のエラーページでないことを確認
@@ -1345,6 +1362,20 @@ function startPlayingWatchdog(attemptId, track, startTime, isDirectStream) {
     }
 
     logPlaybackEvent("playing_timeout", { track, attemptId, error: new Error("10s watchdog timeout") });
+
+    const session = activePlaybackSession;
+    const isProxyStream = session?.sourceType === "drive_proxy_stream";
+
+    // ★ 中継ストリーミング (drive_proxy_stream) 再生時の重要な保護:
+    //   中継再生中にタイムアウトした場合、直接 Google Drive ストリーム URL (getDriveStreamUrl) で
+    //   再試行することは絶対に禁止（iOS PWA では octet-stream で確実に stall し、30秒待機の原因となるため）。
+    //   勝手に全量 Blob 取得にも逃げず、中継がタイムアウトした事実を明確に診断情報に記録し停止する。
+    if (isProxyStream) {
+      logPerfMark(track?.id, "proxy_watchdog_timeout", state.currentPlayAttemptStartTime);
+      console.warn("[audio-engine] 中継ストリーミングが10秒以内に再生開始しなかったため停止します:", track?.id);
+      handlePlaybackFinalFailure(attemptId, track, new Error("中継ストリーミングの再生待機タイムアウト (10s)"));
+      return;
+    }
 
     if (state.playAttemptRetryCount < 1) {
       state.playAttemptRetryCount++;
@@ -3171,9 +3202,14 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
             try {
               session.proxySessionCreated = false;
               session.proxyRequestStarted = false;
-              logPerfMark(track.id, "proxy_session_started", t0);
-              const { ensureDriveStreamSession, getDriveProxyStreamUrl } = await import("../gdrive/drive-service.js");
-              const sessionOk = await ensureDriveStreamSession(token);
+              logPerfMark(track.id, "proxy_session_check", t0);
+              const { ensureDriveStreamSession, getDriveProxyStreamUrl, isDriveStreamSessionReady } = await import("../gdrive/drive-service.js");
+              // セッションが事前確立済みなら 0ms で完了。未確立の場合のみタイムアウト付き (最大1500ms) で初期化
+              let sessionOk = isDriveStreamSessionReady();
+              if (!sessionOk) {
+                logPerfMark(track.id, "proxy_session_fetch", t0);
+                sessionOk = await ensureDriveStreamSession(token, { timeoutMs: 1500 });
+              }
               if (sessionOk && myToken === state.transitionToken) {
                 session.proxySessionCreated = true;
                 logPerfMark(track.id, "proxy_session_done", t0);
@@ -3188,8 +3224,11 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
                   logPerfMark(track.id, "proxy_url_ready", t0);
                   if (needsWebAudio) notifyUncachedFastStreamOnce();
                 }
+              } else {
+                logPerfMark(track.id, "proxy_session_failed", t0);
               }
             } catch (proxySetupErr) {
+              logPerfMark(track.id, "proxy_session_error", t0);
               console.warn("[audio-engine] drive-stream プロキシセッション準備失敗:", proxySetupErr);
             }
           }

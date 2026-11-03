@@ -170,36 +170,64 @@ export default async function handler(req) {
 
   // 5. Google Drive API 宛ての Range リクエストを構築
   const driveUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`;
-  const upstreamHeaders = {
+  const initialHeaders = {
     "Authorization": `Bearer ${token}`,
   };
 
   const clientRange = req.headers.get("range");
   if (clientRange) {
-    upstreamHeaders["Range"] = clientRange;
+    initialHeaders["Range"] = clientRange;
   }
 
   try {
     let currentUrl = driveUrl;
+    let currentHeaders = { ...initialHeaders };
     let redirectCount = 0;
     const MAX_REDIRECTS = 3;
     const visitedUrls = new Set([driveUrl]);
     let remoteRes = null;
 
     while (redirectCount <= MAX_REDIRECTS) {
-      remoteRes = await fetch(currentUrl, {
-        method: req.method === "HEAD" ? "HEAD" : "GET",
-        headers: upstreamHeaders,
-        redirect: "manual",
-        signal: req.signal, // ★ クライアント切断時に上流 fetch を即座に中断
-      });
+      // 接続タイムアウト (10秒) を設定し、無応答ハングによる長時間ブロックを防止
+      const fetchController = new AbortController();
+      let fetchTimer = null;
+      const onClientAbort = () => {
+        try { fetchController.abort(); } catch {}
+      };
+      if (req.signal) {
+        if (req.signal.aborted) {
+          return new Response(null, { status: 499 });
+        }
+        req.signal.addEventListener("abort", onClientAbort, { once: true });
+      }
+      fetchTimer = setTimeout(() => {
+        try { fetchController.abort(); } catch {}
+      }, 10000);
+
+      try {
+        remoteRes = await fetch(currentUrl, {
+          method: req.method === "HEAD" ? "HEAD" : "GET",
+          headers: currentHeaders,
+          redirect: "manual",
+          signal: fetchController.signal,
+        });
+      } finally {
+        if (fetchTimer) clearTimeout(fetchTimer);
+        if (req.signal) {
+          try { req.signal.removeEventListener("abort", onClientAbort); } catch {}
+        }
+      }
 
       // リダイレクト (301, 302, 303, 307, 308) の場合、Vercel 内部で安全に追従
       if ([301, 302, 303, 307, 308].includes(remoteRes.status)) {
         if (redirectCount >= MAX_REDIRECTS) {
-          return new Response(JSON.stringify({ error: "Too many upstream redirects" }), {
+          return new Response(JSON.stringify({ error: "Too many upstream redirects", code: "TOO_MANY_REDIRECTS" }), {
             status: 502,
-            headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" },
+            headers: {
+              "Content-Type": "application/json",
+              "Cache-Control": "private, no-store",
+              "X-Proxy-Error": "TOO_MANY_REDIRECTS",
+            },
           });
         }
 
@@ -212,30 +240,59 @@ export default async function handler(req) {
         try {
           locUrl = new URL(location, currentUrl);
         } catch {
-          return new Response(JSON.stringify({ error: "Invalid redirect location" }), {
+          return new Response(JSON.stringify({ error: "Invalid redirect location", code: "INVALID_REDIRECT" }), {
             status: 502,
-            headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" },
+            headers: {
+              "Content-Type": "application/json",
+              "Cache-Control": "private, no-store",
+              "X-Proxy-Error": "INVALID_REDIRECT",
+            },
           });
         }
 
         // リダイレクト先ホストの厳格な検証 (Google 正規ホストのみ許可)
         if (!isAllowedGoogleRedirect(locUrl)) {
-          return new Response(JSON.stringify({ error: "Upstream redirect rejected" }), {
+          return new Response(JSON.stringify({ error: "Upstream redirect rejected", code: "REDIRECT_REJECTED" }), {
             status: 502,
-            headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" },
+            headers: {
+              "Content-Type": "application/json",
+              "Cache-Control": "private, no-store",
+              "X-Proxy-Error": "REDIRECT_REJECTED",
+            },
           });
         }
 
         // ループ検出
         if (visitedUrls.has(locUrl.href)) {
-          return new Response(JSON.stringify({ error: "Redirect loop detected" }), {
+          return new Response(JSON.stringify({ error: "Redirect loop detected", code: "REDIRECT_LOOP" }), {
             status: 502,
-            headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" },
+            headers: {
+              "Content-Type": "application/json",
+              "Cache-Control": "private, no-store",
+              "X-Proxy-Error": "REDIRECT_LOOP",
+            },
           });
         }
 
         visitedUrls.add(locUrl.href);
         currentUrl = locUrl.href;
+
+        // ★ 要件 # 10: Google CDN (*.googleusercontent.com 等) や署名付きURLへのリダイレクト時、
+        // URL 署名と Bearer トークンの競合・拒絶を防ぐため Authorization ヘッダーを確実に剥離
+        const targetHost = locUrl.hostname.toLowerCase();
+        const isCdnOrDifferentHost = targetHost.endsWith(".googleusercontent.com") ||
+          targetHost !== "www.googleapis.com" ||
+          locUrl.searchParams.has("e") ||
+          locUrl.searchParams.has("nonce");
+
+        currentHeaders = {};
+        if (clientRange) {
+          currentHeaders["Range"] = clientRange;
+        }
+        if (!isCdnOrDifferentHost) {
+          currentHeaders["Authorization"] = `Bearer ${token}`;
+        }
+
         redirectCount++;
         continue;
       }
@@ -281,6 +338,7 @@ export default async function handler(req) {
     responseHeaders.set("Accept-Ranges", "bytes");
     responseHeaders.set("Vary", "Range");
     responseHeaders.set("Content-Disposition", "inline");
+    responseHeaders.set("X-Proxy-Redirect-Count", String(redirectCount));
 
     // Content-Type 補正
     const upstreamCt = remoteRes.headers.get("content-type");
