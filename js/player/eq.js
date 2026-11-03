@@ -570,15 +570,33 @@ export function isEqWired() {
 /**
  * AudioContext を resume する（ユーザ操作起点またはOS再開時に呼ぶ）。
  * iOS WebKit 独自の "interrupted" 状態も確実に復旧する。
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Promise<{ ok: boolean, state: string, error: Error|null }>}
  */
-export async function resumeEqContext() {
+export async function resumeEqContext({ timeoutMs = 0 } = {}) {
   if (ctx && (ctx.state === "suspended" || ctx.state === "interrupted")) {
     try {
-      await ctx.resume();
+      const resumePromise = ctx.resume();
+      if (timeoutMs > 0 && resumePromise && typeof resumePromise.then === "function") {
+        let timerId = null;
+        await Promise.race([
+          resumePromise,
+          new Promise((_, reject) => {
+            timerId = setTimeout(() => reject(new Error("AudioContext resume timeout")), timeoutMs);
+          }),
+        ]).finally(() => {
+          if (timerId) clearTimeout(timerId);
+        });
+      } else {
+        await resumePromise;
+      }
+      return { ok: ctx.state === "running", state: ctx.state, error: null };
     } catch (err) {
       console.warn("[eq] AudioContext resume 失敗:", err);
+      return { ok: ctx ? ctx.state === "running" : false, state: ctx ? ctx.state : "none", error: err };
     }
   }
+  return { ok: ctx ? ctx.state === "running" : true, state: ctx ? ctx.state : "none", error: null };
 }
 
 /**
@@ -587,6 +605,20 @@ export async function resumeEqContext() {
  */
 export function getEqContextState() {
   return ctx ? ctx.state : "none";
+}
+
+/**
+ * テスト専用: AudioContext / MediaElementSource の注入・取得
+ * @param {object|null} mockCtx
+ * @param {object|null} [mockSource]
+ */
+export function _setAudioContextForTest(mockCtx, mockSource = null) {
+  ctx = mockCtx;
+  source = mockSource;
+}
+
+export function _getAudioContextForTest() {
+  return { ctx, source };
 }
 
 /* ============ プリセット ============ */

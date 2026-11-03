@@ -155,6 +155,34 @@ export function getLastPlaybackDiagnostics() {
 }
 
 /**
+ * play() reject 時の安全な診断情報を構築（URL、token、fileId、Cookie は一切記録しない）
+ * @param {Error|object} err
+ * @param {HTMLAudioElement|null} curEl
+ * @param {PlaybackSession|null} [session]
+ * @returns {object}
+ */
+export function buildSafePlayRejectDiagnostics(err, curEl, session = activePlaybackSession) {
+  const rawMsg = err && typeof err.message === "string" ? err.message : String(err || "");
+  const safeMsg = rawMsg
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "[redacted-url]")
+    .replace(/ya29\.[A-Za-z0-9._-]+/g, "[redacted-token]")
+    .replace(/fileId=[^\s&"'<>]+/gi, "fileId=[redacted]")
+    .slice(0, 200);
+  return {
+    name: err?.name || "Error",
+    message: safeMsg,
+    activeElement: curEl === streamAudioEl ? "streamAudioEl" : (curEl === mainAudioEl ? "mainAudioEl" : "unknown"),
+    sourceType: session?.sourceType || "none",
+    documentHidden: typeof document !== "undefined" ? Boolean(document.hidden) : false,
+    audioContextState: getEqContextState(),
+    readyState: curEl?.readyState ?? null,
+    networkState: curEl?.networkState ?? null,
+    paused: curEl ? Boolean(curEl.paused) : true,
+    hasCurrentSrc: Boolean(curEl?.currentSrc || curEl?.src),
+  };
+}
+
+/**
  * エラー発生時の安全な再生診断メタデータを生成
  * （アクセストークン、URL全文、file ID全文、秘密情報は一切含めない）
  * @param {object} session
@@ -163,11 +191,13 @@ export function getLastPlaybackDiagnostics() {
  * @returns {object}
  */
 export function generatePlaybackDiagnostics(session, track, error) {
-  const curEl = getAudioElement();
+  const resolvedEl = (session && session.activeElement) ? session.activeElement : getAudioElement();
+  const curEl = resolvedEl || getAudioElement();
   const rawId = resolveDriveFileId(track);
   const bufferedEnd = (curEl?.buffered && curEl.buffered.length > 0)
     ? Number(curEl.buffered.end(curEl.buffered.length - 1).toFixed(2))
     : 0;
+  const rawSid = session?.sessionId || session?.id || "";
 
   const diag = {
     appVersion: APP_VERSION,
@@ -184,11 +214,13 @@ export function generatePlaybackDiagnostics(session, track, error) {
     fallbackAttempted: session?.blobFallbackAttempted ?? false,
     blobFetchStarted: Boolean(session?.blobFetchStarted),
     backgroundCacheStarted: Boolean(session?.backgroundCacheStarted),
-    activeElement: activeAudioEl === streamAudioEl ? "streamAudioEl" : (activeAudioEl === mainAudioEl ? "mainAudioEl" : "unknown"),
+    activeElement: curEl === streamAudioEl ? "streamAudioEl" : (curEl === mainAudioEl ? "mainAudioEl" : "unknown"),
     audioContextState: getEqContextState(),
     mediaSessionAction: session?.lastMediaSessionAction || null,
     playPromiseResult: session?.lastPlayPromiseResult || null,
     playingEventReceived: Boolean(session?.playingEventReceived),
+    pendingExternalResume: Boolean(session?.pendingExternalResume || state.pendingExternalResume),
+    lastPlayReject: session?.lastPlayRejectInfo || null,
     readyState: curEl?.readyState ?? null,
     networkState: curEl?.networkState ?? null,
     bufferedEnd,
@@ -201,9 +233,17 @@ export function generatePlaybackDiagnostics(session, track, error) {
     errorName: error?.name || (error instanceof Error ? error.constructor.name : ""),
     mediaErrorCode: curEl?.error?.code || (typeof error?.code === "number" ? error.code : null),
     canPlayType: curEl && typeof curEl.canPlayType === "function" ? curEl.canPlayType("audio/flac") : null,
-    sessionId: session?.id ? session.id.slice(-4) : "",
+    sessionId: rawSid ? rawSid.slice(-4) : "",
     timeline: (session?.timeline && session.timeline.length > 0)
-      ? session.timeline.map((item) => `+${item.ms}ms: ${item.event}${item.detail ? ` (${item.detail})` : ""}`)
+      ? session.timeline.map((item) => {
+          const detailStr = item.detail
+            ? ` (${typeof item.detail === "string" ? item.detail : JSON.stringify(item.detail)})`
+            : "";
+          if (typeof item.deltaMs === "number" && item.at) {
+            return `${item.at} (+${item.deltaMs}ms): ${item.event}${detailStr}`;
+          }
+          return `+${item.ms}ms: ${item.event}${detailStr}`;
+        })
       : [],
     timelineRaw: session?.timeline || [],
   };
@@ -451,7 +491,7 @@ export class PlaybackSession {
     this.queueIndex = queueIndex;
     this.startTime = startTime;
     this.activeElement = null; // mainAudioEl or streamAudioEl
-    this.sourceType = "none";  // "memory_blob", "prewarm_cache", "cached_blob", "drive_stream", "direct_url"
+    this.sourceType = "none";  // "memory_blob", "prewarm_cache", "cached_blob", "drive_stream", "drive_proxy_stream", "direct_url"
     this.isDrive = isDriveTrack(track);
     this.isCached = false;
     this.requestedKeyShift = (track && typeof track.keyShift === "number" && !isNaN(track.keyShift)) ? track.keyShift : 0;
@@ -470,6 +510,15 @@ export class PlaybackSession {
     this.hasRecoveredSilence = false;
     this.t0 = (typeof performance !== "undefined" && typeof performance.now === "function") ? performance.now() : Date.now();
     this.timeline = [{ event: "session_created", ms: 0 }];
+    this.lastDiagPerfAt = this.t0;
+    this.lastDiagWallAt = Date.now();
+    this.lastMediaSessionAction = null;
+    this.lastPlayPromiseResult = null;
+    this.lastPlayRejectInfo = null;
+    this.playingEventReceived = false;
+    this.waitingForExternalPlaying = false;
+    this.pendingExternalResume = false;
+    this.externalResumeAttemptedOnVisible = false;
     this.nearEndCheckPos = null;
     this.nearEndCheckAt = null;
     this.objectUrl = null;
@@ -478,6 +527,8 @@ export class PlaybackSession {
 
   destroy() {
     this.isStale = true;
+    this.pendingExternalResume = false;
+    this.waitingForExternalPlaying = false;
     if (this.watchdogId) {
       clearTimeout(this.watchdogId);
       this.watchdogId = null;
@@ -510,12 +561,29 @@ export function getCurrentPlaybackSession() {
 }
 
 /**
+ * 無音監視タイマーのみを安全に解除（pause 時にセッションを破棄せずタイマーだけ止める）
+ * @param {PlaybackSession|null} [session]
+ */
+function clearSilenceTimers(session = activePlaybackSession) {
+  if (!session) return;
+  if (session.silenceCheckTimer) {
+    clearTimeout(session.silenceCheckTimer);
+    session.silenceCheckTimer = null;
+  }
+  if (session.silenceSampleInterval) {
+    clearInterval(session.silenceSampleInterval);
+    session.silenceSampleInterval = null;
+  }
+}
+
+/**
  * 新しいセッションを開始し、前セッションのタイマーや非同期処理、ピッチシフター状態を完全に破棄する
  */
 export function beginPlaybackSession(track, queueIndex, startTime = 0) {
   if (activePlaybackSession) {
     activePlaybackSession.destroy();
   }
+  clearPendingExternalResume();
   // ★ 前曲のピッチシフター（バッファ・半音値）を必ず即時リセット
   try { resetPitchShifter(); } catch {}
 
@@ -743,6 +811,20 @@ export function getMainAudioElement() { return mainAudioEl; }
 export function getStreamAudioElement() { return streamAudioEl; }
 
 /**
+ * テスト専用: mainAudioEl / streamAudioEl の注入とリスナー登録
+ * @param {object} mockMain
+ * @param {object} mockStream
+ */
+export function _setAudioElementsForTest(mockMain, mockStream) {
+  mainAudioEl = mockMain;
+  streamAudioEl = mockStream;
+  activeAudioEl = mockMain;
+  audioEl = mockMain;
+  if (mockMain) attachElementListeners(mockMain);
+  if (mockStream) attachElementListeners(mockStream);
+}
+
+/**
  * アクティブな再生要素を切り替え、待機側要素を確実に停止・消音する（排他制御）
  * @param {HTMLAudioElement} targetEl
  * @returns {HTMLAudioElement}
@@ -844,11 +926,75 @@ function logPerfMark(trackId, markName, startTime) {
     const t0 = startTime || activePlaybackSession.t0;
     const now = (typeof performance !== "undefined" && typeof performance.now === "function") ? performance.now() : Date.now();
     const ms = Math.max(0, Math.round(now - t0));
+    activePlaybackSession.lastDiagPerfAt = now;
+    activePlaybackSession.lastDiagWallAt = Date.now();
     activePlaybackSession.timeline.push({ event: markName, ms });
   }
   if (!isPerfDebugEnabled()) return;
   const elapsed = startTime ? (performance.now() - startTime).toFixed(1) : "0.0";
   console.log(`[AudioPerf] [${trackId}] ${markName}: +${elapsed}ms`);
+}
+
+/**
+ * MediaSession / Visibility 診断イベントを PlaybackSession タイムラインへ記録
+ * （tap 起点ではなく MediaSession 操作時刻と前イベントからの経過時間を記録）
+ * @param {string} eventName
+ * @param {string|object|null} [detail]
+ */
+function recordSessionDiagEvent(eventName, detail = null) {
+  const session = activePlaybackSession;
+  if (!session || !Array.isArray(session.timeline)) return;
+  const nowPerf = (typeof performance !== "undefined" && typeof performance.now === "function")
+    ? performance.now()
+    : Date.now();
+  const nowWall = Date.now();
+  const isoTime = new Date(nowWall).toISOString();
+  const deltaMs = typeof session.lastDiagPerfAt === "number"
+    ? Math.max(0, Math.round(nowPerf - session.lastDiagPerfAt))
+    : 0;
+  session.lastDiagPerfAt = nowPerf;
+  session.lastDiagWallAt = nowWall;
+
+  const entry = {
+    event: eventName,
+    at: isoTime,
+    timestamp: nowWall,
+    deltaMs,
+    ms: Math.max(0, Math.round(nowPerf - session.t0)),
+  };
+  if (detail !== null && detail !== undefined && detail !== "") {
+    entry.detail = detail;
+  }
+  session.timeline.push(entry);
+}
+
+function markPendingExternalResume(session = activePlaybackSession) {
+  if (!session || session.isStale) return;
+  session.pendingExternalResume = true;
+  state.pendingExternalResume = true;
+  state.pendingExternalResumeSessionId = session.sessionId;
+}
+
+function clearPendingExternalResume() {
+  state.pendingExternalResume = false;
+  state.pendingExternalResumeSessionId = null;
+  if (activePlaybackSession) {
+    activePlaybackSession.pendingExternalResume = false;
+  }
+}
+
+/**
+ * visible 復帰時も User Gesture が必要な場合に「再生を再開」ボタンを提示
+ */
+export function promptExternalResumeAction() {
+  try {
+    toast("バックグラウンドからの再開にはタップが必要です", "info", 8000, {
+      label: "再生を再開",
+      onClick: () => {
+        executePlay({ fromUserGesture: true }).catch(() => {});
+      },
+    });
+  } catch {}
 }
 
 // primeAudioElement の play() プロミス追跡用（AbortError 防止）
@@ -864,6 +1010,9 @@ const state = {
   currentPlayAttemptStartTime: 0,  // 現在の再生試行開始 timestamp (performance.now())
   playAttemptRetryCount: 0,        // 現在の再生試行のタイムアウト再試行回数 (最大1回)
   playingWatchdogTimer: null,      // play() 後の playing 未到達監視タイマー (10秒)
+  pendingExternalResume: false,    // アプリ外再開がバックグラウンド制約で失敗し visible 復帰待ちかどうか
+  pendingExternalResumeSessionId: null, // 保留中の外部再開対象 sessionId
+  externalPlayInFlight: false,     // executePlay 実行中排他フラグ
   // ※ artwork URL は artwork-cache モジュールが ID 単位で管理する。
   //   ここで個別に保持・revoke すると iOS ロック画面と競合するため持たない。
   sessionStartedAt: 0,
@@ -2571,27 +2720,44 @@ export async function playPrev() {
 
 /**
  * 共通一時停止処理（アプリ内操作・MediaSession リモート操作共通）
- * 1. resume watchdogを全解除
- * 2. stall recovery timerを解除
- * 3. 現在のactive audio要素をpause
- * 4. 必要なら待機側もpause
- * 5. appStateをpausedへ更新
- * 6. mediaSession.playbackStateをpausedへ更新
- * 7. 有効な値のときだけposition stateを更新 (playbackRate > 0)
- * 8. セッション状態を保存
+ * 1. resume watchdog / stall recovery / silence recovery / 自動play timer を全解除
+ * 2. PlaybackSession / activeElement / src / currentTime / MediaMetadata 等を完全保持
+ * 3. 現在の active audio 要素を pause
+ * 4. appState と mediaSession.playbackState を paused へ更新
+ * 5. 有効な値のときだけ position state を更新 (playbackRate > 0)
+ * 6. セッション状態を保存
  */
 export function executePause() {
-  if (activePlaybackSession) activePlaybackSession.lastMediaSessionAction = "pause";
+  if (activePlaybackSession) {
+    activePlaybackSession.lastMediaSessionAction = "pause";
+    activePlaybackSession.playbackStatus = "paused";
+    activePlaybackSession.waitingForExternalPlaying = false;
+  }
+  recordSessionDiagEvent("media_session_pause_received");
+
   state.userPausedExplicitly = true;
+  clearPendingExternalResume();
+
+  // 勝手な再開を起こすタイマーだけをすべて解除
   clearResumeWatchdog();
   clearStallRecoveryTimer();
+  clearSilenceTimers(activePlaybackSession);
+  clearPlayingWatchdog();
 
-  const curEl = getAudioElement();
+  const session = activePlaybackSession;
+  const curEl = (session && session.activeElement) ? session.activeElement : (activeAudioEl || getAudioElement());
   const curTime = curEl?.currentTime || 0;
   const dur = curEl?.duration || appState.get().duration || 0;
 
-  if (mainAudioEl) { try { mainAudioEl.pause(); } catch {} }
-  if (streamAudioEl) { try { streamAudioEl.pause(); } catch {} }
+  if (curEl) {
+    try { curEl.pause(); } catch {}
+  }
+  if (mainAudioEl && mainAudioEl !== curEl && !mainAudioEl.paused) {
+    try { mainAudioEl.pause(); } catch {}
+  }
+  if (streamAudioEl && streamAudioEl !== curEl && !streamAudioEl.paused) {
+    try { streamAudioEl.pause(); } catch {}
+  }
 
   appState.set({ isPlaying: false, loadingTrackId: null, playbackStatus: "paused" });
   if (navigator.mediaSession) {
@@ -2599,70 +2765,168 @@ export function executePause() {
   }
 
   updateMediaPositionState({ position: curTime, duration: dur });
+  ensureMediaSessionActions();
   saveSessionState();
+  recordSessionDiagEvent("media_session_pause_completed", `pos=${Number(curTime).toFixed(2)}`);
 }
 
 /**
  * 共通再生再開処理（アプリ内操作・MediaSession リモート操作共通）
- * 1. 現在のactive audio要素を取得
- * 2. mediaSession.playbackStateを早すぎる段階でplayingにしない
- * 3. play()成功後またはplayingイベントでplayingへ更新
- * 4. play()失敗時はpausedまたはerrorへ戻す
+ * 1. media_session_play_received を記録
+ * 2. activePlaybackSession と session.activeElement を確認
+ * 3. streamAudioEl の場合は AudioContext を一切操作せず play() を 1回だけ呼ぶ
+ * 4. mainAudioEl の場合は既存 AudioContext の状態を確認し、suspended/interrupted なら resumeEqContext() を 1回呼ぶ
+ * 5. Context が running へ戻らなければ play() を呼ばず paused へ戻す
+ * 6. play() Promise resolve だけでは playing へせず、playing イベント後にのみ UI と MediaSession を playing へする
+ * 7. NotAllowedError / AbortError 時は pendingExternalResume = true を記録し visible 復帰時に 1回だけ再開を試行する
  */
-export async function executePlay() {
-  if (activePlaybackSession) activePlaybackSession.lastMediaSessionAction = "play";
-  unlockAudioElementsOnUserGesture();
+export async function executePlay(options = {}) {
+  const fromVisibilityResume = Boolean(options && options.fromVisibilityResume);
+  if (state.externalPlayInFlight && !fromVisibilityResume) {
+    return false;
+  }
+
+  if (activePlaybackSession) {
+    activePlaybackSession.lastMediaSessionAction = "play";
+  }
+  recordSessionDiagEvent("media_session_play_received", fromVisibilityResume ? "source=visibility_resume" : "source=media_session");
+
   const curTrack = appState.get().currentTrack;
   if (!curTrack) {
     primeAudioElement();
     await autoStartFirstTrack();
-    return;
+    return false;
   }
 
-  // ★ 要件 # 10: 現在の PlaybackSession.activeElement を厳格に使用（別要素へ切り替えない）
+  // ★ 要件 # 6 & # 10: 現在の PlaybackSession.activeElement を厳格に使用（別要素へ切り替えない）
   const session = activePlaybackSession;
+  const targetSessionId = session ? session.sessionId : null;
+  if (session && session.isStale) {
+    return false;
+  }
+
   const curEl = (session && session.activeElement) ? session.activeElement : (activeAudioEl || getAudioElement());
-  if (!curEl) return;
+  if (!curEl || (curEl !== mainAudioEl && curEl !== streamAudioEl)) return false;
+
+  const elName = curEl === streamAudioEl ? "streamAudioEl" : "mainAudioEl";
+  recordSessionDiagEvent("media_session_play_active_element_resolved", elName);
 
   // 起動時のセッション復元直後など、要素に src / currentSrc が一切ない場合のみ loadAndPlay を実行
-  const hasLoadedSrc = Boolean(curEl.src || curEl.currentSrc || state.currentObjectUrl);
+  const hasLoadedSrc = Boolean(curEl.src || curEl.currentSrc || (!session && state.currentObjectUrl));
   if (!hasLoadedSrc) {
-    primeAudioElement();
-    const startSec = appState.get().currentTime || 0;
-    await loadAndPlay(curTrack, { startTime: startSec });
-    return;
-  }
-
-  setupAudioSession();
-  await resumeSessionActivator();
-
-  // ★ 要件 # 11: mainAudioEl の場合のみ AudioContext の resume を試行
-  //   streamAudioEl (Range中継) の場合は AudioContext を操作しない (Web Audio非接続)
-  if (curEl === mainAudioEl) {
-    await resumeEqContext();
-  }
-
-  state.userPausedExplicitly = false;
-  clearResumeWatchdog();
-  armResumeWatchdog();
-
-  try {
-    const p = curEl.play();
-    if (p && typeof p.then === "function") {
-      await p;
+    if (!session) {
+      primeAudioElement();
+      const startSec = appState.get().currentTime || 0;
+      await loadAndPlay(curTrack, { startTime: startSec });
+      return true;
     }
-    // ★ 要件 # 12: play() Promise resolve だけでは UI を過信せず、
-    //   MediaSession の再生状態のみ同期し、UI の isPlaying は playing イベントで確定更新
-    if (navigator.mediaSession) {
-      try { navigator.mediaSession.playbackState = "playing"; } catch {}
-    }
-    appState.set({ playbackStatus: "playing" });
-  } catch (err) {
-    console.warn("[audio-engine] play 失敗", err);
     appState.set({ isPlaying: false, loadingTrackId: null, playbackStatus: "paused" });
     if (navigator.mediaSession) {
       try { navigator.mediaSession.playbackState = "paused"; } catch {}
     }
+    return false;
+  }
+
+  // sessionId が現在も有効か確認
+  if (session && (session.isStale || session !== activePlaybackSession || session.sessionId !== targetSessionId)) {
+    return false;
+  }
+
+  // activeAudioEl 参照を現在の session.activeElement と一致させる（待機側の load() 等は一切呼ばない）
+  activeAudioEl = curEl;
+  audioEl = curEl;
+
+  clearResumeWatchdog();
+  clearStallRecoveryTimer();
+
+  state.externalPlayInFlight = true;
+  try {
+    // ★ 要件 # 6: mainAudioEl の場合のみ既存 AudioContext の状態を確認・resume
+    //   streamAudioEl (Range中継等) の場合は AudioContext を一切操作しない
+    if (curEl === mainAudioEl) {
+      const beforeCtxState = getEqContextState();
+      recordSessionDiagEvent("media_session_audio_context_before_resume", beforeCtxState);
+
+      if (beforeCtxState === "suspended" || beforeCtxState === "interrupted") {
+        const isHidden = typeof document !== "undefined" && Boolean(document.hidden);
+        await resumeEqContext({ timeoutMs: isHidden ? 800 : 0 });
+      }
+
+      const afterCtxState = getEqContextState();
+      recordSessionDiagEvent("media_session_audio_context_after_resume", afterCtxState);
+
+      // 既存 AudioContext が存在するのに running へ戻らなかった場合は play() を呼ばず paused へ戻す
+      if (beforeCtxState !== "none" && afterCtxState !== "running") {
+        if (session) {
+          session.playbackStatus = "paused";
+          session.lastPlayPromiseResult = `context_not_running:${afterCtxState}`;
+        }
+        if (!fromVisibilityResume) {
+          markPendingExternalResume(session);
+        } else {
+          promptExternalResumeAction();
+        }
+        state.userPausedExplicitly = true;
+        appState.set({ isPlaying: false, loadingTrackId: null, playbackStatus: "paused" });
+        if (navigator.mediaSession) {
+          try { navigator.mediaSession.playbackState = "paused"; } catch {}
+        }
+        return false;
+      }
+
+      // await 中にセッションが切り替わっていないか再確認
+      if (session && (session.isStale || session !== activePlaybackSession || session.sessionId !== targetSessionId)) {
+        return false;
+      }
+    }
+
+    // play() 呼び出し前: playbackState を playing へしない（paused のまま維持）
+    state.userPausedExplicitly = false;
+    if (session) {
+      session.waitingForExternalPlaying = true;
+    }
+
+    recordSessionDiagEvent("media_session_play_called", elName);
+    const p = curEl.play();
+    if (p && typeof p.then === "function") {
+      await p;
+    }
+
+    // ★ 要件 # 6, # 9, # 12: play() Promise resolve だけでは UI も MediaSession も playing へしない
+    //   active element の playing イベント受信時 (onPlaying) にのみ playing へ遷移する
+    recordSessionDiagEvent("media_session_play_resolved", elName);
+    if (session) {
+      session.lastPlayPromiseResult = "resolved";
+    }
+    return true;
+  } catch (err) {
+    const rejectInfo = buildSafePlayRejectDiagnostics(err, curEl, session);
+    if (session) {
+      session.lastPlayRejectInfo = rejectInfo;
+      session.lastPlayPromiseResult = `rejected:${rejectInfo.name}`;
+      session.waitingForExternalPlaying = false;
+      session.playbackStatus = "paused";
+    }
+    recordSessionDiagEvent("media_session_play_rejected", rejectInfo);
+    console.warn("[audio-engine] play 失敗", rejectInfo);
+
+    const isConstraintError = err?.name === "NotAllowedError" || err?.name === "AbortError";
+    if (isConstraintError) {
+      if (!fromVisibilityResume) {
+        markPendingExternalResume(session);
+      } else {
+        promptExternalResumeAction();
+      }
+    }
+
+    state.userPausedExplicitly = true;
+    appState.set({ isPlaying: false, loadingTrackId: null, playbackStatus: "paused" });
+    if (navigator.mediaSession) {
+      try { navigator.mediaSession.playbackState = "paused"; } catch {}
+    }
+    return false;
+  } finally {
+    state.externalPlayInFlight = false;
   }
 }
 
@@ -2979,6 +3243,7 @@ export function setRepeatMode(mode) {
  */
 export function stopPlayback() {
   abortActiveBackgroundCache();
+  clearPendingExternalResume();
   // ★ 進行中の loadAndPlay (await getBlob/loadedmetadata 中) を無効化する。
   //   transitionToken を進めることで、再開時の stale チェックで中断される
   //   (削除した曲が一瞬再生されたり、currentObjectUrl が再投入されるのを防ぐ)。
@@ -3372,6 +3637,10 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
       }
     } else {
       setActiveAudioElement(mainAudioEl);
+      session.activeElement = mainAudioEl;
+      if (!session.sourceType || session.sourceType === "none") {
+        session.sourceType = "cached_blob";
+      }
     }
 
     if (primePromise) {
@@ -3668,11 +3937,6 @@ function resetSession(trackId) {
 }
 
 function onPlay() {
-  const isLoading = !!appState.get().loadingTrackId;
-  if (!isLoading) {
-    appState.set({ isPlaying: true, playbackStatus: "playing" });
-    if (navigator.mediaSession) navigator.mediaSession.playbackState = "playing";
-  }
   state.lastTickAt = Date.now();
   ensureMediaSessionActions();
   saveSessionState();
@@ -3681,15 +3945,27 @@ function onPlay() {
 function onPlaying() {
   if (activePlaybackSession) {
     activePlaybackSession.playingEventReceived = true;
+    activePlaybackSession.playbackStatus = "playing";
+    activePlaybackSession.playingAt = Date.now();
+    activePlaybackSession.pendingExternalResume = false;
+    if (activePlaybackSession.waitingForExternalPlaying) {
+      activePlaybackSession.waitingForExternalPlaying = false;
+      const elName = activeAudioEl === streamAudioEl ? "streamAudioEl" : "mainAudioEl";
+      recordSessionDiagEvent("media_session_playing_received", elName);
+    }
   }
+  clearPendingExternalResume();
   appState.set({
     isPlaying: true,
     loadingTrackId: null,
     playbackStatus: "playing",
   });
   state.lastTickAt = Date.now();
-  if (navigator.mediaSession) navigator.mediaSession.playbackState = "playing";
+  if (navigator.mediaSession) {
+    try { navigator.mediaSession.playbackState = "playing"; } catch {}
+  }
   ensureMediaSessionActions();
+  updateMediaPositionState();
   saveSessionState();
 }
 
@@ -4266,41 +4542,91 @@ function setupTerminationCleanup() {
 }
 
 /**
- * 復帰時に iOS が勝手に audio を再開してしまうのを防ぐガード
- * - ユーザが明示的に pause していた場合、visible 復帰時に audio が再生中なら
- *   pause() を呼び直す
+ * visibilitychange ハンドラ（テスト・実機共通）
+ * - hidden 時に visibility_hidden を記録
+ * - visible 時に visibility_visible を記録
+ * - アプリ外で play を押したのにバックグラウンド制約で失敗した場合 (pendingExternalResume) のみ、
+ *   sessionId を検証した上で 1回だけ再開を試行する
+ * - 通常 pause 時や pendingExternalResume がない場合は勝手に play() を呼ばない
  */
-function setupVisibilityGuard() {
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState !== "visible") return;
+export async function handleVisibilityChange() {
+  if (typeof document === "undefined") return;
+  const isHidden = document.visibilityState === "hidden" || Boolean(document.hidden);
 
-    // ★ フォアグラウンド復帰時: mainAudioEl 再生中かつ AudioContext が suspended / interrupted なら即時再開
-    if (!state.userPausedExplicitly && activeAudioEl === mainAudioEl) {
-      resumeEqContext().catch(() => {});
+  if (isHidden) {
+    recordSessionDiagEvent("visibility_hidden");
+    return;
+  }
+
+  if (document.visibilityState !== "visible") return;
+  recordSessionDiagEvent("visibility_visible");
+
+  const session = activePlaybackSession;
+
+  // 1. アプリ外で play を押したのに失敗していた場合のみ、sessionId を確認して 1回だけ再開を試行
+  if (state.pendingExternalResume) {
+    const expectedSessionId = state.pendingExternalResumeSessionId;
+    if (
+      session &&
+      !session.isStale &&
+      session.pendingExternalResume &&
+      session.sessionId === expectedSessionId &&
+      !session.externalResumeAttemptedOnVisible
+    ) {
+      session.externalResumeAttemptedOnVisible = true;
+      clearPendingExternalResume();
+
+      if (state.externalPlayInFlight) {
+        return;
+      }
+
+      recordSessionDiagEvent("visibility_resume_started", `sessionId=${session.sessionId.slice(-4)}`);
+      const resumed = await executePlay({ fromVisibilityResume: true });
+      recordSessionDiagEvent("visibility_resume_completed", resumed ? "ok" : "failed");
+      return;
+    } else {
+      // 別曲へ移動済み等で古い sessionId の pending resume は破棄して無視
+      clearPendingExternalResume();
     }
+  }
 
-    // 復帰直後は audio.paused 状態の反映に少し時間がかかる場合があるため
-    // 数回チェック
+  // 2. ユーザーが pause しただけなら visible 復帰で自動再生しない
+  if (state.userPausedExplicitly) {
     let attempts = 0;
     const check = () => {
       attempts++;
-      if (state.userPausedExplicitly) {
+      if (state.userPausedExplicitly && !state.pendingExternalResume) {
         if (mainAudioEl && !mainAudioEl.paused) {
           try { mainAudioEl.pause(); } catch {}
         }
         if (streamAudioEl && !streamAudioEl.paused) {
           try { streamAudioEl.pause(); } catch {}
         }
-        // pause を当てた後も念のため再確認
         if (attempts < 5) setTimeout(check, 150);
       }
     };
     setTimeout(check, 50);
+    return;
+  }
+
+  // 3. すでに再生中 (!paused) かつ mainAudioEl 再生中なら、suspended / interrupted Context のみ復帰補助
+  //    （※ paused の要素に対して勝手に play() は絶対に呼ばない）
+  if (!state.userPausedExplicitly && activeAudioEl === mainAudioEl && mainAudioEl && !mainAudioEl.paused) {
+    resumeEqContext().catch(() => {});
+  }
+}
+
+/**
+ * 復帰時に iOS が勝手に audio を再開してしまうのを防ぐガード & 保留された外部再開の1回実行
+ */
+function setupVisibilityGuard() {
+  document.addEventListener("visibilitychange", () => {
+    handleVisibilityChange().catch(() => {});
   });
 
   // pagehide / pageshow も保険
   window.addEventListener("pageshow", () => {
-    if (state.userPausedExplicitly) {
+    if (state.userPausedExplicitly && !state.pendingExternalResume) {
       if (mainAudioEl && !mainAudioEl.paused) {
         try { mainAudioEl.pause(); } catch {}
       }
