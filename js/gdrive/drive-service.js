@@ -632,18 +632,20 @@ export async function fetchDriveAudioBlob(fileId, { onProgress, maxRetries = 3, 
       const token = await getDriveToken();
       if (!token) throw new Error("Google Drive に接続されていません。設定画面で接続してください。");
 
-      const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`;
+      // ★ access_token をクエリパラメータで渡すことで CORS プリフライト (OPTIONS) を完全に回避し、
+      // 1RTT のゼロ遅延で即座にバイナリ受信を開始する
+      const queryUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media&access_token=${encodeURIComponent(token)}`;
       let res = null;
       try {
+        res = await fetch(queryUrl, { signal: signal || undefined });
+      } catch (fetchErr) {
+        // ネットワーク切断や一時エラー時のフォールバック
+        console.warn("[drive-service] クエリ形式 fetch 失敗、ヘッダー形式へフォールバック:", fetchErr);
+        const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`;
         res = await fetch(url, {
           headers: { Authorization: `Bearer ${token}` },
           signal: signal || undefined,
         });
-      } catch (fetchErr) {
-        // CORS プリフライト失敗またはネットワークエラー時: クエリパラメータ形式で安全にフォールバック
-        console.warn("[drive-service] Authorization ヘッダー fetch 失敗、クエリ形式へフォールバック:", fetchErr);
-        const queryUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media&access_token=${encodeURIComponent(token)}`;
-        res = await fetch(queryUrl, { signal: signal || undefined });
       }
 
       if (!res.ok) {
@@ -687,14 +689,20 @@ export async function fetchDriveAudioBlob(fileId, { onProgress, maxRetries = 3, 
         const reader = res.body.getReader();
         const chunks = [];
         let loaded = 0;
+        let lastProgressCall = 0;
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           chunks.push(value);
           loaded += value.length;
-          onProgress(loaded, total);
+          const now = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+          if (now - lastProgressCall > 100 || (total > 0 && loaded >= total)) {
+            lastProgressCall = now;
+            try { onProgress(loaded, total); } catch (_) {}
+          }
         }
+        try { onProgress(loaded, total || loaded); } catch (_) {}
 
         let contentType = res.headers.get("Content-Type") || "audio/mpeg";
         const rawBlob = new Blob(chunks, { type: contentType });
@@ -788,18 +796,28 @@ export async function promptDriveReconnectModal({ track = null, reason = "", for
   const savedClientId = pub.gdriveClientId || "";
 
   // ★ ユーザー要望: 「google driveと再連携するときに、googleアカウントにログインと同じリンクを勝手に起動するようにしてほしい。」
-  // Client ID が保存されている場合、ダイレクトに Google の認証画面（GIS ポップアップ）を開く
+  // Client ID が保存されている場合、Google アカウントログイン（OAuth）リンクを直接起動して自動連携
   if (savedClientId && !forceModal) {
     try {
-      toast("☁ Google 認証画面を開いています…", "info", 1800);
-      const newToken = await requestGisToken(savedClientId);
-      if (newToken) {
-        toast("☁ Google Drive に再連携しました！再生を開始します", "ok");
-        return newToken;
+      const redirectUri = (typeof window !== "undefined" && window.location) ? (window.location.origin + window.location.pathname) : "";
+      const oauthDirectUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(savedClientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent("https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file")}&prompt=select_account`;
+
+      // 再生保留中の曲があれば sessionStorage に退避し、リダイレクト復帰後に自動再生
+      if (typeof sessionStorage !== "undefined") {
+        try {
+          sessionStorage.setItem("music-player:pending-track", JSON.stringify({
+            trackId: track?.id || null,
+          }));
+        } catch {}
       }
+
+      toast("☁ Google ログイン画面へ移動します…", "info", 1800);
+      setTimeout(() => {
+        window.location.href = oauthDirectUrl;
+      }, 250);
+      return new Promise(() => {}); // 画面遷移するため未完了のまま待機
     } catch (err) {
-      console.warn("[drive-service] 直接認証失敗/ポップアップブロック、再連携モーダルを表示します:", err);
-      // ポップアップがブロックされた場合はモーダルへフォールバックして再トリガー
+      console.warn("[drive-service] 自動OAuth遷移失敗、手動モーダルを表示:", err);
     }
   }
 
@@ -897,25 +915,18 @@ export async function promptDriveReconnectModal({ track = null, reason = "", for
           return;
         }
         setPublic({ gdriveClientId: cid });
-        nowBtn.disabled = true;
-        nowBtn.textContent = "⏳ Google 認証ウィンドウを開いています…";
-        if (statusEl) statusEl.textContent = "";
-        try {
-          const newToken = await requestGisToken(cid);
-          if (newToken) {
-            toast("☁ Google Drive に再連携しました！再生を開始します", "ok");
-            settled = true;
-            _activeReconnectModalPromise = null;
-            resolve(newToken);
-            origClose();
-            return;
-          }
-        } catch (err) {
-          if (statusEl) statusEl.textContent = err.message || "再連携に失敗しました。もう一度お試しください。";
-        } finally {
-          nowBtn.disabled = false;
-          nowBtn.textContent = "🔑 Google アカウントでログイン";
+        if (typeof sessionStorage !== "undefined") {
+          try {
+            sessionStorage.setItem("music-player:pending-track", JSON.stringify({
+              trackId: track?.id || null,
+            }));
+          } catch {}
         }
+        nowBtn.disabled = true;
+        nowBtn.textContent = "⏳ Google 認証画面へ移動中…";
+        const redirectUri = (typeof window !== "undefined" && window.location) ? (window.location.origin + window.location.pathname) : "";
+        const oauthDirectUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(cid)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent("https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file")}&prompt=select_account`;
+        window.location.href = oauthDirectUrl;
       });
     }
 

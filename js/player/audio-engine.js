@@ -162,7 +162,7 @@ export function generatePlaybackDiagnostics(session, track, error) {
   const curEl = getAudioElement();
   const rawId = resolveDriveFileId(track);
   const diag = {
-    appVersion: "1.11.4",
+    appVersion: "1.11.5",
     displayMode: isPwaStandalone() ? "standalone" : "browser",
     trackExtension: getTrackExtension(track),
     trackMimeType: track?.mimeType || "",
@@ -941,9 +941,29 @@ export function prewarmTrack(trackId, { onlyIfCached = false } = {}) {
       if (isDrive) {
         const cached = await hasCachedBlob(trackId);
         if (!cached) {
-          // iOS / PWA または FLAC の場合、ダイレクトストリーム URL は stall するため事前キャッシュしない
+          if (onlyIfCached) {
+            prewarmCache.delete(trackId);
+            return null;
+          }
+          // iOS / PWA または FLAC の場合:
+          // タップ時 (onlyIfCached: false) はダイレクトストリーム URL ではなく Blob 取得を先行開始して待機時間を短縮
           const trackObj = (state.queue && state.queue.find((t) => t && t.id === trackId)) || { id: trackId };
           if (shouldBypassDriveStreaming(trackObj)) {
+            const fileId = resolveDriveFileId(trackObj) || driveFileIdFromTrackId(trackId);
+            if (fileId) {
+              const { fetchDriveAudioBlob } = await import("../gdrive/drive-service.js");
+              const blobPromise = fetchDriveAudioBlob(fileId, { maxRetries: 2 });
+              entry.promise = blobPromise.then(async (b) => {
+                if (!b) return null;
+                const isFlac = await checkBlobFlac(b);
+                const corrected = (isFlac || isFlacTrack(trackObj)) ? new Blob([b], { type: "audio/flac" }) : b;
+                const url = URL.createObjectURL(corrected);
+                entry.objectUrl = url;
+                saveBlob(trackId, corrected).catch(() => {});
+                return url;
+              });
+              return entry.promise;
+            }
             prewarmCache.delete(trackId);
             return null;
           }
@@ -1111,25 +1131,52 @@ export async function attemptDriveFlacBlobFallback(session, track, myAttemptId, 
   session.blobFallbackPromise = (async () => {
     try {
       const isFastFallback = triggerError?.isFastFallback || (triggerError instanceof Error && (triggerError.message === "PWA FLAC fast fallback" || triggerError.message === "Fast Drive fetch"));
-      if (isFastFallback) {
-        toast("Google Driveから音源を取得しています…", "info", 4000);
-      } else {
-        toast("ストリーミング再生に失敗したため、音源を取得しています…", "info", 5000);
-      }
+
+      const { updateProgressToast, dismissProgressToast } = await import("../ui/components.js");
+      updateProgressToast("☁ Google Driveから音源の取得を開始しています…");
 
       const token = await getDriveToken();
       if (!token) {
+        dismissProgressToast();
         session.tokenError = true;
         throw new Error("Google Drive に接続されていません。再接続してください。");
       }
       session.hasToken = true;
 
       const fileId = resolveDriveFileId(track);
-      if (!fileId) throw new Error("Google Drive fileId が見つかりません");
+      if (!fileId) {
+        dismissProgressToast();
+        throw new Error("Google Drive fileId が見つかりません");
+      }
 
       const { fetchDriveAudioBlob } = await import("../gdrive/drive-service.js");
-      let blob = await fetchDriveAudioBlob(fileId, { maxRetries: 2 });
+      const fetchStart = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+      let lastProgressUpdate = 0;
+
+      let blob = await fetchDriveAudioBlob(fileId, {
+        maxRetries: 2,
+        onProgress: (loaded, total) => {
+          const now = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+          if (now - lastProgressUpdate < 100 && loaded < total) return;
+          lastProgressUpdate = now;
+          const loadedMb = (loaded / (1024 * 1024)).toFixed(1);
+          if (total > 0) {
+            const totalMb = (total / (1024 * 1024)).toFixed(1);
+            const pct = Math.min(100, Math.round((loaded / total) * 100));
+            const elapsed = Math.max(0.1, (now - fetchStart) / 1000);
+            const speed = (loaded / (1024 * 1024) / elapsed).toFixed(1);
+            updateProgressToast(`☁ 音源を取得中: ${loadedMb}MB / ${totalMb}MB (${pct}%) [${speed}MB/s]`);
+          } else {
+            updateProgressToast(`☁ 音源を取得中: ${loadedMb}MB 受信済…`);
+          }
+        },
+      });
+      dismissProgressToast();
       if (!blob) throw new Error("Google Drive から音源を取得できませんでした。");
+
+      const fetchElapsedSec = (((typeof performance !== "undefined" && performance.now ? performance.now() : Date.now()) - fetchStart) / 1000).toFixed(1);
+      const blobSizeMb = (blob.size / (1024 * 1024)).toFixed(1);
+      toast(`⏱ 音源取得完了: ${fetchElapsedSec}秒 (${blobSizeMb}MB) - 再生開始`, "ok", 2500);
 
       // レスポンスが JSON や HTML のエラーページでないことを確認
       if (blob.type && (blob.type.includes("json") || blob.type.includes("html"))) {
@@ -1169,6 +1216,12 @@ export async function attemptDriveFlacBlobFallback(session, track, myAttemptId, 
       session.appliedKeyShift = 0;
       applyKeyShift(0, mainAudioEl);
       appState.set({ currentKeyShift: 0 });
+
+      // primeAudioElement の play() プロミスが未完了なら待機して AbortError を防ぐ
+      if (primePromise) {
+        try { await primePromise; } catch {}
+        primePromise = null;
+      }
 
       mainAudioEl.src = blobUrl;
       mainAudioEl.loop = false;

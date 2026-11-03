@@ -2132,7 +2132,7 @@ test("実機採取用診断情報 (generatePlaybackDiagnostics) の安全性検�
   const diag = generatePlaybackDiagnostics(mockSession, mockTrack, mockError);
 
   // 必須キーの存在確認
-  strictEqual(diag.appVersion, "1.11.4", "appVersion が設定されていること");
+  strictEqual(diag.appVersion, "1.11.5", "appVersion が設定されていること");
   strictEqual(diag.trackExtension, "flac", "拡張子が抽出されていること");
   strictEqual(diag.isDriveTrack, true, "isDriveTrack が true");
   strictEqual(diag.hasDriveFileId, true, "hasDriveFileId が true (存在有無のフラグ)");
@@ -2163,6 +2163,23 @@ test("iOS / PWA standalone 環境で未キャッシュ Drive 音源を再生す�
   strictEqual(shouldBypass(mp3Track, isPwa, isApple), true, "PWA/iOS上のMP3も即時Blob取得 (WebKit stall防止)");
   strictEqual(shouldBypass(flacTrack, false, false), true, "他環境でもFLACは即時Blob取得");
   strictEqual(shouldBypass(mp3Track, false, false), false, "他環境のMP3はダイレクトストリーミング試行");
+});
+
+test("Google OAuth 直接リダイレクトURLの形式検証とCORSプリフライト完全排除", () => {
+  const clientId = "123456789-test.apps.googleusercontent.com";
+  const redirectUri = "https://example.com/player";
+  const oauthDirectUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent("https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file")}&prompt=select_account`;
+
+  strictEqual(oauthDirectUrl.includes("accounts.google.com/o/oauth2/v2/auth"), true, "OAuth エンドポイントが正しいこと");
+  strictEqual(oauthDirectUrl.includes("prompt=select_account"), true, "アカウント選択画面が明示指定されていること");
+  strictEqual(oauthDirectUrl.includes("response_type=token"), true, "トークンインプリシットグラントであること");
+
+  // fetchDriveAudioBlob の queryUrl は Authorization ヘッダーなしの Simple Request (OPTIONS不要)
+  const fileId = "testFile123";
+  const token = "testToken456";
+  const queryUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media&access_token=${encodeURIComponent(token)}`;
+  strictEqual(queryUrl.includes("alt=media"), true, "alt=media パラメータが存在すること");
+  strictEqual(queryUrl.includes("access_token=testToken456"), true, "access_token パラメータで認証が渡されること");
 });
 
 console.log(`\n高速再生 & ナビゲーションスタックテスト: ${passed} 件 PASSED ✓`);

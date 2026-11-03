@@ -1063,8 +1063,11 @@ function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices, dr
         <h2>データ管理 / アプリ更新</h2>
         <div class="settings-row">
           <div>
-            <div class="label">最新版へ強制アップデート (キャッシュ消去)</div>
-            <div class="help">キャッシュを完全消去し、サーバーから最新版 (v1.7.6) を再取得してリロードします。変更が反映されない場合にお使いください。</div>
+            <div class="label" style="display:flex; align-items:center; gap:8px;">
+              <span>最新版へ強制アップデート</span>
+              <span style="font-size:11px; padding:2px 6px; border-radius:4px; background:rgba(59,130,246,0.18); color:var(--accent, #60a5fa); font-weight:700;">v1.11.5</span>
+            </div>
+            <div class="help">キャッシュを完全消去し、サーバーから最新版 (v1.11.5) を再取得してリロードします。変更が反映されない場合にお使いください。</div>
           </div>
           <button class="btn primary" id="btn-force-update" style="white-space:nowrap;">🔄 最新版に更新</button>
         </div>

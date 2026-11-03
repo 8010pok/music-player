@@ -86,6 +86,27 @@ async function main() {
         window.history.replaceState(null, "", window.location.pathname);
         const { toast } = await import("./ui/components.js");
         toast("☁ Google Drive に再連携しました！", "ok");
+
+        // ★ 保留中トラックの自動再開
+        try {
+          const rawPending = typeof sessionStorage !== "undefined" ? sessionStorage.getItem("music-player:pending-track") : null;
+          if (rawPending) {
+            sessionStorage.removeItem("music-player:pending-track");
+            const pending = JSON.parse(rawPending);
+            if (pending && pending.trackId) {
+              const { getTrack } = await import("./store/library-db.js");
+              const targetTrack = await getTrack(pending.trackId);
+              if (targetTrack) {
+                const { setQueueAndPlay } = await import("./player/audio-engine.js");
+                setTimeout(() => {
+                  setQueueAndPlay([targetTrack], 0).catch(() => {});
+                }, 350);
+              }
+            }
+          }
+        } catch (pendingErr) {
+          console.warn("[app] 保留中トラック復帰失敗:", pendingErr);
+        }
       }
     } catch (e) {
       console.warn("[app] OAuth リダイレクトトークン処理失敗:", e);

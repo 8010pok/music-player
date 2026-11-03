@@ -48,6 +48,41 @@ export function toast(msg, kind = "info", ms = 2500, action = null) {
   }, ms);
 }
 
+/**
+ * 進行中の非同期処理（ダウンロード等）の進捗を単一のトーストで更新表示
+ * @param {string} msg
+ */
+export function updateProgressToast(msg) {
+  if (typeof document === "undefined") return;
+  const root = document.getElementById("toast-root");
+  if (!root) return;
+  let el = document.getElementById("toast-progress-active");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "toast-progress-active";
+    el.className = "toast is-progress";
+    el.style.fontWeight = "600";
+    el.style.letterSpacing = "0.02em";
+    root.appendChild(el);
+  }
+  el.textContent = msg;
+}
+
+/**
+ * 進行中トーストを消去
+ */
+export function dismissProgressToast() {
+  if (typeof document === "undefined") return;
+  const el = document.getElementById("toast-progress-active");
+  if (el) {
+    el.style.opacity = "0";
+    el.style.transition = "opacity 0.2s";
+    setTimeout(() => {
+      try { el.remove(); } catch {}
+    }, 220);
+  }
+}
+
 // 現在アクティブなモーダルのインスタンス管理（二重オープン時の自動解放＆安全な連動）
 let currentModalInstance = null;
 
