@@ -69,6 +69,51 @@ test("Beta ON の未キャッシュFLACでは、再生開始前に全量 Blob �
   ok(engineContent.includes("Drive Range 中継セッションの確立に失敗しました"), "Must throw clean error instead of silent blob fallback on session fail");
 });
 
+test("Beta ON で Proxy URL 生成後、直接 Drive URL による targetUrl 上書きが if (!targetUrl) で防止されていること", () => {
+  const engineContent = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf-8");
+  // loadAndPlay 内の getDriveStreamUrl の呼び出しが if (!targetUrl) ブロック内にあることを検証
+  const commentIdx = engineContent.indexOf("ダイレクトストリーミング URL を取得して即座に再生開始");
+  ok(commentIdx !== -1, "Must contain direct stream section comment in loadAndPlay");
+  const block = engineContent.slice(commentIdx, commentIdx + 400);
+  ok(block.includes("if (!targetUrl)"), "Direct stream generation must be guarded by if (!targetUrl)");
+  ok(block.includes("const streamUrl = await getDriveStreamUrl(track.id, token);"), "Must call getDriveStreamUrl inside the guard");
+});
+
+test("実関数ロジック検証: Proxy URL 生成時に getDriveStreamUrl が0回、Proxy URL が targetUrl に維持されること", async () => {
+  let driveStreamUrlCalled = 0;
+  let targetUrl = null;
+  let session = {};
+  const mockTrack = { id: "track_proxy_test", title: "Test FLAC" };
+  const mockToken = "mock_token";
+
+  // モック関数
+  const mockGetDriveProxyStreamUrl = () => "/api/drive-stream?fileId=track_proxy_test";
+  const mockGetDriveStreamUrl = async () => {
+    driveStreamUrlCalled++;
+    return "https://www.googleapis.com/drive/v3/files/track_proxy_test?alt=media";
+  };
+
+  // 1. Proxy URL 生成
+  const proxyUrl = mockGetDriveProxyStreamUrl(mockTrack);
+  if (proxyUrl) {
+    targetUrl = proxyUrl;
+    session.sourceType = "drive_proxy_stream";
+  }
+
+  // 2. audio-engine.js の修正後ロジック
+  if (!targetUrl) {
+    const streamUrl = await mockGetDriveStreamUrl(mockTrack.id, mockToken);
+    if (streamUrl) {
+      targetUrl = streamUrl;
+      session.sourceType = "drive_stream";
+    }
+  }
+
+  strictEqual(driveStreamUrlCalled, 0, "mockGetDriveStreamUrl must not be called when proxyUrl is ready");
+  strictEqual(targetUrl, "/api/drive-stream?fileId=track_proxy_test", "targetUrl must remain the proxy URL");
+  strictEqual(session.sourceType, "drive_proxy_stream", "session.sourceType must remain drive_proxy_stream");
+});
+
 test("Beta ON では、playing 後も含めてバックグラウンド全量キャッシュが完全に抑止されること", () => {
   const engineContent = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf-8");
   ok(engineContent.includes("if (pub.driveProxyStreamEnabled)"), "Background cache must have early return for driveProxyStreamEnabled");

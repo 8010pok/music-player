@@ -3252,19 +3252,21 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
         }
 
         // ダイレクトストリーミング URL を取得して即座に再生開始（FLAC 全量 DL を待たない）
-        const streamUrl = await getDriveStreamUrl(track.id, token);
-        if (streamUrl) {
-          targetUrl = streamUrl;
-          isDirectStream = true;
-          isUncachedDirectStream = true;
-          state.isDirectStream = true;
-          session.sourceType = "drive_stream";
-          logPerfMark(track.id, "stream_url_ready", t0);
-          if (needsWebAudio) {
-            notifyUncachedFastStreamOnce();
+        if (!targetUrl) {
+          const streamUrl = await getDriveStreamUrl(track.id, token);
+          if (streamUrl) {
+            targetUrl = streamUrl;
+            isDirectStream = true;
+            isUncachedDirectStream = true;
+            state.isDirectStream = true;
+            session.sourceType = "drive_stream";
+            logPerfMark(track.id, "stream_url_ready", t0);
+            if (needsWebAudio) {
+              notifyUncachedFastStreamOnce();
+            }
+          } else {
+            throw new Error("ストリームURLの取得に失敗しました");
           }
-        } else {
-          throw new Error("ストリームURLの取得に失敗しました");
         }
       } catch (driveErr) {
         console.warn("[audio-engine] Drive ストリーム準備失敗:", driveErr);
