@@ -568,12 +568,25 @@ export function isEqWired() {
 }
 
 /**
- * AudioContext を resume する（ユーザ操作起点で呼ぶこと）。
+ * AudioContext を resume する（ユーザ操作起点またはOS再開時に呼ぶ）。
+ * iOS WebKit 独自の "interrupted" 状態も確実に復旧する。
  */
 export async function resumeEqContext() {
-  if (ctx && ctx.state === "suspended") {
-    try { await ctx.resume(); } catch {}
+  if (ctx && (ctx.state === "suspended" || ctx.state === "interrupted")) {
+    try {
+      await ctx.resume();
+    } catch (err) {
+      console.warn("[eq] AudioContext resume 失敗:", err);
+    }
   }
+}
+
+/**
+ * 現在の AudioContext の state を取得
+ * @returns {string} "running" | "suspended" | "interrupted" | "closed" | "none"
+ */
+export function getEqContextState() {
+  return ctx ? ctx.state : "none";
 }
 
 /* ============ プリセット ============ */

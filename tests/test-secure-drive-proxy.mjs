@@ -51,8 +51,8 @@ async function run() {
     ok(setCookie.includes("drive_stream_token="), "Must contain drive_stream_token");
     ok(setCookie.includes("HttpOnly"), "Must be HttpOnly");
     ok(setCookie.includes("Secure"), "Must be Secure");
-    ok(setCookie.includes("SameSite=Strict"), "Must be SameSite=Strict");
-    ok(setCookie.includes("Path=/api/drive-stream"), "Path must be restricted to /api/drive-stream");
+    ok(setCookie.includes("SameSite=Lax"), "Must be SameSite=Lax");
+    ok(setCookie.includes("Path=/"), "Path must match root /");
     ok(setCookie.includes("Max-Age=3600"), "Max-Age must be 3600");
   });
 
@@ -229,7 +229,8 @@ async function run() {
       strictEqual(res.headers.get("content-length"), "4");
       strictEqual(res.headers.get("accept-ranges"), "bytes");
       strictEqual(res.headers.get("etag"), '"abc123etag"');
-      strictEqual(res.headers.get("cache-control"), "private, no-store");
+      strictEqual(res.headers.get("cache-control"), "private, no-store, no-transform");
+      strictEqual(res.headers.get("content-disposition"), "inline");
 
       // Verify safe MIME correction from application/octet-stream to audio/flac
       strictEqual(res.headers.get("content-type"), "audio/flac");
@@ -329,6 +330,43 @@ async function run() {
     strictEqual(url.includes("ext=flac"), true, "Must contain ext=flac");
     strictEqual(url.includes("token"), false, "Must NEVER contain token");
     strictEqual(url.includes("ya29"), false, "Must NEVER contain ya29");
+  });
+
+  // --- 5. Google Drive Redirect (.googleusercontent.com) and Streaming Test ---
+  await testAsync("drive-stream: Follows redirect to .googleusercontent.com and maintains 206 stream", async () => {
+    let redirectCount = 0;
+    globalThis.fetch = async (url) => {
+      redirectCount++;
+      if (url.includes("googleapis.com")) {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            "Location": "https://doc-01-docs.googleusercontent.com/download/storage/v1/b/flac-file",
+          },
+        });
+      }
+      return new Response(new Uint8Array([0x66, 0x4c, 0x61, 0x43]), {
+        status: 206,
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Range": "bytes 0-3/1000",
+          "Content-Length": "4",
+          "Accept-Ranges": "bytes",
+        },
+      });
+    };
+
+    try {
+      const req = new Request("https://example.com/api/drive-stream?fileId=1RedirectFile_12345&ext=flac", {
+        headers: { "Cookie": "drive_stream_token=ya29.valid_token_12345" },
+      });
+      const res = await streamHandler(req);
+      strictEqual(res.status, 206);
+      strictEqual(res.headers.get("content-type"), "audio/flac");
+      strictEqual(redirectCount, 2, "Must follow 302 redirect to googleusercontent.com");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   console.log(`\nSecure Google Drive Proxy テスト: ${passed} 件 PASSED ✓`);

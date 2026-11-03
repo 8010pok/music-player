@@ -40,7 +40,7 @@ function isValidFileId(fileId) {
   return /^[a-zA-Z0-9_-]{10,100}$/.test(fileId);
 }
 
-const CLEAR_COOKIE_HEADER = "drive_stream_token=; Path=/api/drive-stream; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Strict";
+const CLEAR_COOKIE_HEADER = "drive_stream_token=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax";
 
 const ALLOWED_EXT_MIME = {
   flac: "audio/flac",
@@ -155,7 +155,11 @@ export default async function handler(req) {
       if (location) {
         try {
           const locUrl = new URL(location);
-          if (locUrl.hostname.endsWith(".googleapis.com") || locUrl.hostname.endsWith(".google.com")) {
+          if (
+            locUrl.hostname.endsWith(".googleapis.com") ||
+            locUrl.hostname.endsWith(".google.com") ||
+            locUrl.hostname.endsWith(".googleusercontent.com")
+          ) {
             remoteRes = await fetch(location, {
               method: "GET",
               headers: upstreamHeaders,
@@ -209,9 +213,10 @@ export default async function handler(req) {
 
     // 7. レスポンスヘッダーの正確な構築 (バッファリング禁止)
     const responseHeaders = new Headers();
-    responseHeaders.set("Cache-Control", "private, no-store");
+    responseHeaders.set("Cache-Control", "private, no-store, no-transform");
     responseHeaders.set("Accept-Ranges", "bytes");
     responseHeaders.set("Vary", "Range");
+    responseHeaders.set("Content-Disposition", "inline");
 
     // Content-Type 補正
     const upstreamCt = remoteRes.headers.get("content-type");

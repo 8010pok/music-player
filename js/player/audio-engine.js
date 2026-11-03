@@ -36,6 +36,7 @@ import {
   getCurrentKeyShift,
   setAudioOutputDevice,
   resumeEqContext,
+  getEqContextState,
   getOutputRms,
   recoverAudioGraph,
   recreateAudioContext,
@@ -161,9 +162,32 @@ export function getLastPlaybackDiagnostics() {
 export function generatePlaybackDiagnostics(session, track, error) {
   const curEl = getAudioElement();
   const rawId = resolveDriveFileId(track);
+  const bufferedEnd = (curEl?.buffered && curEl.buffered.length > 0)
+    ? Number(curEl.buffered.end(curEl.buffered.length - 1).toFixed(2))
+    : 0;
+
   const diag = {
-    appVersion: "1.11.5",
+    appVersion: "1.11.7",
     displayMode: isPwaStandalone() ? "standalone" : "browser",
+    proxyEnabled: Boolean(getPublic()?.driveProxyStreamEnabled),
+    sourceType: session?.sourceType || (state.isDirectStream ? "direct_stream" : (state.currentObjectUrl ? "blob" : "none")),
+    proxySessionCreated: Boolean(session?.proxySessionCreated),
+    proxyRequestStarted: Boolean(session?.proxyRequestStarted),
+    proxyFirstByteMs: session?.proxyFirstByteMs ?? null,
+    proxyStatus: session?.lastHttpStatus ?? null,
+    proxyContentType: session?.lastContentType ?? null,
+    requestedRange: session?.requestedRange ?? null,
+    fallbackAttempted: session?.blobFallbackAttempted ?? false,
+    blobFetchStarted: Boolean(session?.blobFetchStarted),
+    backgroundCacheStarted: Boolean(session?.backgroundCacheStarted),
+    activeElement: activeAudioEl === streamAudioEl ? "streamAudioEl" : (activeAudioEl === mainAudioEl ? "mainAudioEl" : "unknown"),
+    audioContextState: getEqContextState(),
+    mediaSessionAction: session?.lastMediaSessionAction || null,
+    playPromiseResult: session?.lastPlayPromiseResult || null,
+    playingEventReceived: Boolean(session?.playingEventReceived),
+    readyState: curEl?.readyState ?? null,
+    networkState: curEl?.networkState ?? null,
+    bufferedEnd,
     trackExtension: getTrackExtension(track),
     trackMimeType: track?.mimeType || "",
     isDriveTrack: isDriveTrack(track),
@@ -172,13 +196,7 @@ export function generatePlaybackDiagnostics(session, track, error) {
     tokenState: session?.hasToken ? "present" : (session?.tokenError ? "expired" : "unknown"),
     errorName: error?.name || (error instanceof Error ? error.constructor.name : ""),
     mediaErrorCode: curEl?.error?.code || (typeof error?.code === "number" ? error.code : null),
-    readyState: curEl?.readyState ?? null,
-    networkState: curEl?.networkState ?? null,
     canPlayType: curEl && typeof curEl.canPlayType === "function" ? curEl.canPlayType("audio/flac") : null,
-    responseStatus: session?.lastHttpStatus ?? null,
-    responseContentType: session?.lastContentType ?? null,
-    responseKind: session?.lastResponseKind ?? null,
-    fallbackAttempted: session?.blobFallbackAttempted ?? false,
     sessionId: session?.id ? session.id.slice(-4) : "",
   };
   lastPlaybackDiagnostics = diag;
@@ -945,6 +963,12 @@ export function prewarmTrack(trackId, { onlyIfCached = false } = {}) {
             prewarmCache.delete(trackId);
             return null;
           }
+          const pub = getPublic() || {};
+          // ★ driveProxyStreamEnabled が有効な場合は、タップ時の全量 Blob 取得を絶対に開始しない（Range中継に専念）
+          if (pub.driveProxyStreamEnabled) {
+            prewarmCache.delete(trackId);
+            return null;
+          }
           // iOS / PWA または FLAC の場合:
           // タップ時 (onlyIfCached: false) はダイレクトストリーム URL ではなく Blob 取得を先行開始して待機時間を短縮
           const trackObj = (state.queue && state.queue.find((t) => t && t.id === trackId)) || { id: trackId };
@@ -1090,9 +1114,21 @@ export function shouldAttemptBlobFallback(session, track, error) {
     return false;
   }
 
+  // ★ 要件 # 7: Range 中継 (drive_proxy_stream) 再生時のガード:
+  //   単なるタイムアウトや loadstart 前の一過性エラーで即全量Blobへ切り替えない
+  if (session.sourceType === "drive_proxy_stream") {
+    // 明確な確定エラー (MEDIA_ERR_SRC_NOT_SUPPORTED=4, MEDIA_ERR_DECODE=3, またはHTTP確定エラー) のみ受理
+    const isDefiniteMediaError = code === 4 || code === 3 || errName === "NotSupportedError";
+    const isDefiniteHttpError = /502|404|STREAM_ERROR|Upstream/i.test(errStr);
+    if (!isDefiniteMediaError && !isDefiniteHttpError) {
+      return false;
+    }
+  }
+
   const isSupportOrStreamError =
     errName === "NotSupportedError" ||
     code === 4 || // MEDIA_ERR_SRC_NOT_SUPPORTED
+    code === 3 || // MEDIA_ERR_DECODE
     code === 2 || // MEDIA_ERR_NETWORK on direct stream
     /support|codec|decode|format|src|HTMLAudioElement error/i.test(errStr);
 
@@ -2513,6 +2549,7 @@ export async function playPrev() {
  * 8. セッション状態を保存
  */
 export function executePause() {
+  if (activePlaybackSession) activePlaybackSession.lastMediaSessionAction = "pause";
   state.userPausedExplicitly = true;
   clearResumeWatchdog();
   clearStallRecoveryTimer();
@@ -2541,6 +2578,7 @@ export function executePause() {
  * 4. play()失敗時はpausedまたはerrorへ戻す
  */
 export async function executePlay() {
+  if (activePlaybackSession) activePlaybackSession.lastMediaSessionAction = "play";
   unlockAudioElementsOnUserGesture();
   const curTrack = appState.get().currentTrack;
   if (!curTrack) {
@@ -2548,8 +2586,15 @@ export async function executePlay() {
     await autoStartFirstTrack();
     return;
   }
-  // 起動時のセッション復元直後など、src がまだロードされていない場合
-  if (!state.currentObjectUrl || !audioEl.src) {
+
+  // ★ 要件 # 10: 現在の PlaybackSession.activeElement を厳格に使用（別要素へ切り替えない）
+  const session = activePlaybackSession;
+  const curEl = (session && session.activeElement) ? session.activeElement : (activeAudioEl || getAudioElement());
+  if (!curEl) return;
+
+  // 起動時のセッション復元直後など、要素に src / currentSrc が一切ない場合のみ loadAndPlay を実行
+  const hasLoadedSrc = Boolean(curEl.src || curEl.currentSrc || state.currentObjectUrl);
+  if (!hasLoadedSrc) {
     primeAudioElement();
     const startSec = appState.get().currentTime || 0;
     await loadAndPlay(curTrack, { startTime: startSec });
@@ -2558,7 +2603,10 @@ export async function executePlay() {
 
   setupAudioSession();
   await resumeSessionActivator();
-  if (activeAudioEl === mainAudioEl) {
+
+  // ★ 要件 # 11: mainAudioEl の場合のみ AudioContext の resume を試行
+  //   streamAudioEl (Range中継) の場合は AudioContext を操作しない (Web Audio非接続)
+  if (curEl === mainAudioEl) {
     await resumeEqContext();
   }
 
@@ -2566,15 +2614,17 @@ export async function executePlay() {
   clearResumeWatchdog();
   armResumeWatchdog();
 
-  const curEl = getAudioElement();
-  if (!curEl) return;
-
   try {
-    await curEl.play();
-    appState.set({ isPlaying: true, loadingTrackId: null, playbackStatus: "playing" });
+    const p = curEl.play();
+    if (p && typeof p.then === "function") {
+      await p;
+    }
+    // ★ 要件 # 12: play() Promise resolve だけでは UI を過信せず、
+    //   MediaSession の再生状態のみ同期し、UI の isPlaying は playing イベントで確定更新
     if (navigator.mediaSession) {
       try { navigator.mediaSession.playbackState = "playing"; } catch {}
     }
+    appState.set({ playbackStatus: "playing" });
   } catch (err) {
     console.warn("[audio-engine] play 失敗", err);
     appState.set({ isPlaying: false, loadingTrackId: null, playbackStatus: "paused" });
@@ -3043,7 +3093,10 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
   // 1. Prewarm キャッシュにあるか確認
   const prewarmed = prewarmCache.get(track.id);
   if (prewarmed) {
-    if (prewarmed.isStream && shouldBypassDriveStreaming(track)) {
+    if (pub.driveProxyStreamEnabled && (isDrive || isDriveTrack(track))) {
+      // ★ Beta中継ON時は、prewarm側の全量Blob取得待機を完全破棄して即時Range中継へ進む
+      prewarmCache.delete(track.id);
+    } else if (prewarmed.isStream && shouldBypassDriveStreaming(track)) {
       prewarmCache.delete(track.id);
     } else {
       prewarmCache.delete(track.id);
@@ -3114,11 +3167,15 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
         if (shouldBypassDriveStreaming(track)) {
           // 【段階B】driveProxyStreamEnabled が有効な場合、同一オリジン Range 中継 (/api/drive-stream) を安全に試行
           if (pub.driveProxyStreamEnabled) {
+            session.proxyEnabled = true;
             try {
+              session.proxySessionCreated = false;
+              session.proxyRequestStarted = false;
               logPerfMark(track.id, "proxy_session_started", t0);
               const { ensureDriveStreamSession, getDriveProxyStreamUrl } = await import("../gdrive/drive-service.js");
               const sessionOk = await ensureDriveStreamSession(token);
               if (sessionOk && myToken === state.transitionToken) {
+                session.proxySessionCreated = true;
                 logPerfMark(track.id, "proxy_session_done", t0);
                 const proxyUrl = getDriveProxyStreamUrl(track);
                 if (proxyUrl) {
@@ -3127,16 +3184,21 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
                   isUncachedDirectStream = true;
                   state.isDirectStream = true;
                   session.sourceType = "drive_proxy_stream";
+                  session.proxyRequestStarted = true;
                   logPerfMark(track.id, "proxy_url_ready", t0);
                   if (needsWebAudio) notifyUncachedFastStreamOnce();
                 }
               }
             } catch (proxySetupErr) {
-              console.warn("[audio-engine] drive-stream プロキシセッション準備失敗、Blobフォールバックへ移行:", proxySetupErr);
+              console.warn("[audio-engine] drive-stream プロキシセッション準備失敗:", proxySetupErr);
             }
           }
 
           if (!targetUrl) {
+            // ★ 要件 # 2: Beta ON の未キャッシュFLACでは、再生開始前に全量Blob取得を絶対に開始しない！
+            if (pub.driveProxyStreamEnabled) {
+              throw new Error("Drive Range 中継セッションの確立に失敗しました (Session cookie)");
+            }
             logPerfMark(track.id, "drive_fast_fallback", t0);
             const fastErr = new Error("Fast Drive fetch");
             fastErr.isFastFallback = true;
@@ -3575,6 +3637,9 @@ function onPlay() {
 }
 
 function onPlaying() {
+  if (activePlaybackSession) {
+    activePlaybackSession.playingEventReceived = true;
+  }
   appState.set({
     isPlaying: true,
     loadingTrackId: null,
@@ -4166,6 +4231,12 @@ function setupTerminationCleanup() {
 function setupVisibilityGuard() {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") return;
+
+    // ★ フォアグラウンド復帰時: mainAudioEl 再生中かつ AudioContext が suspended / interrupted なら即時再開
+    if (!state.userPausedExplicitly && activeAudioEl === mainAudioEl) {
+      resumeEqContext().catch(() => {});
+    }
+
     // 復帰直後は audio.paused 状態の反映に少し時間がかかる場合があるため
     // 数回チェック
     let attempts = 0;
