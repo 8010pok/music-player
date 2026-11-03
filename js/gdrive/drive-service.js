@@ -491,7 +491,7 @@ export function requestGisToken(clientId) {
               reject(new Error(err && err.message ? err.message : "認証ウィンドウが閉じられたか失敗しました"));
             },
           });
-          client.requestAccessToken(emailHint ? { prompt: "", hint: emailHint } : { prompt: "" });
+          client.requestAccessToken(emailHint ? { hint: emailHint, prompt: "select_account" } : { prompt: "select_account" });
         } catch (e) {
           reject(e);
         }
@@ -787,8 +787,8 @@ export async function promptDriveReconnectModal({ track = null, reason = "", for
   const pub = getPublic() || {};
   const savedClientId = pub.gdriveClientId || "";
 
-  // ★ ユーザー要望: 「google driveに接続できていなかったときに、再接続の画面に直接行けるようにしてほしい。（Googleの画面）」
-  // Client ID が保存されている場合、アプリの中間モーダルを挟まずにダイレクトに Google の認証画面（GIS ポップアップ）を開く
+  // ★ ユーザー要望: 「google driveと再連携するときに、googleアカウントにログインと同じリンクを勝手に起動するようにしてほしい。」
+  // Client ID が保存されている場合、ダイレクトに Google の認証画面（GIS ポップアップ）を開く
   if (savedClientId && !forceModal) {
     try {
       toast("☁ Google 認証画面を開いています…", "info", 1800);
@@ -798,13 +798,8 @@ export async function promptDriveReconnectModal({ track = null, reason = "", for
         return newToken;
       }
     } catch (err) {
-      console.warn("[drive-service] 直接認証失敗/キャンセル、モーダルへフォールバック:", err);
-      const msg = err && err.message ? err.message : "";
-      // ユーザーが明示的にポップアップを閉じた・キャンセルした場合は、モーダルを押し付けずに中断
-      if (/closed|dismissed|キャンセル|閉じられた/i.test(msg)) {
-        return null;
-      }
-      // ポップアップブロッカーでブロックされた場合やエラー時は手動モーダルへフォールバック
+      console.warn("[drive-service] 直接認証失敗/ポップアップブロック、再連携モーダルを表示します:", err);
+      // ポップアップがブロックされた場合はモーダルへフォールバックして再トリガー
     }
   }
 
@@ -819,20 +814,30 @@ export async function promptDriveReconnectModal({ track = null, reason = "", for
 
     const savedEmail = pub.gdriveUserEmail || "";
     const trackTitle = (track && track.title) ? track.title : "Google Drive の曲";
+    const redirectUri = (typeof window !== "undefined" && window.location) ? (window.location.origin + window.location.pathname) : "";
+    const oauthDirectUrl = savedClientId ? `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(savedClientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent("https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file")}&prompt=select_account` : "";
 
     const bodyHtml = `
       <div class="gdrive-reconnect-modal" style="display:flex; flex-direction:column; gap:14px;">
         <div style="padding:12px 14px; border-radius:10px; background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.3); font-size:0.92rem; line-height:1.5;">
           <div style="font-weight:700; margin-bottom:4px;">🎵 「${escapeHtml(trackTitle)}」を再生します</div>
           <div class="muted" style="font-size:0.84rem;">
-            Google Drive の認証有効期限が切れているか未連携のため、この場でワンタップ再連携するとそのまま再生を開始します。
+            Google Drive の認証有効期限が切れているか未連携のため、Google アカウントにログインするとそのまま再生を開始します。
             ${savedEmail ? `<br><span style="color:var(--accent, #60a5fa);">前回の連携アカウント: ${escapeHtml(savedEmail)}</span>` : ""}
           </div>
         </div>
 
-        <button type="button" class="btn primary" id="gd-reconnect-now-btn" style="padding:13px 16px; font-size:1rem; font-weight:700; display:flex; align-items:center; justify-content:center; gap:8px;">
-          🔗 今すぐ Google Drive に再連携して再生
+        <button type="button" class="btn primary" id="gd-reconnect-now-btn" style="padding:14px 18px; font-size:1.05rem; font-weight:700; display:flex; align-items:center; justify-content:center; gap:8px; width:100%;">
+          🔑 Google アカウントでログイン
         </button>
+
+        ${oauthDirectUrl ? `
+          <div style="margin-top:-4px; text-align:center;">
+            <a href="${oauthDirectUrl}" class="btn" style="display:flex; align-items:center; justify-content:center; gap:6px; font-size:0.86rem; text-decoration:none; padding:8px 12px; background:transparent; border:1px solid var(--border-color, rgba(255,255,255,0.15));">
+              🌐 ポップアップが開かない場合はこちら（別タブでGoogleログイン）
+            </a>
+          </div>
+        ` : ""}
 
         <details style="font-size:0.84rem; color:var(--text-muted, #9ca3af);" ${!savedClientId ? "open" : ""}>
           <summary style="cursor:pointer; user-select:none; padding:4px 0;">詳細設定（Client ID / アクセストークン直接入力）</summary>
@@ -909,9 +914,18 @@ export async function promptDriveReconnectModal({ track = null, reason = "", for
           if (statusEl) statusEl.textContent = err.message || "再連携に失敗しました。もう一度お試しください。";
         } finally {
           nowBtn.disabled = false;
-          nowBtn.textContent = "🔗 今すぐ Google Drive に再連携して再生";
+          nowBtn.textContent = "🔑 Google アカウントでログイン";
         }
       });
+    }
+
+    // Client ID がある場合はモーダル表示と同時に Google ログインを自動起動
+    if (savedClientId && nowBtn) {
+      setTimeout(() => {
+        try {
+          if (!nowBtn.disabled && !settled) nowBtn.click();
+        } catch {}
+      }, 60);
     }
 
     if (manualBtn) {

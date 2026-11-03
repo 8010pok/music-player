@@ -97,13 +97,20 @@ export function isAppleDevice() {
  */
 export function getTrackExtension(track) {
   if (!track) return "";
-  const name = track.originalName || track.title || track.name || "";
+  const name = track.originalName || track.driveFileName || track.fileName || track.name || track.title || "";
   const m = String(name).match(/\.([a-zA-Z0-9]+)(?:[?#]|$)/);
-  return m ? m[1].toLowerCase() : "";
+  if (m) return m[1].toLowerCase();
+  if (track.format) return String(track.format).toLowerCase();
+  const rawMime = track.mime || track.mimeType || track.type;
+  if (rawMime) {
+    const mimeMatch = String(rawMime).match(/audio\/([a-zA-Z0-9_-]+)/);
+    if (mimeMatch) return mimeMatch[1].toLowerCase();
+  }
+  return "";
 }
 
 /**
- * トラックが FLAC 音源か判定（拡張子または MIME タイプ）
+ * トラックが FLAC 音源か判定（拡張子、format、または MIME タイプ）
  * @param {object} track
  * @returns {boolean}
  */
@@ -111,8 +118,25 @@ export function isFlacTrack(track) {
   if (!track) return false;
   const ext = getTrackExtension(track);
   if (ext === "flac") return true;
-  const mime = String(track.mimeType || track.type || "").toLowerCase();
+  const fmt = String(track.format || "").toLowerCase();
+  if (fmt.includes("flac")) return true;
+  const mime = String(track.mime || track.mimeType || track.type || "").toLowerCase();
   if (mime.includes("flac")) return true;
+  return false;
+}
+
+/**
+ * 未キャッシュの Google Drive ストリーミングをバイパスして即時 Blob 取得を行うべきか判定
+ * - iOS / iPadOS (Safari / WebKit) または PWA standalone: Google Drive の Range ストリーミング (application/octet-stream) を
+ *   WebKit が直接デコードできず 10〜15秒の stall / watchdog 待ちが発生することが実証されているため即時 Blob 取得する
+ * - FLAC 音源: 全プラットフォームにおいて直接ストリーミングより Blob 取得が安全・確実
+ * @param {object} track
+ * @returns {boolean}
+ */
+export function shouldBypassDriveStreaming(track) {
+  if (!track) return false;
+  if (isPwaStandalone() || isAppleDevice()) return true;
+  if (isFlacTrack(track)) return true;
   return false;
 }
 
@@ -138,7 +162,7 @@ export function generatePlaybackDiagnostics(session, track, error) {
   const curEl = getAudioElement();
   const rawId = resolveDriveFileId(track);
   const diag = {
-    appVersion: "1.11.3",
+    appVersion: "1.11.4",
     displayMode: isPwaStandalone() ? "standalone" : "browser",
     trackExtension: getTrackExtension(track),
     trackMimeType: track?.mimeType || "",
@@ -917,6 +941,12 @@ export function prewarmTrack(trackId, { onlyIfCached = false } = {}) {
       if (isDrive) {
         const cached = await hasCachedBlob(trackId);
         if (!cached) {
+          // iOS / PWA または FLAC の場合、ダイレクトストリーム URL は stall するため事前キャッシュしない
+          const trackObj = (state.queue && state.queue.find((t) => t && t.id === trackId)) || { id: trackId };
+          if (shouldBypassDriveStreaming(trackObj)) {
+            prewarmCache.delete(trackId);
+            return null;
+          }
           // 未キャッシュでも、EQ 無効時はダイレクトストリーム URL を事前生成して即時再生可能にする
           if (!getPublic().enableAudioEffects) {
             try {
@@ -1080,7 +1110,7 @@ export async function attemptDriveFlacBlobFallback(session, track, myAttemptId, 
 
   session.blobFallbackPromise = (async () => {
     try {
-      const isFastFallback = triggerError?.isFastFallback || (triggerError instanceof Error && triggerError.message === "PWA FLAC fast fallback");
+      const isFastFallback = triggerError?.isFastFallback || (triggerError instanceof Error && (triggerError.message === "PWA FLAC fast fallback" || triggerError.message === "Fast Drive fetch"));
       if (isFastFallback) {
         toast("Google Driveから音源を取得しています…", "info", 4000);
       } else {
@@ -1110,6 +1140,9 @@ export async function attemptDriveFlacBlobFallback(session, track, myAttemptId, 
       const isFlac = await checkBlobFlac(blob);
       if (isFlac || isFlacTrack(track)) {
         blob = new Blob([blob], { type: "audio/flac" });
+      } else if (!blob.type || blob.type === "application/octet-stream") {
+        const fallbackMime = track?.mime || track?.mimeType || (getTrackExtension(track) === "mp3" ? "audio/mpeg" : "audio/flac");
+        blob = new Blob([blob], { type: fallbackMime });
       }
 
       // 最新セッションであることを再確認
@@ -1896,9 +1929,13 @@ export async function playTrackImmediate(track) {
   }
   const prewarmed = prewarmCache.get(track.id);
   if (prewarmed && prewarmed.objectUrl) {
-    prewarmCache.delete(track.id);
-    playPreloadedSync(state.queueIndex, track, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
-    return;
+    if (prewarmed.isStream && shouldBypassDriveStreaming(track)) {
+      prewarmCache.delete(track.id);
+    } else {
+      prewarmCache.delete(track.id);
+      playPreloadedSync(state.queueIndex, track, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
+      return;
+    }
   }
   primeAudioElement();
   await loadAndPlay(track);
@@ -1932,6 +1969,10 @@ export async function setQueueAndPlay(tracks, startIndex = 0) {
 
   // 2. もし prewarmCache に既に URL (Object URL または ダイレクトストリーム URL) があれば完全同期で即座に再生 (ラグ 0ms)
   const prewarmed = prewarmCache.get(cur.id);
+  if (prewarmed && prewarmed.isStream && shouldBypassDriveStreaming(cur)) {
+    prewarmCache.delete(cur.id);
+    prewarmed.objectUrl = null;
+  }
   if (prewarmed && prewarmed.objectUrl) {
     prewarmCache.delete(cur.id);
     playPreloadedSync(state.queueIndex, cur, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
@@ -1989,9 +2030,13 @@ export async function playNext() {
   }
   const prewarmed = prewarmCache.get(t.id);
   if (prewarmed && prewarmed.objectUrl) {
-    prewarmCache.delete(t.id);
-    playPreloadedSync(next, t, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
-    return;
+    if (prewarmed.isStream && shouldBypassDriveStreaming(t)) {
+      prewarmCache.delete(t.id);
+    } else {
+      prewarmCache.delete(t.id);
+      playPreloadedSync(next, t, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
+      return;
+    }
   }
   state.queueIndex = next;
   appState.set({ queueIndex: next });
@@ -2337,9 +2382,13 @@ function advanceFromEnded() {
   }
   const prewarmed = prewarmCache.get(track.id);
   if (prewarmed && prewarmed.objectUrl) {
-    prewarmCache.delete(track.id);
-    playPreloadedSync(next, track, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
-    return;
+    if (prewarmed.isStream && shouldBypassDriveStreaming(track)) {
+      prewarmCache.delete(track.id);
+    } else {
+      prewarmCache.delete(track.id);
+      playPreloadedSync(next, track, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
+      return;
+    }
   }
 
   // フォールバック: プリロード未完了 (プリロードが間に合わなかった / blob 無し等)。
@@ -2386,9 +2435,13 @@ export async function playPrev() {
     }
     const prewarmed = prewarmCache.get(t.id);
     if (prewarmed && prewarmed.objectUrl) {
-      prewarmCache.delete(t.id);
-      playPreloadedSync(prev, t, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
-      return;
+      if (prewarmed.isStream && shouldBypassDriveStreaming(t)) {
+        prewarmCache.delete(t.id);
+      } else {
+        prewarmCache.delete(t.id);
+        playPreloadedSync(prev, t, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
+        return;
+      }
     }
     primeAudioElement();
     await loadAndPlay(t);
@@ -2593,9 +2646,13 @@ export async function jumpToQueueIndex(index) {
     }
     const prewarmed = prewarmCache.get(track.id);
     if (prewarmed && prewarmed.objectUrl) {
-      prewarmCache.delete(track.id);
-      playPreloadedSync(index, track, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
-      return;
+      if (prewarmed.isStream && shouldBypassDriveStreaming(track)) {
+        prewarmCache.delete(track.id);
+      } else {
+        prewarmCache.delete(track.id);
+        playPreloadedSync(index, track, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
+        return;
+      }
     }
     primeAudioElement();
     await loadAndPlay(track);
@@ -2933,19 +2990,23 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
   // 1. Prewarm キャッシュにあるか確認
   const prewarmed = prewarmCache.get(track.id);
   if (prewarmed) {
-    prewarmCache.delete(track.id);
-    if (prewarmed.objectUrl) {
-      targetUrl = prewarmed.objectUrl;
-    } else if (prewarmed.promise) {
-      targetUrl = await prewarmed.promise;
+    if (prewarmed.isStream && shouldBypassDriveStreaming(track)) {
+      prewarmCache.delete(track.id);
+    } else {
+      prewarmCache.delete(track.id);
+      if (prewarmed.objectUrl) {
+        targetUrl = prewarmed.objectUrl;
+      } else if (prewarmed.promise) {
+        targetUrl = await prewarmed.promise;
+      }
+      if (prewarmed.isStream) {
+        isDirectStream = true;
+        isUncachedDirectStream = true;
+        state.isDirectStream = true;
+        if (needsWebAudio) notifyUncachedFastStreamOnce();
+      }
+      if (targetUrl) logPerfMark(track.id, "prewarm_hit", t0);
     }
-    if (prewarmed.isStream) {
-      isDirectStream = true;
-      isUncachedDirectStream = true;
-      state.isDirectStream = true;
-      if (needsWebAudio) notifyUncachedFastStreamOnce();
-    }
-    if (targetUrl) logPerfMark(track.id, "prewarm_hit", t0);
   }
 
   // 1.5. インメモリ LRU Blob キャッシュ確認 (キャッシュ済み FLAC/MP3 を 0ms で URL 化)
@@ -2996,13 +3057,13 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
         session.hasToken = Boolean(token);
         session.isFlacDetected = isFlacTrack(track);
 
-        // ★ iOS または PWA における未キャッシュ FLAC のゼロ遅延最適化:
+        // ★ iOS / PWA standalone、または FLAC 音源における未キャッシュ音源のゼロ遅延最適化:
         // iOS WebKit は Google Drive の application/octet-stream を直接再生できず、
         // 10〜15秒の stall / watchdog 待ちが発生することが実証されているため、
         // 最初から安全かつ最速な Blob フォールバックで即時取得・即時再生を開始する。
-        if ((isPwaStandalone() || isAppleDevice()) && isFlacTrack(track)) {
-          logPerfMark(track.id, "pwa_flac_fast_fallback", t0);
-          const fastErr = new Error("PWA FLAC fast fallback");
+        if (shouldBypassDriveStreaming(track)) {
+          logPerfMark(track.id, "drive_fast_fallback", t0);
+          const fastErr = new Error("Fast Drive fetch");
           fastErr.isFastFallback = true;
           const recovered = await attemptDriveFlacBlobFallback(session, track, myAttemptId, fastErr);
           if (recovered) {

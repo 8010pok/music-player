@@ -7,7 +7,7 @@
  * バージョンを上げると古いキャッシュは破棄される。
  */
 
-const CACHE_VERSION = "v1.11.3";
+const CACHE_VERSION = "v1.11.4";
 const STATIC_CACHE = `static-${CACHE_VERSION}`;
 const API_CACHE = `api-${CACHE_VERSION}`;
 const IMG_CACHE = `img-${CACHE_VERSION}`;
@@ -136,8 +136,8 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(req.url);
 
-  // ★ Google Drive API / 音源ストリーミングは Service Worker で介入せず直接通信（Range・CORS・認証の安全担保）
-  if (url.hostname === "www.googleapis.com" || url.hostname === "drive.google.com") {
+  // ★ Google Drive API / 音源ストリーミング / Google 認証は Service Worker で介入せず直接通信（Range・CORS・認証の安全担保）
+  if (url.hostname === "www.googleapis.com" || url.hostname === "drive.google.com" || url.hostname === "accounts.google.com") {
     return;
   }
 

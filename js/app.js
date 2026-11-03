@@ -71,6 +71,27 @@ async function chooseInitialRoute() {
 }
 
 async function main() {
+  // ★ Google OAuth リダイレクト (access_token) の自動回収
+  if (typeof window !== "undefined" && window.location.hash && window.location.hash.includes("access_token=")) {
+    try {
+      const hashClean = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
+      const params = new URLSearchParams(hashClean);
+      const token = params.get("access_token");
+      const expiresIn = parseInt(params.get("expires_in") || "3600", 10);
+      if (token) {
+        const { setDriveToken, testConnection } = await import("./gdrive/drive-service.js");
+        const test = await testConnection(token);
+        const email = (test.ok && test.user && (test.user.emailAddress || test.user.displayName)) || "";
+        await setDriveToken(token, { expiresIn, email });
+        window.history.replaceState(null, "", window.location.pathname);
+        const { toast } = await import("./ui/components.js");
+        toast("☁ Google Drive に再連携しました！", "ok");
+      }
+    } catch (e) {
+      console.warn("[app] OAuth リダイレクトトークン処理失敗:", e);
+    }
+  }
+
   // 1. テーマ適用
   const pub = getPublic();
   document.documentElement.dataset.theme = pub.theme || "system";

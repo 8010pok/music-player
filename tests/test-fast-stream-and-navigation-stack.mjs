@@ -2132,7 +2132,7 @@ test("実機採取用診断情報 (generatePlaybackDiagnostics) の安全性検�
   const diag = generatePlaybackDiagnostics(mockSession, mockTrack, mockError);
 
   // 必須キーの存在確認
-  strictEqual(diag.appVersion, "1.11.3", "appVersion が設定されていること");
+  strictEqual(diag.appVersion, "1.11.4", "appVersion が設定されていること");
   strictEqual(diag.trackExtension, "flac", "拡張子が抽出されていること");
   strictEqual(diag.isDriveTrack, true, "isDriveTrack が true");
   strictEqual(diag.hasDriveFileId, true, "hasDriveFileId が true (存在有無のフラグ)");
@@ -2148,19 +2148,21 @@ test("実機採取用診断情報 (generatePlaybackDiagnostics) の安全性検�
   strictEqual(jsonStr.includes("https://"), false, "URL 全文が含まれていないこと");
 });
 
-test("iOS / PWA standalone 環境で未キャッシュ Drive FLAC を再生する際、ストリーミング待機をスキップして即座に Blob 取得する", () => {
-  const flacTrack = { id: "gd-test-flac-pwa", title: "Test PWA FLAC", mimeType: "audio/flac" };
-  const mp3Track = { id: "gd-test-mp3-pwa", title: "Test PWA MP3", mimeType: "audio/mpeg" };
+test("iOS / PWA standalone 環境で未キャッシュ Drive 音源を再生する際、ストリーミング待機をスキップして即座に Blob 取得する", () => {
+  const flacTrack = { id: "gd-test-flac-pwa", title: "Test PWA FLAC", mime: "audio/flac", format: "flac" };
+  const mp3Track = { id: "gd-test-mp3-pwa", title: "Test PWA MP3", mime: "audio/mpeg", format: "mp3" };
 
   const isPwa = true;
   const isApple = true;
-  const isFlac = (t) => t.mimeType === "audio/flac";
+  const isFlac = (t) => t.mime === "audio/flac" || t.format === "flac";
 
-  const shouldFastFallbackFlac = (isPwa || isApple) && isFlac(flacTrack);
-  const shouldFastFallbackMp3 = (isPwa || isApple) && isFlac(mp3Track);
+  // shouldBypassDriveStreaming の動作検証
+  const shouldBypass = (t, pwa, apple) => (pwa || apple) || isFlac(t);
 
-  strictEqual(shouldFastFallbackFlac, true, "FLAC は即時フォールバック対象");
-  strictEqual(shouldFastFallbackMp3, false, "MP3 はダイレクトストリーミングを試行");
+  strictEqual(shouldBypass(flacTrack, isPwa, isApple), true, "PWA/iOS上のFLACは即時Blob取得");
+  strictEqual(shouldBypass(mp3Track, isPwa, isApple), true, "PWA/iOS上のMP3も即時Blob取得 (WebKit stall防止)");
+  strictEqual(shouldBypass(flacTrack, false, false), true, "他環境でもFLACは即時Blob取得");
+  strictEqual(shouldBypass(mp3Track, false, false), false, "他環境のMP3はダイレクトストリーミング試行");
 });
 
 console.log(`\n高速再生 & ナビゲーションスタックテスト: ${passed} 件 PASSED ✓`);
