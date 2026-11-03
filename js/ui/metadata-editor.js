@@ -12,12 +12,12 @@ import { openModal, toast, escapeHtml, escapeAttr } from "./components.js";
 import { updateTrack, bulkUpdateTracks, deleteTrack, removeTrackFromAllPlaylists } from "../store/library-db.js";
 import { stopPlayback } from "../player/audio-engine.js";
 import { appState } from "../state.js";
-import { releaseArtwork, getArtworkUrl } from "./artwork-cache.js";
+import { releaseArtwork, getArtworkUrl, recordArtworkDiagnostics } from "./artwork-cache.js";
 import { searchTrackMetadata, searchAlbumMetadata, fetchArtworkBlob, fetchAlbumTracklist, cleanQuery } from "../metadata/musicbrainz.js";
 import { retryScrobbleForTrack } from "../lastfm/scrobble.js";
 import { openNormalizeModal } from "./normalize-modal.js";
 import { recordLibraryModified } from "../store/sync-service.js";
-import { blobToDataUrl } from "../metadata/util.js";
+import { blobToDataUrl, validateAndDecodeArtworkBlob } from "../metadata/util.js";
 
 /**
  * 1曲分のメタデータ編集モーダルを表示
@@ -31,6 +31,7 @@ export function editTrackMetadata(track, onUpdated) {
   return new Promise((resolve) => {
     let isSaving = false;
     let pendingArtworkBlob = undefined;
+    let pendingArtworkDecoded = null;
     const initialArtUrl = getArtworkUrl(track);
     let localPreviewUrl = null;
 
@@ -155,7 +156,9 @@ export function editTrackMetadata(track, onUpdated) {
       }
 
       let displayUrl = null;
-      if (pendingArtworkBlob instanceof Blob) {
+      if (pendingArtworkDecoded && pendingArtworkDecoded.dataUrl) {
+        displayUrl = pendingArtworkDecoded.dataUrl;
+      } else if (pendingArtworkBlob instanceof Blob) {
         localPreviewUrl = URL.createObjectURL(pendingArtworkBlob);
         displayUrl = localPreviewUrl;
       } else if (pendingArtworkBlob === null) {
@@ -188,20 +191,49 @@ export function editTrackMetadata(track, onUpdated) {
 
     // 画像ファイル選択ハンドラ
     const trackFileInput = body.querySelector("#meta-track-file-input");
-    trackFileInput?.addEventListener("change", (e) => {
+    trackFileInput?.addEventListener("change", async (e) => {
       const file = e.target.files && e.target.files[0];
+      // 同一ファイルの再選択でも確実に change が発火するよう直ちにリセット
+      e.target.value = "";
       if (!file) return;
-      if (!file.type.startsWith("image/")) {
-        toast("画像ファイルを選択してください", "err");
-        return;
+
+      recordArtworkDiagnostics({
+        targetType: "track",
+        targetId: track.id,
+        fileType: file.type || "unknown",
+        fileSize: file.size || 0,
+        decoded: false,
+        resized: false,
+        saved: false,
+        recordUpdated: false,
+        syncQueued: false,
+        rendered: false,
+        errorName: null,
+      });
+
+      try {
+        const decoded = await validateAndDecodeArtworkBlob(file, { maxSize: 500 });
+        pendingArtworkBlob = file;
+        pendingArtworkDecoded = decoded;
+        recordArtworkDiagnostics({
+          fileType: decoded.fileType,
+          fileSize: decoded.fileSize,
+          decoded: true,
+          resized: true,
+        });
+        renderTrackArtPreview();
+        toast("画像を選択しました。「保存」で反映されます", "ok");
+      } catch (err) {
+        recordArtworkDiagnostics({
+          errorName: err?.name || "ImageDecodeError",
+        });
+        toast(err?.message || "画像を読み込めませんでした", "err");
       }
-      pendingArtworkBlob = file;
-      renderTrackArtPreview();
-      toast("画像を選択しました。「保存」で反映されます", "ok");
     });
 
     body.querySelector("#btn-meta-track-remove-art")?.addEventListener("click", () => {
       pendingArtworkBlob = null;
+      pendingArtworkDecoded = null;
       renderTrackArtPreview();
       toast("画像を削除に設定しました", "info");
     });
@@ -319,6 +351,7 @@ export function editTrackMetadata(track, onUpdated) {
               const blob = await fetchArtworkBlob(sel.artworkUrl);
               if (blob) {
                 pendingArtworkBlob = blob;
+                pendingArtworkDecoded = null;
                 renderTrackArtPreview();
               }
             }
@@ -418,16 +451,29 @@ export function editTrackMetadata(track, onUpdated) {
 
               if (pendingArtworkBlob !== undefined) {
                 if (pendingArtworkBlob instanceof Blob) {
-                  try {
-                    patch.artworkDataUrl = await blobToDataUrl(pendingArtworkBlob, 500);
-                    patch.artworkBlob = null; // Base64 Data URL 化できた場合は生 Blob を null にして iOS WebKit の DataCloneError を防ぐ
-                  } catch {
-                    patch.artworkBlob = pendingArtworkBlob;
-                    patch.artworkDataUrl = null;
-                  }
+                  const decoded = pendingArtworkDecoded || (await validateAndDecodeArtworkBlob(pendingArtworkBlob, { maxSize: 500 }));
+                  patch.artworkDataUrl = decoded.dataUrl;
+                  patch.artworkBlob = null;
+                  patch._noEmbeddedArt = false;
+                  patch.artworkUpdatedAt = Date.now();
+                  recordArtworkDiagnostics({
+                    targetType: "track",
+                    targetId: track.id,
+                    fileType: decoded.fileType,
+                    fileSize: decoded.fileSize,
+                    decoded: true,
+                    resized: true,
+                    saved: false,
+                    recordUpdated: false,
+                    syncQueued: false,
+                    rendered: false,
+                    errorName: null,
+                  });
                 } else {
                   patch.artworkBlob = null;
                   patch.artworkDataUrl = null;
+                  patch._noEmbeddedArt = true;
+                  patch.artworkUpdatedAt = Date.now();
                 }
               }
 
@@ -435,6 +481,13 @@ export function editTrackMetadata(track, onUpdated) {
               await updateTrack(track.id, patch);
               releaseArtwork(track.id);
               recordLibraryModified();
+              if (pendingArtworkBlob instanceof Blob) {
+                recordArtworkDiagnostics({
+                  saved: true,
+                  recordUpdated: true,
+                  syncQueued: true,
+                });
+              }
               const updatedTrack = { ...track, ...patch };
               Object.assign(track, patch);
 
@@ -459,10 +512,18 @@ export function editTrackMetadata(track, onUpdated) {
               if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
               toast("メタデータを更新しました", "ok");
               if (typeof onUpdated === "function") onUpdated(track);
+              if (pendingArtworkBlob instanceof Blob) {
+                recordArtworkDiagnostics({ rendered: true, errorName: null });
+              }
               resolve(track);
               return true;
             } catch (err) {
               console.error("[metadata-editor] 保存エラー:", err);
+              if (pendingArtworkBlob instanceof Blob) {
+                recordArtworkDiagnostics({
+                  errorName: err?.name || "MetadataSaveError",
+                });
+              }
               toast("保存に失敗しました: " + (err.message || err), "err");
               isSaving = false;
               return false;
@@ -486,6 +547,7 @@ export function editAlbumMetadata(album, onUpdated) {
   return new Promise((resolve) => {
     let isSaving = false;
     let pendingArtworkBlob = undefined;
+    let pendingArtworkDecoded = null;
     const currentArtTrack = album.artworkTrack || album.tracks.find((t) => t.artworkBlob || t.artworkDataUrl);
     const initialArtUrl = currentArtTrack ? getArtworkUrl(currentArtTrack) : null;
     let localPreviewUrl = null;
@@ -595,7 +657,9 @@ export function editAlbumMetadata(album, onUpdated) {
       }
 
       let displayUrl = null;
-      if (pendingArtworkBlob instanceof Blob) {
+      if (pendingArtworkDecoded && pendingArtworkDecoded.dataUrl) {
+        displayUrl = pendingArtworkDecoded.dataUrl;
+      } else if (pendingArtworkBlob instanceof Blob) {
         localPreviewUrl = URL.createObjectURL(pendingArtworkBlob);
         displayUrl = localPreviewUrl;
       } else if (pendingArtworkBlob === null) {
@@ -628,20 +692,48 @@ export function editAlbumMetadata(album, onUpdated) {
 
     // 画像ファイル選択ハンドラ
     const albFileInput = body.querySelector("#meta-alb-file-input");
-    albFileInput?.addEventListener("change", (e) => {
+    albFileInput?.addEventListener("change", async (e) => {
       const file = e.target.files && e.target.files[0];
+      e.target.value = "";
       if (!file) return;
-      if (!file.type.startsWith("image/")) {
-        toast("画像ファイルを選択してください", "err");
-        return;
+
+      recordArtworkDiagnostics({
+        targetType: "album",
+        targetId: album.key || album.title || album.tracks[0]?.id,
+        fileType: file.type || "unknown",
+        fileSize: file.size || 0,
+        decoded: false,
+        resized: false,
+        saved: false,
+        recordUpdated: false,
+        syncQueued: false,
+        rendered: false,
+        errorName: null,
+      });
+
+      try {
+        const decoded = await validateAndDecodeArtworkBlob(file, { maxSize: 500 });
+        pendingArtworkBlob = file;
+        pendingArtworkDecoded = decoded;
+        recordArtworkDiagnostics({
+          fileType: decoded.fileType,
+          fileSize: decoded.fileSize,
+          decoded: true,
+          resized: true,
+        });
+        renderAlbArtPreview();
+        toast("アルバム画像を選択しました。「全曲に一括保存」で反映されます", "ok");
+      } catch (err) {
+        recordArtworkDiagnostics({
+          errorName: err?.name || "ImageDecodeError",
+        });
+        toast(err?.message || "画像を読み込めませんでした", "err");
       }
-      pendingArtworkBlob = file;
-      renderAlbArtPreview();
-      toast("アルバム画像を選択しました。「全曲に一括保存」で反映されます", "ok");
     });
 
     body.querySelector("#btn-meta-alb-remove-art")?.addEventListener("click", () => {
       pendingArtworkBlob = null;
+      pendingArtworkDecoded = null;
       renderAlbArtPreview();
       toast("アルバム画像を削除に設定しました", "info");
     });
@@ -747,6 +839,7 @@ export function editAlbumMetadata(album, onUpdated) {
               const blob = await fetchArtworkBlob(sel.artworkUrl);
               if (blob) {
                 pendingArtworkBlob = blob;
+                pendingArtworkDecoded = null;
                 renderAlbArtPreview();
               }
             }
@@ -863,16 +956,29 @@ export function editAlbumMetadata(album, onUpdated) {
               if (genre) basePatch.genre = genre;
               if (pendingArtworkBlob !== undefined) {
                 if (pendingArtworkBlob instanceof Blob) {
-                  try {
-                    basePatch.artworkDataUrl = await blobToDataUrl(pendingArtworkBlob, 500);
-                    basePatch.artworkBlob = null;
-                  } catch {
-                    basePatch.artworkBlob = pendingArtworkBlob;
-                    basePatch.artworkDataUrl = null;
-                  }
+                  const decoded = pendingArtworkDecoded || (await validateAndDecodeArtworkBlob(pendingArtworkBlob, { maxSize: 500 }));
+                  basePatch.artworkDataUrl = decoded.dataUrl;
+                  basePatch.artworkBlob = null;
+                  basePatch._noEmbeddedArt = false;
+                  basePatch.artworkUpdatedAt = Date.now();
+                  recordArtworkDiagnostics({
+                    targetType: "album",
+                    targetId: album.key || albumName,
+                    fileType: decoded.fileType,
+                    fileSize: decoded.fileSize,
+                    decoded: true,
+                    resized: true,
+                    saved: false,
+                    recordUpdated: false,
+                    syncQueued: false,
+                    rendered: false,
+                    errorName: null,
+                  });
                 } else {
                   basePatch.artworkBlob = null;
                   basePatch.artworkDataUrl = null;
+                  basePatch._noEmbeddedArt = true;
+                  basePatch.artworkUpdatedAt = Date.now();
                 }
               }
 
@@ -895,6 +1001,13 @@ export function editAlbumMetadata(album, onUpdated) {
                 releaseArtwork(t.id);
               }
               recordLibraryModified();
+              if (pendingArtworkBlob instanceof Blob) {
+                recordArtworkDiagnostics({
+                  saved: true,
+                  recordUpdated: true,
+                  syncQueued: true,
+                });
+              }
 
               album.title = albumName;
               album.albumArtist = albumArtist;
@@ -902,7 +1015,7 @@ export function editAlbumMetadata(album, onUpdated) {
               if (genre) album.genre = genre;
               if (pendingArtworkBlob !== undefined) {
                 if (pendingArtworkBlob) {
-                  album.artworkTrack = { ...album.tracks[0], artworkBlob: pendingArtworkBlob, artworkDataUrl: basePatch.artworkDataUrl || null };
+                  album.artworkTrack = { ...album.tracks[0], artworkBlob: null, artworkDataUrl: basePatch.artworkDataUrl || null };
                 } else {
                   album.artworkTrack = null;
                 }
@@ -919,10 +1032,14 @@ export function editAlbumMetadata(album, onUpdated) {
               if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
               toast(`${album.tracks.length} 曲のアルバム情報と曲名を更新しました`, "ok");
               if (typeof onUpdated === "function") onUpdated(album);
+              if (pendingArtworkBlob instanceof Blob) {
+                recordArtworkDiagnostics({ rendered: true, errorName: null });
+              }
               resolve(album);
               return true;
             } catch (err) {
               console.error("[metadata-editor] アルバム一括保存エラー:", err);
+              recordArtworkDiagnostics({ errorName: err?.code || err?.name || "SaveError", saved: false });
               toast("保存に失敗しました: " + (err.message || err), "err");
               isSaving = false;
               return false;
@@ -947,6 +1064,7 @@ export function editSelectedTracksMetadata(tracks, onUpdated) {
   return new Promise((resolve) => {
     let isSaving = false;
     let pendingArtworkBlob = undefined;
+    let pendingArtworkDecoded = null;
     const currentArtTrack = tracks.find((t) => t && (t.artworkBlob || t.artworkDataUrl));
     const initialArtUrl = currentArtTrack ? getArtworkUrl(currentArtTrack) : null;
     let localPreviewUrl = null;
@@ -1114,20 +1232,50 @@ export function editSelectedTracksMetadata(tracks, onUpdated) {
     renderSelArtPreview();
 
     const selFileInput = body.querySelector("#meta-sel-file-input");
-    selFileInput?.addEventListener("change", (e) => {
+    selFileInput?.addEventListener("change", async (e) => {
       const file = e.target.files && e.target.files[0];
+      e.target.value = "";
       if (!file) return;
-      if (!file.type.startsWith("image/")) {
-        toast("画像ファイルを選択してください", "err");
-        return;
+      try {
+        const decoded = await validateAndDecodeArtworkBlob(file, { maxSize: 500 });
+        pendingArtworkBlob = file;
+        pendingArtworkDecoded = decoded;
+        recordArtworkDiagnostics({
+          targetType: "album",
+          targetId: commonAlbum || tracks[0]?.id || "selected",
+          fileType: decoded.fileType,
+          fileSize: decoded.fileSize,
+          decoded: true,
+          resized: true,
+          saved: false,
+          recordUpdated: false,
+          syncQueued: false,
+          rendered: true,
+          errorName: null,
+        });
+        renderSelArtPreview();
+        toast("画像を選択しました。「一括保存」で反映されます", "ok");
+      } catch (err) {
+        recordArtworkDiagnostics({
+          targetType: "album",
+          targetId: commonAlbum || tracks[0]?.id || "selected",
+          fileType: file.type || "unknown",
+          fileSize: file.size || 0,
+          decoded: false,
+          resized: false,
+          saved: false,
+          recordUpdated: false,
+          syncQueued: false,
+          rendered: false,
+          errorName: err?.code || err?.name || "DecodeError",
+        });
+        toast(err?.message || "画像を読み込めませんでした", "err");
       }
-      pendingArtworkBlob = file;
-      renderSelArtPreview();
-      toast("画像を選択しました。「一括保存」で反映されます", "ok");
     });
 
     body.querySelector("#btn-meta-sel-remove-art")?.addEventListener("click", () => {
       pendingArtworkBlob = null;
+      pendingArtworkDecoded = null;
       renderSelArtPreview();
       toast("画像を削除に設定しました", "info");
     });
@@ -1232,6 +1380,7 @@ export function editSelectedTracksMetadata(tracks, onUpdated) {
               const blob = await fetchArtworkBlob(sel.artworkUrl);
               if (blob) {
                 pendingArtworkBlob = blob;
+                pendingArtworkDecoded = null;
                 renderSelArtPreview();
               }
             }
@@ -1347,16 +1496,29 @@ export function editSelectedTracksMetadata(tracks, onUpdated) {
 
               if (pendingArtworkBlob !== undefined) {
                 if (pendingArtworkBlob instanceof Blob) {
-                  try {
-                    basePatch.artworkDataUrl = await blobToDataUrl(pendingArtworkBlob, 500);
-                    basePatch.artworkBlob = null;
-                  } catch {
-                    basePatch.artworkBlob = pendingArtworkBlob;
-                    basePatch.artworkDataUrl = null;
-                  }
+                  const decoded = pendingArtworkDecoded || (await validateAndDecodeArtworkBlob(pendingArtworkBlob, { maxSize: 500 }));
+                  basePatch.artworkDataUrl = decoded.dataUrl;
+                  basePatch.artworkBlob = null;
+                  basePatch._noEmbeddedArt = false;
+                  basePatch.artworkUpdatedAt = Date.now();
+                  recordArtworkDiagnostics({
+                    targetType: "album",
+                    targetId: albumName || commonAlbum || tracks[0]?.id || "selected",
+                    fileType: decoded.fileType,
+                    fileSize: decoded.fileSize,
+                    decoded: true,
+                    resized: true,
+                    saved: false,
+                    recordUpdated: false,
+                    syncQueued: false,
+                    rendered: false,
+                    errorName: null,
+                  });
                 } else {
                   basePatch.artworkBlob = null;
                   basePatch.artworkDataUrl = null;
+                  basePatch._noEmbeddedArt = true;
+                  basePatch.artworkUpdatedAt = Date.now();
                 }
               }
 
@@ -1379,6 +1541,13 @@ export function editSelectedTracksMetadata(tracks, onUpdated) {
                 releaseArtwork(t.id);
               }
               recordLibraryModified();
+              if (pendingArtworkBlob instanceof Blob) {
+                recordArtworkDiagnostics({
+                  saved: true,
+                  recordUpdated: true,
+                  syncQueued: true,
+                });
+              }
 
               const cur = appState.get().currentTrack;
               if (cur && tracks.some((t) => t.id === cur.id)) {
@@ -1390,10 +1559,14 @@ export function editSelectedTracksMetadata(tracks, onUpdated) {
               if (localPreviewUrl) try { URL.revokeObjectURL(localPreviewUrl); } catch {}
               toast(`${tracks.length} 曲のメタデータを一括更新しました`, "ok");
               if (typeof onUpdated === "function") onUpdated(tracks);
+              if (pendingArtworkBlob instanceof Blob) {
+                recordArtworkDiagnostics({ rendered: true, errorName: null });
+              }
               resolve(tracks);
               return true;
             } catch (err) {
               console.error("[metadata-editor] 選択曲一括保存エラー:", err);
+              recordArtworkDiagnostics({ errorName: err?.code || err?.name || "SaveError", saved: false });
               toast("保存に失敗しました: " + (err.message || err), "err");
               isSaving = false;
               return false;

@@ -95,8 +95,13 @@ let currentModalInstance = null;
  *   onClick が false を返すとモーダルが閉じない
  * @returns {Promise<void>}
  */
-export function openModal({ title, body, actions = [] }) {
-  return new Promise((resolve) => {
+export function openModal({ title, body, bodyHtml, actions, buttons } = {}) {
+  const resolvedBody = body !== undefined ? body : bodyHtml;
+  const resolvedActions = Array.isArray(actions) ? actions : (Array.isArray(buttons) ? buttons : []);
+  let modalRef = null;
+  let closeRef = () => closeActiveModalSync();
+
+  const p = new Promise((resolve) => {
     const root = document.getElementById("modal-root");
     if (!root) { resolve(); return; }
 
@@ -110,6 +115,7 @@ export function openModal({ title, body, actions = [] }) {
 
     const modal = document.createElement("div");
     modal.className = "modal";
+    modalRef = modal;
 
     if (title) {
       const h = document.createElement("h2");
@@ -118,10 +124,10 @@ export function openModal({ title, body, actions = [] }) {
     }
 
     const bodyWrap = document.createElement("div");
-    if (typeof body === "string") {
-      bodyWrap.innerHTML = body;
-    } else if (body instanceof Node) {
-      bodyWrap.appendChild(body);
+    if (typeof resolvedBody === "string") {
+      bodyWrap.innerHTML = resolvedBody;
+    } else if (resolvedBody instanceof Node) {
+      bodyWrap.appendChild(resolvedBody);
     }
     modal.appendChild(bodyWrap);
 
@@ -189,17 +195,22 @@ export function openModal({ title, body, actions = [] }) {
     const close = () => {
       cleanup({ keepVisible: false });
     };
+    closeRef = close;
 
-    if (actions.length === 0) {
+    if (resolvedActions.length === 0) {
       const ok = document.createElement("button");
       ok.className = "btn primary";
       ok.textContent = "OK";
       ok.addEventListener("click", close);
       actionsWrap.appendChild(ok);
     } else {
-      for (const a of actions) {
+      for (const a of resolvedActions) {
         const btn = document.createElement("button");
-        btn.className = "btn" + (a.primary ? " primary" : "") + (a.danger ? " danger" : "");
+        btn.className = a.className
+          ? a.className
+          : ("btn" + (a.primary ? " primary" : "") + (a.danger ? " danger" : ""));
+        if (a.id) btn.id = a.id;
+        if (a.disabled) btn.disabled = true;
         btn.textContent = a.label;
         btn.addEventListener("click", async () => {
           try {
@@ -219,6 +230,10 @@ export function openModal({ title, body, actions = [] }) {
     // モーダル表示中のみ Enter/Escape を待ち受ける（close 時に解除）
     document.addEventListener("keydown", onKeydown);
   });
+
+  p.el = modalRef;
+  p.close = closeRef;
+  return p;
 }
 
 /**

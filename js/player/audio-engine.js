@@ -46,7 +46,7 @@ import { getPublic, setPublic } from "../store/settings.js";
 // 毎回 createObjectURL / revokeObjectURL を繰り返すと、iOS の
 // 背景フェッチ（ロック画面メタデータ反映）と競合し、リピートで同じ曲に
 // 戻ったときに lockscreen のアートワーク画像が空白になる事象を起こす。
-import { getArtworkUrl, releaseArtwork } from "../ui/artwork-cache.js";
+import { getArtworkUrl, releaseArtwork, getLastArtworkDiagnostics } from "../ui/artwork-cache.js";
 // 再生エラー時のスキップ通知。components.js は UI レイヤだが、
 // ユーザに「読み込めない曲をスキップした」ことを知らせるために最小依存で使う。
 import { toast, openModal } from "../ui/components.js";
@@ -151,7 +151,16 @@ let lastPlaybackDiagnostics = null;
  * @returns {object|null}
  */
 export function getLastPlaybackDiagnostics() {
-  return lastPlaybackDiagnostics;
+  if (!lastPlaybackDiagnostics) {
+    return {
+      appVersion: APP_VERSION,
+      artworkDiagnostics: getLastArtworkDiagnostics(),
+    };
+  }
+  return {
+    ...lastPlaybackDiagnostics,
+    artworkDiagnostics: getLastArtworkDiagnostics(),
+  };
 }
 
 /**
@@ -246,6 +255,7 @@ export function generatePlaybackDiagnostics(session, track, error) {
         })
       : [],
     timelineRaw: session?.timeline || [],
+    artworkDiagnostics: getLastArtworkDiagnostics(),
   };
   lastPlaybackDiagnostics = diag;
   if (typeof window !== "undefined") {

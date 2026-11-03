@@ -421,12 +421,30 @@ async function doImportLibraryData(data, { deleteMissing = false } = {}) {
         merged.userEditedAt = Math.max(existing.userEditedAt || 0, incoming.userEditedAt || 0);
       }
 
-      // artworkBlob は既存のものがあれば維持し、artworkDataUrl は送信元にあれば反映
-      if (existing.artworkBlob instanceof Blob) {
+      // artworkBlob は既存のものがあれば維持し、artworkDataUrl はタイムスタンプと明示削除を考慮してマージ
+      if (existing.artworkBlob instanceof Blob && !incoming._noEmbeddedArt) {
         merged.artworkBlob = existing.artworkBlob;
+      } else if (incoming._noEmbeddedArt && isIncomingNewer) {
+        merged.artworkBlob = null;
       }
-      if (incomingArt && isValidArtworkDataUrl(incomingArt)) {
-        merged.artworkDataUrl = incomingArt;
+      const isIncomingArtNewer =
+        (incoming.artworkUpdatedAt || 0) > (existing.artworkUpdatedAt || 0) ||
+        ((incoming.artworkUpdatedAt || 0) === (existing.artworkUpdatedAt || 0) && isIncomingNewer);
+
+      if (incoming._noEmbeddedArt && !incomingArt && isIncomingArtNewer) {
+        merged.artworkDataUrl = null;
+        merged._noEmbeddedArt = true;
+        merged.artworkUpdatedAt = Math.max(existing.artworkUpdatedAt || 0, incoming.artworkUpdatedAt || 0);
+      } else if (incomingArt && isValidArtworkDataUrl(incomingArt)) {
+        if (!existing.artworkDataUrl || !isValidArtworkDataUrl(existing.artworkDataUrl) || isIncomingArtNewer) {
+          merged.artworkDataUrl = incomingArt;
+          merged._noEmbeddedArt = false;
+          if (incoming.artworkUpdatedAt) {
+            merged.artworkUpdatedAt = Math.max(existing.artworkUpdatedAt || 0, incoming.artworkUpdatedAt || 0);
+          }
+        } else {
+          merged.artworkDataUrl = existing.artworkDataUrl;
+        }
       } else if (existing.artworkDataUrl && isValidArtworkDataUrl(existing.artworkDataUrl)) {
         merged.artworkDataUrl = existing.artworkDataUrl;
       }

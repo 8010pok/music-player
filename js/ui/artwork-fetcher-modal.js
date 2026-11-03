@@ -7,28 +7,31 @@
  * - アルバム単位または複数曲への一括適用に対応
  */
 
-import { openModal, toast, confirm, escapeHtml, escapeAttr } from "./components.js";
+import { openModal, closeActiveModalSync, toast, escapeHtml, escapeAttr } from "./components.js";
 import { searchAlbumMetadata, searchTrackMetadata, fetchArtworkBlob } from "../metadata/musicbrainz.js";
-import { blobToDataUrl } from "../metadata/util.js";
-import { updateTrack, bulkUpdateTracks } from "../store/library-db.js";
-import { releaseArtwork } from "./artwork-cache.js";
+import { validateAndDecodeArtworkBlob } from "../metadata/util.js";
+import { bulkUpdateTracks } from "../store/library-db.js";
+import { releaseArtwork, recordArtworkDiagnostics } from "./artwork-cache.js";
 import { recordLibraryModified } from "../store/sync-service.js";
 
 /**
- * ジャケット画像単独取得モーダルを開く
+ * ジャケット画像単独取得・変更モーダルを開く（端末内の画像選択 + オンライン検索の両対応）
  * @param {object} options
  * @param {Array<object>} options.tracks 対象のトラック配列（単一曲でも配列）
  * @param {string} [options.albumName] アルバム名（アルバム単位の場合）
  * @param {string} [options.artistName] アーティスト名
+ * @param {"track"|"album"|"artist"|"multi"} [options.targetType] 対象種別
  * @param {() => void} [options.onUpdated] 更新完了後のコールバック
  */
-export async function openArtworkFetcherModal({ tracks = [], albumName = "", artistName = "", onUpdated } = {}) {
+export async function openArtworkFetcherModal({ tracks = [], albumName = "", artistName = "", targetType = "", onUpdated } = {}) {
   if (!Array.isArray(tracks) || tracks.length === 0) {
     toast("対象の曲がありません", "err");
     return;
   }
 
   const primaryTrack = tracks[0];
+  const resolvedTargetType = targetType || (albumName ? "album" : artistName && tracks.length > 1 ? "artist" : tracks.length > 1 ? "multi" : "track");
+  const targetId = albumName || (artistName && tracks.length > 1 ? artistName : primaryTrack.id);
   const defaultArtist = artistName || primaryTrack.artist || primaryTrack.albumArtist || "";
   const defaultAlbum = albumName || primaryTrack.album || primaryTrack.title || "";
   const initialQuery = `${defaultArtist ? defaultArtist + " " : ""}${defaultAlbum}`.trim();
@@ -43,6 +46,16 @@ export async function openArtworkFetcherModal({ tracks = [], albumName = "", art
       対象: <strong>${tracks.length}曲</strong> (${escapeHtml(primaryTrack.title || "曲")}${tracks.length > 1 ? ` ほか${tracks.length - 1}曲` : ""})
     </div>
 
+    <div style="display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:8px; background:rgba(255,255,255,0.04); border:1px solid var(--border-color, rgba(255,255,255,0.12));">
+      <img id="art-local-preview" src="./icons/icon-192.png" alt="" style="width:52px; height:52px; border-radius:6px; object-fit:cover; display:none; flex-shrink:0;" />
+      <div style="flex:1; min-width:0;">
+        <div style="font-size:0.84rem; font-weight:600;">📁 端末から画像を選択 (JPEG / PNG / WebP)</div>
+        <div id="art-local-filename" style="font-size:0.76rem; color:var(--text-muted, #9ca3af); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">写真ライブラリやファイルから直接選択できます</div>
+      </div>
+      <button type="button" class="btn" id="btn-art-local-file" style="white-space:nowrap; font-size:0.82rem; padding:6px 10px;">📁 画像を選択</button>
+      <input type="file" id="art-local-file-input" accept="image/jpeg,image/png,image/webp,image/*" style="display:none;" />
+    </div>
+
     <div style="display:flex; gap:8px;">
       <input type="text" class="input" id="art-search-query" value="${escapeAttr(initialQuery)}" placeholder="アーティスト名 アルバム名で検索" style="flex:1;" />
       <button type="button" class="btn primary" id="art-search-btn">🔍 検索</button>
@@ -52,7 +65,7 @@ export async function openArtworkFetcherModal({ tracks = [], albumName = "", art
 
     <div id="art-results-grid" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:12px; min-height:120px;">
       <div style="grid-column:1/-1; text-align:center; padding:24px 0; color:var(--text-muted, #9ca3af); font-size:0.88rem;">
-        「検索」ボタンを押してジャケット画像を検索してください
+        「検索」ボタンを押すか、「📁 画像を選択」から画像を選んでください
       </div>
     </div>
 
@@ -65,80 +78,123 @@ export async function openArtworkFetcherModal({ tracks = [], albumName = "", art
   `;
 
   let selectedResult = null;
+  let selectedLocalBlob = null;
+  let selectedLocalDecoded = null;
   let isApplying = false;
 
   const modal = openModal({
     title: "🖼️ ジャケット画像のみ取得・変更",
     body: container,
-    buttons: [
+    actions: [
       {
         label: "キャンセル",
-        onClick: () => modal.close(),
+        onClick: () => {},
       },
       {
         label: "この画像を適用",
-        variant: "primary",
+        primary: true,
         id: "btn-art-apply",
         disabled: true,
         onClick: async () => {
-          if (!selectedResult || !selectedResult.artworkUrl) return;
-          if (isApplying) return;
+          if (!selectedLocalDecoded && (!selectedResult || !selectedResult.artworkUrl)) return false;
+          if (isApplying) return false;
 
           const applyAll = tracks.length > 1 ? (container.querySelector("#art-apply-all-chk")?.checked !== false) : false;
           const targetTracks = applyAll ? tracks : [primaryTrack];
 
-          const yes = await confirm(
-            `選択した高画質ジャケット画像を ${targetTracks.length} 曲に適用しますか？\n（現在の画像が上書きされます。曲名やメモなどは変更されません）`,
-            { okLabel: "画像を適用" }
-          );
-          if (!yes) return;
-
           isApplying = true;
-          const applyBtn = modal.el.querySelector("#btn-art-apply");
+          const applyBtn = modal.el ? modal.el.querySelector("#btn-art-apply") : document.getElementById("btn-art-apply");
           if (applyBtn) {
             applyBtn.disabled = true;
-            applyBtn.textContent = "⏳ 画像ダウンロード中…";
+            applyBtn.textContent = selectedLocalDecoded ? "⏳ 画像を保存中…" : "⏳ 画像ダウンロード中…";
           }
 
+          recordArtworkDiagnostics({
+            targetType: resolvedTargetType,
+            targetId,
+            fileType: selectedLocalDecoded ? selectedLocalDecoded.fileType : "remote/url",
+            fileSize: selectedLocalDecoded ? selectedLocalDecoded.fileSize : 0,
+            decoded: !!selectedLocalDecoded,
+            resized: !!selectedLocalDecoded,
+            saved: false,
+            recordUpdated: false,
+            syncQueued: false,
+            rendered: false,
+            errorName: null,
+          });
+
           try {
-            toast("高解像度画像をダウンロードしています…", "info", 2000);
-            const blob = await fetchArtworkBlob(selectedResult.artworkUrl);
-            if (!blob) {
-              throw new Error("画像のダウンロードに失敗しました。別の候補をお試しください。");
+            let dataUrl = null;
+            if (selectedLocalDecoded && selectedLocalDecoded.dataUrl) {
+              dataUrl = selectedLocalDecoded.dataUrl;
+            } else if (selectedLocalBlob) {
+              const decoded = await validateAndDecodeArtworkBlob(selectedLocalBlob, { maxSize: 600 });
+              dataUrl = decoded.dataUrl;
+              recordArtworkDiagnostics({
+                fileType: decoded.fileType,
+                fileSize: decoded.fileSize,
+                decoded: true,
+                resized: true,
+              });
+            } else {
+              toast("高解像度画像をダウンロードしています…", "info", 2000);
+              const blob = await fetchArtworkBlob(selectedResult.artworkUrl);
+              if (!blob) {
+                const dlErr = new Error("画像のダウンロードに失敗しました。別の候補をお試しください。");
+                dlErr.name = "ArtworkDownloadError";
+                throw dlErr;
+              }
+              const decoded = await validateAndDecodeArtworkBlob(blob, { maxSize: 600 });
+              dataUrl = decoded.dataUrl;
+              recordArtworkDiagnostics({
+                fileType: decoded.fileType,
+                fileSize: decoded.fileSize,
+                decoded: true,
+                resized: true,
+              });
             }
 
-            // Base64 Data URL 生成 (WebKit の stale Blob DataCloneError を防止)
-            const dataUrl = await blobToDataUrl(blob, 600).catch(() => null);
-
+            const now = Date.now();
             const patch = {
               artworkBlob: null,
               artworkDataUrl: dataUrl,
               hasArtwork: true,
               _noEmbeddedArt: false,
               userEdited: true,
-              updatedAt: Date.now(),
+              artworkUpdatedAt: now,
+              updatedAt: now,
             };
 
             const batch = targetTracks.map((t) => ({ id: t.id, patch }));
             await bulkUpdateTracks(batch);
+            recordArtworkDiagnostics({ saved: true, recordUpdated: true });
 
             for (const t of targetTracks) {
+              Object.assign(t, patch);
               releaseArtwork(t.id);
             }
             recordLibraryModified();
+            recordArtworkDiagnostics({ syncQueued: true });
+
+            if (typeof onUpdated === "function") {
+              await onUpdated();
+            }
+            recordArtworkDiagnostics({ rendered: true, errorName: null });
 
             toast(`${targetTracks.length} 曲のジャケット画像を更新しました`, "ok");
-            modal.close();
-            if (typeof onUpdated === "function") {
-              onUpdated();
-            }
+            closeActiveModalSync();
+            return true;
           } catch (err) {
             console.warn("[artwork-fetcher] 適用エラー:", err);
-            toast(err.message || "画像の適用に失敗しました", "err");
+            recordArtworkDiagnostics({
+              errorName: err?.name || "ArtworkApplyError",
+            });
+            toast(err?.message || "画像の適用に失敗しました", "err");
             if (applyBtn) {
               applyBtn.disabled = false;
               applyBtn.textContent = "この画像を適用";
             }
+            return false;
           } finally {
             isApplying = false;
           }
@@ -151,7 +207,74 @@ export async function openArtworkFetcherModal({ tracks = [], albumName = "", art
   const searchBtn = container.querySelector("#art-search-btn");
   const statusEl = container.querySelector("#art-search-status");
   const gridEl = container.querySelector("#art-results-grid");
-  const applyBtn = modal.el.querySelector("#btn-art-apply");
+  const localFileBtn = container.querySelector("#btn-art-local-file");
+  const localFileInput = container.querySelector("#art-local-file-input");
+  const localPreview = container.querySelector("#art-local-preview");
+  const localFilename = container.querySelector("#art-local-filename");
+  const applyBtn = modal.el ? modal.el.querySelector("#btn-art-apply") : document.getElementById("btn-art-apply");
+
+  if (localFileBtn && localFileInput) {
+    localFileBtn.addEventListener("click", () => localFileInput.click());
+    localFileInput.addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      // 同じファイルを連続で再選択しても change が発火するよう即座にリセット
+      e.target.value = "";
+      if (!file) return;
+
+      recordArtworkDiagnostics({
+        targetType: resolvedTargetType,
+        targetId,
+        fileType: file.type || "unknown",
+        fileSize: file.size || 0,
+        decoded: false,
+        resized: false,
+        saved: false,
+        recordUpdated: false,
+        syncQueued: false,
+        rendered: false,
+        errorName: null,
+      });
+
+      try {
+        const decoded = await validateAndDecodeArtworkBlob(file, { maxSize: 600 });
+        selectedLocalBlob = file;
+        selectedLocalDecoded = decoded;
+        selectedResult = null;
+
+        recordArtworkDiagnostics({
+          fileType: decoded.fileType,
+          fileSize: decoded.fileSize,
+          decoded: true,
+          resized: true,
+        });
+
+        if (localPreview) {
+          localPreview.src = decoded.dataUrl;
+          localPreview.style.display = "block";
+        }
+        if (localFilename) {
+          localFilename.textContent = `選択済み (${Math.round(file.size / 1024)} KB) — 「この画像を適用」を押して確定`;
+          localFilename.style.color = "var(--accent, #60a5fa)";
+        }
+        if (gridEl) {
+          gridEl.querySelectorAll(".art-candidate-card").forEach((c) => {
+            c.style.borderColor = "transparent";
+            c.style.background = "rgba(255,255,255,0.04)";
+          });
+        }
+        if (applyBtn) {
+          applyBtn.disabled = false;
+        }
+      } catch (err) {
+        selectedLocalBlob = null;
+        selectedLocalDecoded = null;
+        recordArtworkDiagnostics({
+          errorName: err?.name || "ImageDecodeError",
+        });
+        toast(err?.message || "画像を読み込めませんでした", "err");
+      }
+    });
+  }
 
   const runSearch = async () => {
     const q = (searchInput && searchInput.value.trim()) || "";
@@ -214,6 +337,13 @@ export async function openArtworkFetcherModal({ tracks = [], albumName = "", art
           card.addEventListener("click", () => {
             const idx = parseInt(card.dataset.idx, 10);
             selectedResult = candidates[idx] || null;
+            selectedLocalBlob = null;
+            selectedLocalDecoded = null;
+            if (localPreview) localPreview.style.display = "none";
+            if (localFilename) {
+              localFilename.textContent = "写真ライブラリやファイルから直接選択できます";
+              localFilename.style.color = "var(--text-muted, #9ca3af)";
+            }
 
             gridEl.querySelectorAll(".art-candidate-card").forEach((c) => {
               c.style.borderColor = "transparent";

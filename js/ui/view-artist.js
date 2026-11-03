@@ -16,6 +16,7 @@ import { getArtworkUrl } from "./artwork-cache.js";
 import { go, back } from "../router.js";
 import { toast, escapeHtml, escapeAttr, formatTime } from "./components.js";
 import { editTrackMetadata } from "./metadata-editor.js";
+import { openArtworkFetcherModal } from "./artwork-fetcher-modal.js";
 
 let artist = null;
 let unsubState = null;
@@ -59,6 +60,19 @@ export async function mount(root) {
 
   refs.playAllBtn.addEventListener("click", () => playArtist(false));
   refs.playShuffleBtn.addEventListener("click", () => playArtist(true));
+  if (refs.fetchArtBtn) {
+    refs.fetchArtBtn.addEventListener("click", () => {
+      openArtworkFetcherModal({
+        tracks: artist.tracks,
+        artistName: artist.name,
+        albumTitle: "",
+        targetType: "artist",
+        onUpdated: async () => {
+          await mount(root);
+        },
+      });
+    });
+  }
 
   // アルバムカードクリック委譲
   refs.albumGrid.addEventListener("click", (e) => {
@@ -140,6 +154,7 @@ function render(art) {
       <div class="artist-detail-actions">
         <button class="btn primary" id="btn-artist-play-all">▶ すべて再生</button>
         <button class="btn" id="btn-artist-play-shuffle">🔀 シャッフル再生</button>
+        <button class="btn" id="btn-artist-fetch-art" title="アーティスト画像・全曲のジャケット画像を変更">🖼 画像変更</button>
       </div>
 
       <!-- アルバム一覧セクション (リリース順 / タイトル順) -->
@@ -228,6 +243,7 @@ function collectRefs(root) {
     backBtn: root.querySelector("#btn-artist-back"),
     playAllBtn: root.querySelector("#btn-artist-play-all"),
     playShuffleBtn: root.querySelector("#btn-artist-play-shuffle"),
+    fetchArtBtn: root.querySelector("#btn-artist-fetch-art"),
     albumGrid: root.querySelector("#artist-album-grid"),
     trackList: root.querySelector("#artist-track-list"),
   };

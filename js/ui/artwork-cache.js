@@ -114,3 +114,52 @@ function normalizeBlob(b) {
   } catch {}
   return null;
 }
+
+// === 画像変更エラー診断ログ（画像本体・ローカルパス・個人情報は一切記録しない） ===
+let _lastArtworkDiagnostics = {
+  targetType: null,     // "track" | "album" | "artist" | "multi"
+  targetIdTail: null,   // 末尾6文字のみ
+  fileType: null,
+  fileSize: 0,
+  decoded: false,
+  resized: false,
+  saved: false,
+  recordUpdated: false,
+  syncQueued: false,
+  rendered: false,
+  errorName: null,
+  timestamp: 0,
+};
+
+export function sanitizeTargetIdTail(rawId) {
+  if (!rawId) return "none";
+  const str = String(rawId).trim();
+  if (!str) return "none";
+  return str.length > 6 ? str.slice(-6) : str;
+}
+
+export function recordArtworkDiagnostics(patch = {}) {
+  const next = {
+    ..._lastArtworkDiagnostics,
+    ...patch,
+    timestamp: Date.now(),
+  };
+  if (patch.targetId !== undefined) {
+    next.targetIdTail = sanitizeTargetIdTail(patch.targetId);
+    delete next.targetId;
+  } else if (patch.targetIdTail !== undefined) {
+    next.targetIdTail = sanitizeTargetIdTail(patch.targetIdTail);
+  }
+  // 画像本体やローカルパスが誤って混入しないよう保護
+  delete next.dataUrl;
+  delete next.artworkDataUrl;
+  delete next.blob;
+  delete next.filePath;
+  delete next.fileName;
+  _lastArtworkDiagnostics = next;
+  return { ..._lastArtworkDiagnostics };
+}
+
+export function getLastArtworkDiagnostics() {
+  return { ..._lastArtworkDiagnostics };
+}
