@@ -48,7 +48,7 @@ import { getPublic, setPublic } from "../store/settings.js";
 import { getArtworkUrl, releaseArtwork } from "../ui/artwork-cache.js";
 // 再生エラー時のスキップ通知。components.js は UI レイヤだが、
 // ユーザに「読み込めない曲をスキップした」ことを知らせるために最小依存で使う。
-import { toast } from "../ui/components.js";
+import { toast, openModal } from "../ui/components.js";
 import {
   getDriveToken,
   getDriveStreamUrl,
@@ -124,7 +124,7 @@ export function generatePlaybackDiagnostics(session, track, error) {
   const curEl = getAudioElement();
   const rawId = resolveDriveFileId(track);
   const diag = {
-    appVersion: "1.11.1",
+    appVersion: "1.11.2",
     displayMode: isPwaStandalone() ? "standalone" : "browser",
     trackExtension: getTrackExtension(track),
     trackMimeType: track?.mimeType || "",
@@ -148,6 +148,78 @@ export function generatePlaybackDiagnostics(session, track, error) {
     window.__getLastPlaybackDiagnostics = () => lastPlaybackDiagnostics;
   }
   return diag;
+}
+
+/**
+ * iOS PWA などクリップボードAPIがブロックされる環境でも確実に診断情報を取得できるよう、
+ * 画面中央に全選択可能なテキストエリアを含むモーダルを表示する
+ * @param {object|string} diag
+ */
+export function showDiagnosticsModal(diag) {
+  if (typeof document === "undefined") return;
+  const diagStr = typeof diag === "string" ? diag : JSON.stringify(diag, null, 2);
+
+  // まずクリップボードへの書き込みを試行
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+    navigator.clipboard.writeText(diagStr).catch(() => {});
+  }
+
+  const wrap = document.createElement("div");
+  wrap.style.display = "flex";
+  wrap.style.flexDirection = "column";
+  wrap.style.gap = "10px";
+
+  const p = document.createElement("p");
+  p.textContent = "以下の診断情報をコピーして共有してください（秘密情報は含まれません）：";
+  p.style.margin = "0";
+  p.style.fontSize = "13px";
+  p.style.opacity = "0.85";
+  wrap.appendChild(p);
+
+  const ta = document.createElement("textarea");
+  ta.readOnly = true;
+  ta.value = diagStr;
+  ta.style.width = "100%";
+  ta.style.height = "160px";
+  ta.style.boxSizing = "border-box";
+  ta.style.background = "rgba(0, 0, 0, 0.4)";
+  ta.style.color = "#fff";
+  ta.style.border = "1px solid rgba(255, 255, 255, 0.25)";
+  ta.style.borderRadius = "6px";
+  ta.style.padding = "8px";
+  ta.style.fontFamily = "monospace";
+  ta.style.fontSize = "11px";
+  ta.onclick = () => ta.select();
+  wrap.appendChild(ta);
+
+  openModal({
+    title: "再生診断情報",
+    body: wrap,
+    actions: [
+      {
+        label: "すべて選択",
+        primary: true,
+        onClick: () => {
+          ta.select();
+          try {
+            document.execCommand("copy");
+            toast("コピーしました", "ok", 2000);
+          } catch {
+            toast("テキストを長押ししてコピーしてください", "info", 3000);
+          }
+          return false;
+        },
+      },
+      {
+        label: "閉じる",
+        onClick: () => true,
+      },
+    ],
+  });
+
+  setTimeout(() => {
+    try { ta.select(); } catch {}
+  }, 120);
 }
 
 /**
@@ -934,6 +1006,8 @@ function clearPlayingWatchdog() {
  */
 export function shouldAttemptBlobFallback(session, track, error) {
   if (!session || session !== activePlaybackSession) return false;
+  // ★ 既にフォールバック処理が進行中なら待機対象として受理
+  if (session.blobFallbackPromise) return true;
   if (session.blobFallbackAttempted) return false;
   if (!isDriveTrack(track)) return false;
   const fileId = resolveDriveFileId(track);
@@ -964,14 +1038,12 @@ export function shouldAttemptBlobFallback(session, track, error) {
 /**
  * 未キャッシュ Google Drive FLAC 用の安全な Blob フォールバック処理 (最大1回のみ)
  * 1. トースト表示: 「ストリーミング再生に失敗したため、音源を取得しています…」
- * 2. Google Drive から全量 Blob を取得
- * 3. 取得したレスポンスが JSON や HTML ではないことを確認
- * 4. FLAC マジック fLaC を確認 & Blob.type を audio/flac へ補正
- * 5. Blob URL を作成
- * 6. streamAudioEl を停止・クリーンアップし mainAudioEl へ設定
- * 7. Web Audio / keyShift 状態を安全にリセット
- * 8. mainAudioEl.play() を 1 回だけ実行
- * 9. 成功した Blob を IndexedDB (blobs ストア) へキャッシュ
+ * 2. 進行中の10秒ウォッチドッグを完全解除（ダウンロード中のタイムアウト競合を根治）
+ * 3. 二重発火（errorイベントとplay rejection）を Promise 排他ロックで一本化
+ * 4. Google Drive から全量 Blob を取得 (CORS プリフライト拒絶時はクエリパラメータ形式へフォールバック)
+ * 5. FLAC マジック fLaC を確認 & Blob.type を audio/flac へ補正
+ * 6. Blob URL を作成し mainAudioEl で再生
+ * 7. 成功した Blob を IndexedDB (blobs ストア) へキャッシュ
  * @param {object} session
  * @param {object} track
  * @param {string} myAttemptId
@@ -980,92 +1052,105 @@ export function shouldAttemptBlobFallback(session, track, error) {
  */
 export async function attemptDriveFlacBlobFallback(session, track, myAttemptId, triggerError) {
   if (!session || session !== activePlaybackSession) return false;
+  // ★ 既にフォールバック処理が走っている場合は、その Promise を待機して返す（二重実行・割り込み防止）
+  if (session.blobFallbackPromise) {
+    return session.blobFallbackPromise;
+  }
   if (session.blobFallbackAttempted) return false;
   session.blobFallbackAttempted = true;
 
+  // ★ 10秒ウォッチドッグタイマーを直ちに完全解除（FLACの全量取得中にタイムアウトで殺されないようにする）
+  clearPlayingWatchdog();
+
   console.warn("[audio-engine] 未キャッシュDrive FLACのダイレクトストリーミングが失敗したため、Blobフォールバックを実行します:", track?.id, triggerError);
 
-  try {
-    toast("ストリーミング再生に失敗したため、音源を取得しています…", "info", 4000);
+  session.blobFallbackPromise = (async () => {
+    try {
+      toast("ストリーミング再生に失敗したため、音源を取得しています…", "info", 5000);
 
-    const token = await getDriveToken();
-    if (!token) {
-      session.tokenError = true;
-      throw new Error("Google Drive に接続されていません。再接続してください。");
-    }
-    session.hasToken = true;
+      const token = await getDriveToken();
+      if (!token) {
+        session.tokenError = true;
+        throw new Error("Google Drive に接続されていません。再接続してください。");
+      }
+      session.hasToken = true;
 
-    const fileId = resolveDriveFileId(track);
-    if (!fileId) throw new Error("Google Drive fileId が見つかりません");
+      const fileId = resolveDriveFileId(track);
+      if (!fileId) throw new Error("Google Drive fileId が見つかりません");
 
-    const { fetchDriveAudioBlob } = await import("../gdrive/drive-service.js");
-    let blob = await fetchDriveAudioBlob(fileId, { maxRetries: 2 });
-    if (!blob) throw new Error("Google Drive から音源を取得できませんでした。");
+      const { fetchDriveAudioBlob } = await import("../gdrive/drive-service.js");
+      let blob = await fetchDriveAudioBlob(fileId, { maxRetries: 2 });
+      if (!blob) throw new Error("Google Drive から音源を取得できませんでした。");
 
-    // レスポンスが JSON や HTML のエラーページでないことを確認
-    if (blob.type && (blob.type.includes("json") || blob.type.includes("html"))) {
-      throw new Error("Google Drive から音声ではないデータが返されました");
-    }
+      // レスポンスが JSON や HTML のエラーページでないことを確認
+      if (blob.type && (blob.type.includes("json") || blob.type.includes("html"))) {
+        throw new Error("Google Drive から音声ではないデータが返されました");
+      }
 
-    // FLAC マジック確認 & MIME タイプ補正
-    const isFlac = await checkBlobFlac(blob);
-    if (isFlac || isFlacTrack(track)) {
-      blob = new Blob([blob], { type: "audio/flac" });
-    }
+      // FLAC マジック確認 & MIME タイプ補正
+      const isFlac = await checkBlobFlac(blob);
+      if (isFlac || isFlacTrack(track)) {
+        blob = new Blob([blob], { type: "audio/flac" });
+      }
 
-    // 最新セッションであることを再確認
-    if (session !== activePlaybackSession || (myAttemptId && myAttemptId !== state.currentPlayAttemptId)) {
+      // 最新セッションであることを再確認
+      if (session !== activePlaybackSession || (myAttemptId && myAttemptId !== state.currentPlayAttemptId)) {
+        return false;
+      }
+
+      const blobUrl = URL.createObjectURL(blob);
+      const oldUrl = state.currentObjectUrl;
+      state.currentObjectUrl = blobUrl;
+      session.sourceType = "drive_blob_fallback";
+
+      // streamAudioEl を安全に停止・クリーンアップ
+      try { streamAudioEl.pause(); } catch {}
+      if (streamAudioEl.src) {
+        streamAudioEl.removeAttribute("src");
+        try { streamAudioEl.load(); } catch {}
+      }
+
+      // mainAudioEl へ切り替え
+      setActiveAudioElement(mainAudioEl);
+
+      // mainAudioEl 切り替え前に Web Audio / keyShift 状態をリセット
+      session.appliedKeyShift = 0;
+      applyKeyShift(0, mainAudioEl);
+      appState.set({ currentKeyShift: 0 });
+
+      mainAudioEl.src = blobUrl;
+      mainAudioEl.loop = false;
+      mainAudioEl.playbackRate = getEffectivePlaybackRate();
+      applyTrackVolume(mainAudioEl, track);
+
+      const playPromise = mainAudioEl.play();
+      if (playPromise && typeof playPromise.then === "function") {
+        await playPromise;
+      }
+
+      console.log("[audio-engine] FLAC Blob フォールバック再生に成功しました:", track?.id);
+      appState.set({ isPlaying: true, loadingTrackId: null, playbackStatus: "playing" });
+
+      if (oldUrl && oldUrl !== blobUrl && oldUrl.startsWith("blob:")) {
+        setTimeout(() => { try { URL.revokeObjectURL(oldUrl); } catch {} }, 2000);
+      }
+
+      // 成功した Blob を IndexedDB に非同期保存（次回以降はローカルキャッシュから即時再生）
+      saveBlob(track.id, blob).catch((cacheErr) => {
+        console.warn("[audio-engine] Blob キャッシュ保存失敗 (再生は継続):", cacheErr);
+      });
+
+      return true;
+    } catch (fallbackErr) {
+      console.warn("[audio-engine] FLAC Blob フォールバック失敗:", fallbackErr);
+      session.fallbackError = fallbackErr;
       return false;
+    } finally {
+      session.blobFallbackPromise = null;
     }
+  })();
 
-    const blobUrl = URL.createObjectURL(blob);
-    const oldUrl = state.currentObjectUrl;
-    state.currentObjectUrl = blobUrl;
-    session.sourceType = "drive_blob_fallback";
-
-    // streamAudioEl を安全に停止・クリーンアップ
-    try { streamAudioEl.pause(); } catch {}
-    if (streamAudioEl.src) {
-      streamAudioEl.removeAttribute("src");
-      try { streamAudioEl.load(); } catch {}
-    }
-
-    // mainAudioEl へ切り替え
-    setActiveAudioElement(mainAudioEl);
-
-    // mainAudioEl 切り替え前に Web Audio / keyShift 状態をリセット
-    session.appliedKeyShift = 0;
-    applyKeyShift(0, mainAudioEl);
-    appState.set({ currentKeyShift: 0 });
-
-    mainAudioEl.src = blobUrl;
-    mainAudioEl.loop = false;
-    mainAudioEl.playbackRate = getEffectivePlaybackRate();
-    applyTrackVolume(mainAudioEl, track);
-
-    const playPromise = mainAudioEl.play();
-    if (playPromise && typeof playPromise.then === "function") {
-      await playPromise;
-    }
-
-    console.log("[audio-engine] FLAC Blob フォールバック再生に成功しました:", track?.id);
-    appState.set({ isPlaying: true, loadingTrackId: null, playbackStatus: "playing" });
-
-    if (oldUrl && oldUrl !== blobUrl && oldUrl.startsWith("blob:")) {
-      setTimeout(() => { try { URL.revokeObjectURL(oldUrl); } catch {} }, 2000);
-    }
-
-    // 成功した Blob を IndexedDB に非同期保存（次回以降はローカルキャッシュから即時再生）
-    saveBlob(track.id, blob).catch((cacheErr) => {
-      console.warn("[audio-engine] Blob キャッシュ保存失敗 (再生は継続):", cacheErr);
-    });
-
-    return true;
-  } catch (fallbackErr) {
-    console.warn("[audio-engine] FLAC Blob フォールバック失敗:", fallbackErr);
-    session.fallbackError = fallbackErr;
-    return false;
-  }
+  return session.blobFallbackPromise;
 }
 
 /**
@@ -1091,20 +1176,10 @@ function handlePlaybackFinalFailure(attemptId, track, error) {
   });
 
   try {
-    toast(userMsg, "err", 6000, {
+    toast(userMsg, "err", 8000, {
       label: "診断情報をコピー",
-      onClick: async () => {
-        try {
-          const diagStr = JSON.stringify(diag, null, 2);
-          if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-            await navigator.clipboard.writeText(diagStr);
-            toast("診断情報をコピーしました", "ok", 2000);
-          } else {
-            toast("クリップボードへのアクセスが許可されていません", "err", 2000);
-          }
-        } catch {
-          toast("コピーに失敗しました", "err", 2000);
-        }
+      onClick: () => {
+        showDiagnosticsModal(diag);
       },
     });
   } catch {}

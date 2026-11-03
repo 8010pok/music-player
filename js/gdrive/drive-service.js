@@ -633,10 +633,18 @@ export async function fetchDriveAudioBlob(fileId, { onProgress, maxRetries = 3, 
       if (!token) throw new Error("Google Drive に接続されていません。設定画面で接続してください。");
 
       const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`;
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: signal || undefined,
-      });
+      let res = null;
+      try {
+        res = await fetch(url, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: signal || undefined,
+        });
+      } catch (fetchErr) {
+        // CORS プリフライト失敗またはネットワークエラー時: クエリパラメータ形式で安全にフォールバック
+        console.warn("[drive-service] Authorization ヘッダー fetch 失敗、クエリ形式へフォールバック:", fetchErr);
+        const queryUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media&access_token=${encodeURIComponent(token)}`;
+        res = await fetch(queryUrl, { signal: signal || undefined });
+      }
 
       if (!res.ok) {
         if (res.status === 401) {
