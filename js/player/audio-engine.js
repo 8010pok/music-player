@@ -77,6 +77,20 @@ export function isPwaStandalone() {
 }
 
 /**
+ * iOS / iPadOS デバイス判定（Safari / WebKit）
+ * @returns {boolean}
+ */
+export function isAppleDevice() {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return false;
+  try {
+    const ua = navigator.userAgent || "";
+    return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * トラック拡張子を取得
  * @param {object} track
  * @returns {string} 小文字の拡張子（例: 'flac', 'mp3'）
@@ -124,7 +138,7 @@ export function generatePlaybackDiagnostics(session, track, error) {
   const curEl = getAudioElement();
   const rawId = resolveDriveFileId(track);
   const diag = {
-    appVersion: "1.11.2",
+    appVersion: "1.11.3",
     displayMode: isPwaStandalone() ? "standalone" : "browser",
     trackExtension: getTrackExtension(track),
     trackMimeType: track?.mimeType || "",
@@ -1066,7 +1080,12 @@ export async function attemptDriveFlacBlobFallback(session, track, myAttemptId, 
 
   session.blobFallbackPromise = (async () => {
     try {
-      toast("ストリーミング再生に失敗したため、音源を取得しています…", "info", 5000);
+      const isFastFallback = triggerError?.isFastFallback || (triggerError instanceof Error && triggerError.message === "PWA FLAC fast fallback");
+      if (isFastFallback) {
+        toast("Google Driveから音源を取得しています…", "info", 4000);
+      } else {
+        toast("ストリーミング再生に失敗したため、音源を取得しています…", "info", 5000);
+      }
 
       const token = await getDriveToken();
       if (!token) {
@@ -1129,6 +1148,7 @@ export async function attemptDriveFlacBlobFallback(session, track, myAttemptId, 
       }
 
       console.log("[audio-engine] FLAC Blob フォールバック再生に成功しました:", track?.id);
+      state.transitioning = false;
       appState.set({ isPlaying: true, loadingTrackId: null, playbackStatus: "playing" });
 
       if (oldUrl && oldUrl !== blobUrl && oldUrl.startsWith("blob:")) {
@@ -2972,6 +2992,26 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
           clearPendingPlayback();
           primeAudioElement(streamAudioEl);
         }
+
+        session.hasToken = Boolean(token);
+        session.isFlacDetected = isFlacTrack(track);
+
+        // ★ iOS または PWA における未キャッシュ FLAC のゼロ遅延最適化:
+        // iOS WebKit は Google Drive の application/octet-stream を直接再生できず、
+        // 10〜15秒の stall / watchdog 待ちが発生することが実証されているため、
+        // 最初から安全かつ最速な Blob フォールバックで即時取得・即時再生を開始する。
+        if ((isPwaStandalone() || isAppleDevice()) && isFlacTrack(track)) {
+          logPerfMark(track.id, "pwa_flac_fast_fallback", t0);
+          const fastErr = new Error("PWA FLAC fast fallback");
+          fastErr.isFastFallback = true;
+          const recovered = await attemptDriveFlacBlobFallback(session, track, myAttemptId, fastErr);
+          if (recovered) {
+            return;
+          }
+          handlePlaybackFinalFailure(myAttemptId, track, session.fallbackError || fastErr);
+          return;
+        }
+
         // ダイレクトストリーミング URL を取得して即座に再生開始（FLAC 全量 DL を待たない）
         const streamUrl = await getDriveStreamUrl(track.id, token);
         if (streamUrl) {

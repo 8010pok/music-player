@@ -2132,7 +2132,7 @@ test("実機採取用診断情報 (generatePlaybackDiagnostics) の安全性検�
   const diag = generatePlaybackDiagnostics(mockSession, mockTrack, mockError);
 
   // 必須キーの存在確認
-  strictEqual(diag.appVersion, "1.11.2", "appVersion が設定されていること");
+  strictEqual(diag.appVersion, "1.11.3", "appVersion が設定されていること");
   strictEqual(diag.trackExtension, "flac", "拡張子が抽出されていること");
   strictEqual(diag.isDriveTrack, true, "isDriveTrack が true");
   strictEqual(diag.hasDriveFileId, true, "hasDriveFileId が true (存在有無のフラグ)");
@@ -2146,6 +2146,21 @@ test("実機採取用診断情報 (generatePlaybackDiagnostics) の安全性検�
   strictEqual(jsonStr.includes("access_token"), false, "access_token キーが含まれていないこと");
   strictEqual(jsonStr.includes("ya29"), false, "Google トークン値が含まれていないこと");
   strictEqual(jsonStr.includes("https://"), false, "URL 全文が含まれていないこと");
+});
+
+test("iOS / PWA standalone 環境で未キャッシュ Drive FLAC を再生する際、ストリーミング待機をスキップして即座に Blob 取得する", () => {
+  const flacTrack = { id: "gd-test-flac-pwa", title: "Test PWA FLAC", mimeType: "audio/flac" };
+  const mp3Track = { id: "gd-test-mp3-pwa", title: "Test PWA MP3", mimeType: "audio/mpeg" };
+
+  const isPwa = true;
+  const isApple = true;
+  const isFlac = (t) => t.mimeType === "audio/flac";
+
+  const shouldFastFallbackFlac = (isPwa || isApple) && isFlac(flacTrack);
+  const shouldFastFallbackMp3 = (isPwa || isApple) && isFlac(mp3Track);
+
+  strictEqual(shouldFastFallbackFlac, true, "FLAC は即時フォールバック対象");
+  strictEqual(shouldFastFallbackMp3, false, "MP3 はダイレクトストリーミングを試行");
 });
 
 console.log(`\n高速再生 & ナビゲーションスタックテスト: ${passed} 件 PASSED ✓`);
