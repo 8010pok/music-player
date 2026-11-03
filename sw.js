@@ -136,6 +136,11 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(req.url);
 
+  // ★ Google Drive API / 音源ストリーミングは Service Worker で介入せず直接通信（Range・CORS・認証の安全担保）
+  if (url.hostname === "www.googleapis.com" || url.hostname === "drive.google.com") {
+    return;
+  }
+
   // 0. Google Drive 音源ストリーミング中継（Range リクエスト・アクセストークン対応）
   if (url.pathname.includes("/gdrive-stream/")) {
     event.respondWith(handleDriveStream(req, url));

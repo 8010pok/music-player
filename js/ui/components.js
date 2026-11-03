@@ -8,13 +8,38 @@
  * @param {"info"|"ok"|"err"} kind
  * @param {number} ms
  */
-export function toast(msg, kind = "info", ms = 2500) {
+export function toast(msg, kind = "info", ms = 2500, action = null) {
   if (typeof document === "undefined") return;
   const root = document.getElementById("toast-root");
   if (!root) return;
   const el = document.createElement("div");
   el.className = "toast" + (kind === "ok" ? " is-ok" : kind === "err" ? " is-err" : "");
-  el.textContent = msg;
+
+  const span = document.createElement("span");
+  span.textContent = msg;
+  el.appendChild(span);
+
+  if (action && action.label && typeof action.onClick === "function") {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "toast-action-btn";
+    btn.textContent = action.label;
+    btn.style.marginLeft = "10px";
+    btn.style.padding = "2px 8px";
+    btn.style.fontSize = "12px";
+    btn.style.fontWeight = "600";
+    btn.style.borderRadius = "4px";
+    btn.style.border = "1px solid currentColor";
+    btn.style.background = "transparent";
+    btn.style.color = "inherit";
+    btn.style.cursor = "pointer";
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      try { action.onClick(); } catch {}
+    };
+    el.appendChild(btn);
+  }
+
   root.appendChild(el);
   setTimeout(() => {
     el.style.opacity = "0";

@@ -46,20 +46,46 @@ export function isDriveTrack(track) {
 
 /**
  * トラックまたはトラックIDから Google Drive fileId を抽出
+ * 優先順位:
+ * 1. track.driveFileId
+ * 2. Drive専用の保存済みfile ID (gdriveFileId, fileId)
+ * 3. track.id が gd- で始まる場合のみ gd- を除去
+ * 4. ファイル名やTrack IDを推測しない (推測不能時は null)
  * @param {object|string} track
  * @returns {string|null}
  */
-export function getDriveFileId(track) {
+export function resolveDriveFileId(track) {
   if (!track) return null;
+  let raw = null;
   if (typeof track === "object") {
-    if (track.driveFileId) return track.driveFileId;
-    if (typeof track.id === "string" && track.id.startsWith("gd-")) return track.id.slice(3);
+    if (typeof track.driveFileId === "string" && track.driveFileId.trim()) {
+      raw = track.driveFileId.trim();
+    } else if (typeof track.gdriveFileId === "string" && track.gdriveFileId.trim()) {
+      raw = track.gdriveFileId.trim();
+    } else if (typeof track.fileId === "string" && track.fileId.trim() && !track.fileId.includes("/")) {
+      raw = track.fileId.trim();
+    } else if (typeof track.id === "string" && track.id.startsWith("gd-")) {
+      raw = track.id.slice(3).trim();
+    }
+  } else if (typeof track === "string") {
+    const s = track.trim();
+    if (s.startsWith("gd-")) {
+      raw = s.slice(3).trim();
+    }
+  }
+  if (!raw) return null;
+  raw = raw.replace(/^["']|["']$/g, "").trim();
+  while (raw.startsWith("gd-")) {
+    raw = raw.slice(3).trim();
+  }
+  if (raw === "undefined" || raw === "null" || raw === "") {
     return null;
   }
-  if (typeof track === "string") {
-    return track.startsWith("gd-") ? track.slice(3) : track;
-  }
-  return null;
+  return raw;
+}
+
+export function getDriveFileId(track) {
+  return resolveDriveFileId(track);
 }
 
 /**
@@ -662,11 +688,21 @@ export async function fetchDriveAudioBlob(fileId, { onProgress, maxRetries = 3, 
           onProgress(loaded, total);
         }
 
-        const contentType = res.headers.get("Content-Type") || "audio/mpeg";
-        return new Blob(chunks, { type: contentType });
+        let contentType = res.headers.get("Content-Type") || "audio/mpeg";
+        const rawBlob = new Blob(chunks, { type: contentType });
+        const isFlac = await checkBlobFlac(rawBlob);
+        if (isFlac) {
+          return new Blob(chunks, { type: "audio/flac" });
+        }
+        return rawBlob;
       }
 
-      return await res.blob();
+      let resBlob = await res.blob();
+      const isFlac = await checkBlobFlac(resBlob);
+      if (isFlac && resBlob.type !== "audio/flac") {
+        resBlob = new Blob([resBlob], { type: "audio/flac" });
+      }
+      return resBlob;
     } catch (err) {
       lastError = err;
       if (err.name === "AbortError" || signal?.aborted) {
@@ -685,15 +721,44 @@ export async function fetchDriveAudioBlob(fileId, { onProgress, maxRetries = 3, 
 }
 
 /**
+ * FLAC マジックナンバー (先頭4バイト 'fLaC' = 0x66, 0x4C, 0x61, 0x43) を判定
+ * @param {Uint8Array|ArrayBuffer|number[]} bytes
+ * @returns {boolean}
+ */
+export function isFlacMagic(bytes) {
+  if (!bytes) return false;
+  const arr = bytes instanceof Uint8Array ? bytes : (bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : bytes);
+  if (arr.length < 4) return false;
+  return arr[0] === 0x66 && arr[1] === 0x4c && arr[2] === 0x61 && arr[3] === 0x43;
+}
+
+/**
+ * Blob の先頭バイトを読み込み FLAC か判定
+ * @param {Blob} blob
+ * @returns {Promise<boolean>}
+ */
+export async function checkBlobFlac(blob) {
+  if (!blob || blob.size < 4) return false;
+  try {
+    const slice = blob.slice(0, 4);
+    const buf = await slice.arrayBuffer();
+    return isFlacMagic(new Uint8Array(buf));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 外出時・モバイル回線向けに、ファイル全体のダウンロードを待たずに
  * <audio> の HTTP Range プログレッシブストリーミングで即時再生するための URL を生成する
- * @param {string} fileId
+ * @param {string|object} fileId
  * @param {string} [tokenOverride]
  * @returns {Promise<string|null>}
  */
 export async function getDriveStreamUrl(fileId, tokenOverride = null) {
   if (!fileId) return null;
-  const cleanId = driveFileIdFromTrackId(fileId);
+  const cleanId = resolveDriveFileId(fileId) || driveFileIdFromTrackId(fileId);
+  if (!cleanId || cleanId === "undefined" || cleanId === "null") return null;
   const token = tokenOverride || (await getDriveToken());
   if (!token) return null;
   return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(cleanId)}?alt=media&access_token=${encodeURIComponent(token)}`;

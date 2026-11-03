@@ -1948,4 +1948,204 @@ test("無音検知: document.hidden (バックグラウンド再生中) の自�
   );
 });
 
+console.log("\n=== 15. iOS PWA 未キャッシュ Drive FLAC 再生・MIME補正・Blobフォールバック・診断情報 ===");
+
+test("PWA standalone 判定 & 拡張子・FLAC判定ヘルパーの検証", async () => {
+  const { isPwaStandalone, getTrackExtension, isFlacTrack } = await import("../js/player/audio-engine.js");
+
+  // PWA 判定
+  strictEqual(typeof isPwaStandalone, "function", "isPwaStandalone が関数としてエクスポートされていること");
+
+  // 拡張子判定
+  strictEqual(getTrackExtension({ originalName: "song.FLAC" }), "flac", "大文字 FLAC を小文字 flac へ正規化");
+  strictEqual(getTrackExtension({ title: "01 Track.flac?alt=media" }), "flac", "クエリ付きでも正しく抽出");
+  strictEqual(getTrackExtension({ name: "audio.mp3" }), "mp3", "mp3 を正しく抽出");
+  strictEqual(getTrackExtension(null), "", "null は空文字");
+
+  // FLAC 判定
+  strictEqual(isFlacTrack({ originalName: "test.flac" }), true, "拡張子 .flac は true");
+  strictEqual(isFlacTrack({ mimeType: "audio/flac" }), true, "mimeType audio/flac は true");
+  strictEqual(isFlacTrack({ type: "audio/x-flac" }), true, "type audio/x-flac は true");
+  strictEqual(isFlacTrack({ originalName: "test.mp3", mimeType: "audio/mpeg" }), false, "MP3 は false");
+});
+
+test("Drive File ID 解決 (優先順位・二重gd-除去・引用符除去・安全判定) の検証", async () => {
+  const { resolveDriveFileId } = await import("../js/gdrive/drive-service.js");
+
+  // 1. track.driveFileId 最優先
+  strictEqual(
+    resolveDriveFileId({ id: "gd-old123", driveFileId: "correctFileId456" }),
+    "correctFileId456",
+    "track.driveFileId が最優先されること"
+  );
+
+  // 2. gdriveFileId
+  strictEqual(
+    resolveDriveFileId({ id: "trk-789", gdriveFileId: "fileId789" }),
+    "fileId789",
+    "gdriveFileId が利用されること"
+  );
+
+  // 3. track.id が gd- で始まる場合のみ gd- を除去
+  strictEqual(
+    resolveDriveFileId({ id: "gd-myDriveId001" }),
+    "myDriveId001",
+    "gd- プレフィックスが正しく除去されること"
+  );
+
+  // 4. 二重 gd- や引用符、空白の除去
+  strictEqual(
+    resolveDriveFileId({ driveFileId: ' "gd-cleanThisId" ' }),
+    "cleanThisId",
+    "二重 gd- と引用符・空白が除去されること"
+  );
+
+  // 5. 不正値・推測拒否
+  strictEqual(resolveDriveFileId({ id: "local-track-123" }), null, "gd- でないIDを推測しないこと");
+  strictEqual(resolveDriveFileId({ driveFileId: "undefined" }), null, "'undefined' 文字列は null");
+  strictEqual(resolveDriveFileId({ driveFileId: "null" }), null, "'null' 文字列は null");
+  strictEqual(resolveDriveFileId(null), null, "null は null");
+});
+
+test("FLAC マジック判定 (fLaC) と Blob MIME タイプ補正の検証", async () => {
+  const { isFlacMagic, checkBlobFlac } = await import("../js/gdrive/drive-service.js");
+
+  // 1. 先頭 4 バイトが 0x66, 0x4C, 0x61, 0x43 (ASCII 'fLaC')
+  const validFlacHeader = new Uint8Array([0x66, 0x4C, 0x61, 0x43, 0x00, 0x00, 0x00, 0x22]);
+  strictEqual(isFlacMagic(validFlacHeader), true, "正常な fLaC ヘッダを検知");
+
+  // 2. 不正なヘッダ（MP3 ID3 や RIFF WAV）
+  const id3Header = new Uint8Array([0x49, 0x44, 0x33, 0x03]); // "ID3"
+  strictEqual(isFlacMagic(id3Header), false, "ID3 は FLAC ではない");
+
+  const riffHeader = new Uint8Array([0x52, 0x49, 0x46, 0x46]); // "RIFF"
+  strictEqual(isFlacMagic(riffHeader), false, "RIFF は FLAC ではない");
+
+  // 3. 空や短尺バッファ
+  strictEqual(isFlacMagic(new Uint8Array([0x66, 0x4C])), false, "短尺は false");
+  strictEqual(isFlacMagic(null), false, "null は false");
+
+  // 4. checkBlobFlac の動作（Node環境のBlob/ArrayBuffer）
+  if (typeof Blob !== "undefined") {
+    const flacBlob = new Blob([validFlacHeader], { type: "application/octet-stream" });
+    const isFlac = await checkBlobFlac(flacBlob);
+    strictEqual(isFlac, true, "application/octet-stream の Blob から fLaC を検知");
+  }
+});
+
+test("Service Worker: Google Drive 通信の完全素通しガード (Range / CORS 保護)", () => {
+  const swCode = fs.readFileSync(path.join(__dirname, "../sw.js"), "utf8");
+  strictEqual(
+    swCode.includes("url.hostname === \"www.googleapis.com\" || url.hostname === \"drive.google.com\""),
+    true,
+    "Service Worker が Google Drive 通信を素通しするガードが存在すること"
+  );
+});
+
+test("未キャッシュ Drive FLAC の Blob フォールバック判定 (shouldAttemptBlobFallback)", async () => {
+  const { shouldAttemptBlobFallback } = await import("../js/player/audio-engine.js");
+
+  const mockSession = {
+    id: "sess-test-1",
+    blobFallbackAttempted: false,
+    isFlacDetected: true,
+  };
+
+  // 1. NotSupportedError かつ FLAC Drive 曲 → フォールバック実行
+  const driveTrack = { id: "gd-test1234", originalName: "song.flac" };
+  const notSupportedErr = new Error("MEDIA_ELEMENT_ERROR: Format error");
+  notSupportedErr.name = "NotSupportedError";
+
+  // activePlaybackSession をモック
+  // Note: shouldAttemptBlobFallback は activePlaybackSession との比較を含むため、
+  // session 引数が activePlaybackSession でない場合は false となる安全仕様
+  strictEqual(
+    shouldAttemptBlobFallback(null, driveTrack, notSupportedErr),
+    false,
+    "セッションなし時は false"
+  );
+
+  // 2. 既にフォールバック試行済みの場合は再試行しない (最大1回制限)
+  strictEqual(
+    shouldAttemptBlobFallback({ ...mockSession, blobFallbackAttempted: true }, driveTrack, notSupportedErr),
+    false,
+    "既にフォールバック実施済みの場合は false"
+  );
+
+  // 3. 非 Drive 曲（ローカル曲など）はフォールバックしない
+  strictEqual(
+    shouldAttemptBlobFallback(mockSession, { id: "local-track-1", originalName: "song.flac" }, notSupportedErr),
+    false,
+    "非 Drive 曲は false"
+  );
+});
+
+test("再生エラー分類 (categorizePlaybackError) の網羅検証", async () => {
+  const { categorizePlaybackError } = await import("../js/player/audio-engine.js");
+
+  // 1. 認証エラー (401, 403, トークン切れ)
+  const authErr1 = categorizePlaybackError(new Error("Google Drive 401: Invalid Credentials"));
+  strictEqual(authErr1.category, "auth", "401 は認証エラー");
+  strictEqual(authErr1.message.includes("再接続"), true, "再接続メッセージを含むこと");
+
+  // 2. Drive 取得エラー
+  const driveErr = categorizePlaybackError(new Error("Google Drive から音源を取得できませんでした"));
+  strictEqual(driveErr.category, "drive_fetch", "Drive 取得エラー");
+
+  // 3. ネットワークエラー (MEDIA_ERR_NETWORK = 2)
+  const netErr = categorizePlaybackError(new Error("net::ERR_CONNECTION_RESET"), { mediaErrorCode: 2 });
+  strictEqual(netErr.category, "network", "code 2 はネットワークエラー");
+  strictEqual(netErr.message.includes("通信に失敗"), true, "通信失敗メッセージ");
+
+  // 4. デコードエラー (MEDIA_ERR_DECODE = 3)
+  const decodeErr = categorizePlaybackError(new Error("Decode error"), { mediaErrorCode: 3 });
+  strictEqual(decodeErr.category, "decode", "code 3 はデコードエラー");
+  strictEqual(decodeErr.message.includes("音源データを読み込めませんでした"), true, "デコード失敗メッセージ");
+
+  // 5. 本当にブラウザ非対応の形式 (MEDIA_ERR_SRC_NOT_SUPPORTED = 4)
+  const unsupErr = categorizePlaybackError(new Error("Format not supported"), { mediaErrorCode: 4 });
+  strictEqual(unsupErr.category, "unsupported", "code 4 は非対応エラー");
+  strictEqual(unsupErr.message.includes("この音源をブラウザで再生できませんでした"), true, "非対応メッセージ");
+});
+
+test("実機採取用診断情報 (generatePlaybackDiagnostics) の安全性検証 (機密情報非混入)", async () => {
+  const { generatePlaybackDiagnostics } = await import("../js/player/audio-engine.js");
+
+  const mockSession = {
+    id: "sess-long-unique-id-9876",
+    isCached: false,
+    hasToken: true,
+    lastHttpStatus: 206,
+    lastContentType: "application/octet-stream",
+    blobFallbackAttempted: true,
+  };
+  const mockTrack = {
+    id: "gd-testSecretFileId12345",
+    driveFileId: "testSecretFileId12345",
+    originalName: "master_track.flac",
+    mimeType: "audio/flac",
+  };
+  const mockError = new Error("MEDIA_ERR_SRC_NOT_SUPPORTED");
+  mockError.name = "NotSupportedError";
+  mockError.code = 4;
+
+  const diag = generatePlaybackDiagnostics(mockSession, mockTrack, mockError);
+
+  // 必須キーの存在確認
+  strictEqual(diag.appVersion, "1.11.0", "appVersion が設定されていること");
+  strictEqual(diag.trackExtension, "flac", "拡張子が抽出されていること");
+  strictEqual(diag.isDriveTrack, true, "isDriveTrack が true");
+  strictEqual(diag.hasDriveFileId, true, "hasDriveFileId が true (存在有無のフラグ)");
+  strictEqual(diag.tokenState, "present", "tokenState が present (存在有無のみ)");
+  strictEqual(diag.mediaErrorCode, 4, "mediaErrorCode が 4");
+  strictEqual(diag.sessionId, "9876", "sessionId は末尾 4 文字のみ");
+
+  // 機密情報が一切含まれていないことの厳密検査
+  const jsonStr = JSON.stringify(diag);
+  strictEqual(jsonStr.includes("testSecretFileId12345"), false, "fileId全文が含まれていないこと");
+  strictEqual(jsonStr.includes("access_token"), false, "access_token キーが含まれていないこと");
+  strictEqual(jsonStr.includes("ya29"), false, "Google トークン値が含まれていないこと");
+  strictEqual(jsonStr.includes("https://"), false, "URL 全文が含まれていないこと");
+});
+
 console.log(`\n高速再生 & ナビゲーションスタックテスト: ${passed} 件 PASSED ✓`);

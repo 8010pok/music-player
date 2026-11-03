@@ -638,6 +638,28 @@ export async function getBlob(id, { signal = null } = {}) {
 }
 
 /**
+ * トラックの音源Blobを手動またはフォールバックで IndexedDB (blobs ストア) に直接保存
+ * @param {string} id
+ * @param {Blob} blob
+ * @returns {Promise<void>}
+ */
+export async function saveBlob(id, blob) {
+  if (!id || !blob) return;
+  putMemoryBlob(id, blob);
+  await withWriteRetry(async () => {
+    const wdb = await openDb();
+    const tx = wdb.transaction("blobs", "readwrite");
+    tx.objectStore("blobs").put({ id, blob });
+    return new Promise((res, rej) => {
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+      tx.onabort = () => rej(tx.error);
+    });
+  });
+  ensureTrackMetadataInBackground(id, blob, { cached: true });
+}
+
+/**
  * トラックの音源BlobがローカルIndexedDBにキャッシュされているかを判定する
  * @param {string} id
  * @returns {Promise<boolean>}
