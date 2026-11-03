@@ -2132,7 +2132,7 @@ test("実機採取用診断情報 (generatePlaybackDiagnostics) の安全性検�
   const diag = generatePlaybackDiagnostics(mockSession, mockTrack, mockError);
 
   // 必須キーの存在確認
-  strictEqual(diag.appVersion, "1.11.0", "appVersion が設定されていること");
+  strictEqual(diag.appVersion, "1.11.1", "appVersion が設定されていること");
   strictEqual(diag.trackExtension, "flac", "拡張子が抽出されていること");
   strictEqual(diag.isDriveTrack, true, "isDriveTrack が true");
   strictEqual(diag.hasDriveFileId, true, "hasDriveFileId が true (存在有無のフラグ)");

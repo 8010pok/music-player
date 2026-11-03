@@ -124,7 +124,7 @@ export function generatePlaybackDiagnostics(session, track, error) {
   const curEl = getAudioElement();
   const rawId = resolveDriveFileId(track);
   const diag = {
-    appVersion: "1.11.0",
+    appVersion: "1.11.1",
     displayMode: isPwaStandalone() ? "standalone" : "browser",
     trackExtension: getTrackExtension(track),
     trackMimeType: track?.mimeType || "",
