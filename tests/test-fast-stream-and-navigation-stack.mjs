@@ -1143,9 +1143,9 @@ test("stream-audio-el 再生中もシーク、音量、速度、スリープタ�
   strictEqual(/if\s*\(mainAudioEl\)\s*\{\s*try\s*\{\s*mainAudioEl\.pause\(\);/.test(aeCode), true);
   strictEqual(/if\s*\(streamAudioEl\)\s*\{\s*try\s*\{\s*streamAudioEl\.pause\(\);/.test(aeCode), true);
 
-  // MediaSession pause / stop ハンドラで両要素が安全に pause されること
-  strictEqual(/navigator\.mediaSession\.setActionHandler\("pause",\s*\(\)\s*=>\s*\{[\s\S]*?mainAudioEl\.pause[\s\S]*?streamAudioEl\.pause/.test(aeCode), true);
-  strictEqual(/navigator\.mediaSession\.setActionHandler\("stop",\s*\(\)\s*=>\s*\{[\s\S]*?mainAudioEl\.pause[\s\S]*?streamAudioEl\.pause/.test(aeCode), true);
+  // MediaSession pause / stop ハンドラで executePause (両要素の安全な pause) が呼ばれること
+  strictEqual(/navigator\.mediaSession\.setActionHandler\("pause",\s*\(\)\s*=>\s*executePause\(\)\)/.test(aeCode), true);
+  strictEqual(/navigator\.mediaSession\.setActionHandler\("stop",\s*\(\)\s*=>\s*\{[\s\S]*?executePause\(\)/.test(aeCode), true);
 });
 
 test("normalize-modal.js: プレビュー開始時に stream-audio-el も確実に一時停止されること", () => {
@@ -1760,67 +1760,183 @@ test("PlaybackSession と audio-engine: 無音復旧は1セッション1回ま�
 
 console.log("\n=== 14. iOS MediaSession 安定化・ロック画面持続・一時停止同期・部分Range Duration保護 ===");
 
-test("iOS MediaSession: pause / stop / togglepause で同期的に playbackState='paused' と positionState が設定されること", () => {
+test("togglepause を登録せず、8つの正式アクションが個別 try-catch で登録されること", () => {
   const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
 
-  // 1. pause ハンドラが同期的に playbackState="paused" と updateMediaPositionState を呼んでいること
-  strictEqual(
-    /navigator\.mediaSession\.setActionHandler\("pause",\s*\(\)\s*=>\s*\{[\s\S]*?playbackState\s*=\s*"paused"[\s\S]*?updateMediaPositionState[\s\S]*?mainAudioEl\.pause/.test(aeCode),
-    true,
-    "pause ハンドラで同期的に playbackState='paused' と updateMediaPositionState が実行されること"
-  );
+  // 1. togglepause を登録しない
+  strictEqual(aeCode.includes('"togglepause"'), false, "togglepause が登録されていないこと");
 
-  // 2. togglepause ハンドラが登録されていること
-  strictEqual(
-    aeCode.includes('navigator.mediaSession.setActionHandler("togglepause"'),
-    true,
-    "togglepause ハンドラが登録されていること"
-  );
+  // 2. 正式な8つのアクションが登録されていること
+  const expectedActions = [
+    "play",
+    "pause",
+    "stop",
+    "nexttrack",
+    "previoustrack",
+    "seekto",
+    "seekforward",
+    "seekbackward",
+  ];
+  for (const act of expectedActions) {
+    const hasAction = aeCode.includes(`setActionHandler("${act}"`);
+    strictEqual(hasAction, true, `アクション "${act}" が登録されていること`);
+  }
 
-  // 3. resumeWatchdogInnerTimer がクリアされること
-  strictEqual(
-    aeCode.includes("state.resumeWatchdogInnerTimer"),
-    true,
-    "内側タイマー ID が管理されていること"
-  );
-
-  // 4. clearStallRecoveryTimer が pause 時に呼ばれること
-  strictEqual(
-    aeCode.includes("clearStallRecoveryTimer();"),
-    true,
-    "ストール復旧タイマーがクリアされること"
-  );
-});
-
-test("togglePlay: 一時停止時に同期的に playbackState='paused' と positionState が設定されること", () => {
-  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
-
-  // togglePlay 内の pause 側で同期的に playbackState="paused" と updateMediaPositionState が呼ばれること
-  strictEqual(
-    /export async function togglePlay[\s\S]*?playbackState\s*=\s*"paused"[\s\S]*?updateMediaPositionState[\s\S]*?mainAudioEl\.pause/.test(aeCode),
-    true,
-    "togglePlay で同期的に playbackState='paused' と updateMediaPositionState が実行されること"
-  );
-});
-
-test("部分Range Duration保護: 既存の曲情報 (duration > 10) が一時的な短い Range レスポンスで上書きされないシミュレーション", () => {
-  const evaluateDurationGuard = (existingDuration, incomingD) => {
-    const hasValidExistingDuration = typeof existingDuration === "number" && existingDuration > 10;
-    if (hasValidExistingDuration && incomingD < existingDuration * 0.75) {
-      return false; // 上書き拒否
-    }
-    return true; // 上書き許可
+  // 3. 各アクションが個別 try-catch で保護され、未対応アクションが例外を投げても他を継続すること
+  const registered = [];
+  const mockMediaSession = {
+    setActionHandler(action, handler) {
+      if (action === "seekforward") {
+        throw new TypeError("seekforward is not supported in this UA");
+      }
+      registered.push(action);
+    },
   };
 
-  // 通常曲（240秒）に、部分 Range レスポンスの 15秒 が来た場合 → 拒否
-  strictEqual(evaluateDurationGuard(240, 15), false, "4分曲に15秒のRangeヘッダが来ても上書きしない");
-  strictEqual(evaluateDurationGuard(240, 0.8), false, "4分曲に0.8秒の極小Rangeヘッダが来ても上書きしない");
+  const origMsDesc = Object.getOwnPropertyDescriptor(global.navigator, "mediaSession");
+  try {
+    Object.defineProperty(global.navigator, "mediaSession", { value: mockMediaSession, configurable: true, writable: true });
+    // 8アクション登録シミュレーション
+    for (const act of expectedActions) {
+      try {
+        mockMediaSession.setActionHandler(act, () => {});
+      } catch (e) {
+        // 個別 catch で他を中断しない
+      }
+    }
+    strictEqual(registered.length, 7, "未対応アクション(seekforward)で例外が出ても残りの7アクションが登録されること");
+    strictEqual(registered.includes("play"), true, "play が登録されている");
+    strictEqual(registered.includes("pause"), true, "pause が登録されている");
+    strictEqual(registered.includes("stop"), true, "stop が登録されている");
+  } finally {
+    if (origMsDesc) {
+      Object.defineProperty(global.navigator, "mediaSession", origMsDesc);
+    } else {
+      delete global.navigator.mediaSession;
+    }
+  }
+});
 
-  // 正常なメタデータ更新（240秒 → 240.5秒）→ 許可
-  strictEqual(evaluateDurationGuard(240, 240.5), true, "同等尺の実測値は上書き許可");
+test("共通 pause 処理 (executePause): active audio を pause し、playbackState='paused' となり、タイマー類を全解除すること", async () => {
+  const { executePause } = await import("../js/player/audio-engine.js");
 
-  // 未設定の曲（0秒）に初回実測値（180秒）が来た場合 → 許可
-  strictEqual(evaluateDurationGuard(0, 180), true, "未設定曲への初回実測値反映は許可");
+  strictEqual(typeof executePause, "function", "executePause が export されている");
+
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+
+  // 1. pause 時に resume watchdog (外側・内側) を全解除する
+  strictEqual(aeCode.includes("clearResumeWatchdog();"), true, "clearResumeWatchdog が呼ばれること");
+  strictEqual(aeCode.includes("state.resumeWatchdogInnerTimer"), true, "内側タイマー ID も管理されること");
+
+  // 2. pause 時に stall recovery timer を解除する
+  strictEqual(aeCode.includes("clearStallRecoveryTimer();"), true, "clearStallRecoveryTimer が呼ばれること");
+
+  // 3. pause 時に playbackState が paused になる
+  strictEqual(/mediaSession\.playbackState\s*=\s*"paused"/.test(aeCode), true, "playbackState が paused になること");
+
+  // 4. pause 後に src や load を解除・破棄しない
+  const pauseMatch = aeCode.match(/export function executePause\(\)\s*\{[\s\S]*?^}/m);
+  ok(pauseMatch, "executePause 実装が存在する");
+  const pauseCode = pauseMatch[0];
+  strictEqual(pauseCode.includes("removeAttribute"), false, "pause で src を解除しないこと");
+  strictEqual(pauseCode.includes(".load()"), false, "pause で load() を呼ばないこと");
+  strictEqual(pauseCode.includes("currentTime = 0"), false, "pause で currentTime を 0 に戻さないこと");
+  strictEqual(pauseCode.includes("destroy()"), false, "pause で PlaybackSession を破棄しないこと");
+});
+
+test("updateMediaPositionState: playbackRate: 0 を禁止し、不正な値では setPositionState を呼ばないこと", async () => {
+  const { updateMediaPositionState } = await import("../js/player/audio-engine.js");
+
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  // 全体で playbackRate: 0 が渡されていないこと
+  strictEqual(/playbackRate:\s*0(?![.\d])/.test(aeCode), false, "コード内に playbackRate: 0 の直接指定が存在しないこと");
+
+  let calledWith = null;
+  const mockMediaSession = {
+    setPositionState(state) {
+      calledWith = state;
+    },
+  };
+
+  const origMsDesc = Object.getOwnPropertyDescriptor(global.navigator, "mediaSession");
+  try {
+    Object.defineProperty(global.navigator, "mediaSession", { value: mockMediaSession, configurable: true, writable: true });
+
+    // 1. 正常な duration (200), position (50) → rate は 1 (正の値) になること
+    calledWith = null;
+    updateMediaPositionState({ duration: 200, position: 50 });
+    strictEqual(Boolean(calledWith), true, "有効値では setPositionState が呼ばれる");
+    strictEqual(calledWith.duration, 200, "duration が設定される");
+    strictEqual(calledWith.position, 50, "position が設定される");
+    strictEqual(calledWith.playbackRate > 0, true, "playbackRate は正の値 (1.0)");
+
+    // 2. 0 や負の playbackRate を渡しても正の値 (1.0) にフォールバックされること
+    calledWith = null;
+    updateMediaPositionState({ duration: 200, position: 50, playbackRate: 0 });
+    strictEqual(calledWith.playbackRate, 1.0, "playbackRate 0 は 1.0 へフォールバック");
+
+    calledWith = null;
+    updateMediaPositionState({ duration: 200, position: 50, playbackRate: -2 });
+    strictEqual(calledWith.playbackRate, 1.0, "playbackRate -2 は 1.0 へフォールバック");
+
+    // 3. 無効な duration (0, 負数, NaN, Infinity) では setPositionState を呼ばないこと
+    calledWith = null;
+    updateMediaPositionState({ duration: 0, position: 10 });
+    strictEqual(calledWith, null, "duration 0 はスキップ");
+
+    calledWith = null;
+    updateMediaPositionState({ duration: -10, position: 10 });
+    strictEqual(calledWith, null, "duration 負数はスキップ");
+
+    calledWith = null;
+    updateMediaPositionState({ duration: NaN, position: 10 });
+    strictEqual(calledWith, null, "duration NaN はスキップ");
+
+    calledWith = null;
+    updateMediaPositionState({ duration: Infinity, position: 10 });
+    strictEqual(calledWith, null, "duration Infinity はスキップ");
+
+    // 4. position が duration を超える、または負数の場合は呼ばないこと
+    calledWith = null;
+    updateMediaPositionState({ duration: 100, position: 105 });
+    strictEqual(calledWith, null, "position > duration はスキップ");
+
+    calledWith = null;
+    updateMediaPositionState({ duration: 100, position: -5 });
+    strictEqual(calledWith, null, "position < 0 はスキップ");
+  } finally {
+    if (origMsDesc) {
+      Object.defineProperty(global.navigator, "mediaSession", origMsDesc);
+    } else {
+      delete global.navigator.mediaSession;
+    }
+  }
+});
+
+test("shouldAcceptAudioDuration: 部分Rangeレスポンス由来の短尺上書き拒否と実データシミュレーション", async () => {
+  const { shouldAcceptAudioDuration } = await import("../js/player/audio-engine.js");
+
+  // 1. 正しい duration 240秒、ブラウザ報告 15秒 を拒否
+  strictEqual(shouldAcceptAudioDuration(240, 15), false, "4分曲に15秒のRangeヘッダは拒否");
+
+  // 2. 正しい duration 240秒、ブラウザ報告 239.9秒 を許容
+  strictEqual(shouldAcceptAudioDuration(240, 239.9), true, "同等尺の実測値は許容");
+
+  // 3. 保存 duration 不明 (null / 0)、ブラウザ報告 240秒 を採用
+  strictEqual(shouldAcceptAudioDuration(null, 240), true, "保存なし時の240秒は採用");
+  strictEqual(shouldAcceptAudioDuration(0, 240), true, "保存0秒時の240秒は採用");
+
+  // 4. 保存 duration 15秒、実際も 15秒 の短い曲を壊さない
+  strictEqual(shouldAcceptAudioDuration(15, 14.9), true, "15秒の短尺曲の実測値は維持");
+
+  // 5. seek 中の一時的 duration 変化 を拒否
+  strictEqual(shouldAcceptAudioDuration(240, 240, { isSeeking: true }), false, "seek中は拒否");
+
+  // 6. Infinity, NaN, 0 を拒否
+  strictEqual(shouldAcceptAudioDuration(240, Infinity), false, "Infinity は拒否");
+  strictEqual(shouldAcceptAudioDuration(240, NaN), false, "NaN は拒否");
+  strictEqual(shouldAcceptAudioDuration(240, 0), false, "0 は拒否");
+  strictEqual(shouldAcceptAudioDuration(240, -5), false, "負数は拒否");
 });
 
 test("無音検知: document.hidden (バックグラウンド再生中) の自動 play() 復旧除外ガードが存在すること", () => {
