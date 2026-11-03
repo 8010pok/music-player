@@ -82,8 +82,8 @@ export default async function handler(req) {
     // - HttpOnly: JavaScript から参照不可 (XSS 防止)
     // - Secure: HTTPS 接続時のみ送信
     // - SameSite=Lax: iOS WebKit CoreMedia (メディアサブプロセス) からの audio.src リクエストで確実に Cookie を送出
-    // - Path=/: クエリ付きのメディアリクエストでも確実にマッチ
-    const cookieHeader = `drive_stream_token=${encodeURIComponent(token)}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
+    // - Path=/api: セッション作成・削除および中継ストリーミングに限定し、静的リソース (/, /js, /css 等) への露出を完全遮断
+    const cookieHeader = `drive_stream_token=${encodeURIComponent(token)}; Path=/api; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
 
     const headers = new Headers();
     headers.set("Content-Type", "application/json");
@@ -98,7 +98,7 @@ export default async function handler(req) {
 
   // 2. セッション破棄 (DELETE)
   if (req.method === "DELETE") {
-    const clearCookieHeader = `drive_stream_token=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax`;
+    const clearCookieHeader = `drive_stream_token=; Path=/api; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax`;
 
     const headers = new Headers();
     headers.set("Content-Type", "application/json");

@@ -52,7 +52,7 @@ async function run() {
     ok(setCookie.includes("HttpOnly"), "Must be HttpOnly");
     ok(setCookie.includes("Secure"), "Must be Secure");
     ok(setCookie.includes("SameSite=Lax"), "Must be SameSite=Lax");
-    ok(setCookie.includes("Path=/"), "Path must match root /");
+    ok(setCookie.includes("Path=/api"), "Path must be restricted to /api");
     ok(setCookie.includes("Max-Age=3600"), "Max-Age must be 3600");
   });
 
@@ -120,6 +120,8 @@ async function run() {
     strictEqual(res.status, 200);
     const setCookie = res.headers.get("set-cookie");
     ok(setCookie.includes("Max-Age=0"), "Cookie must be cleared with Max-Age=0");
+    ok(setCookie.includes("Path=/api"), "Clear cookie must specify Path=/api");
+    ok(setCookie.includes("SameSite=Lax"), "Clear cookie must specify SameSite=Lax");
   });
 
   await testAsync("drive-session: Disallowed HTTP methods return 405 Method Not Allowed", async () => {
@@ -141,6 +143,7 @@ async function run() {
     strictEqual(data.code, "AUTH_REQUIRED");
     const setCookie = res.headers.get("set-cookie");
     ok(setCookie && setCookie.includes("Max-Age=0"), "Cookie must be cleared on 401");
+    ok(setCookie && setCookie.includes("Path=/api"), "Clear cookie must target Path=/api");
   });
 
   await testAsync("drive-stream: Request with cross-site sec-fetch-site is rejected (403)", async () => {
@@ -364,6 +367,63 @@ async function run() {
       strictEqual(res.status, 206);
       strictEqual(res.headers.get("content-type"), "audio/flac");
       strictEqual(redirectCount, 2, "Must follow 302 redirect to googleusercontent.com");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  await testAsync("drive-stream: Malicious redirect domains are rejected (502)", async () => {
+    const evilLocations = [
+      "https://evilgoogleusercontent.com/file",
+      "https://googleusercontent.com.evil.example/file",
+      "http://doc-01-docs.googleusercontent.com/file", // http downgrade
+      "https://user:pass@doc-01-docs.googleusercontent.com/file", // userinfo
+      "https://localhost/file",
+      "https://127.0.0.1/file",
+    ];
+
+    for (const evilLoc of evilLocations) {
+      globalThis.fetch = async (url) => {
+        if (url.includes("googleapis.com")) {
+          return new Response(null, {
+            status: 302,
+            headers: { "Location": evilLoc },
+          });
+        }
+        return new Response("ok", { status: 200 });
+      };
+
+      try {
+        const req = new Request("https://example.com/api/drive-stream?fileId=1EvilRedirect_12345", {
+          headers: { "Cookie": "drive_stream_token=ya29.valid_token_12345" },
+        });
+        const res = await streamHandler(req);
+        strictEqual(res.status, 502, `Redirect to ${evilLoc} must return 502`);
+        const data = await res.json();
+        ok(data.error.includes("redirect rejected") || data.error.includes("Invalid"));
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    }
+  });
+
+  await testAsync("drive-stream: Too many redirects (>3) or redirect loop is rejected (502)", async () => {
+    // Loop
+    globalThis.fetch = async (url) => {
+      return new Response(null, {
+        status: 302,
+        headers: { "Location": "https://www.googleapis.com/drive/v3/files/1SafeFileId_12345?alt=media" },
+      });
+    };
+
+    try {
+      const req = new Request("https://example.com/api/drive-stream?fileId=1SafeFileId_12345", {
+        headers: { "Cookie": "drive_stream_token=ya29.valid_token_12345" },
+      });
+      const res = await streamHandler(req);
+      strictEqual(res.status, 502);
+      const data = await res.json();
+      ok(data.error.includes("loop") || data.error.includes("Too many"));
     } finally {
       globalThis.fetch = originalFetch;
     }

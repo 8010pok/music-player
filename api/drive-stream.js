@@ -40,7 +40,45 @@ function isValidFileId(fileId) {
   return /^[a-zA-Z0-9_-]{10,100}$/.test(fileId);
 }
 
-const CLEAR_COOKIE_HEADER = "drive_stream_token=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax";
+/**
+ * リダイレクト先ホストの厳格な検証:
+ * - HTTPS のみ許可 (HTTP ダウングレード禁止)
+ * - ユーザー情報 (user:pass@) を拒否
+ * - localhost やプライベート IP を拒否
+ * - Google 正規ドメイン (googleapis.com, googleusercontent.com, drive.google.com) の完全一致または正規サブドメインのみ許可
+ * ※ evilgoogleusercontent.com や googleusercontent.com.evil.example は確実に拒絶
+ */
+export function isAllowedGoogleRedirect(locUrl) {
+  if (!locUrl || typeof locUrl.href !== "string") return false;
+  if (locUrl.protocol !== "https:") return false;
+  if (locUrl.username || locUrl.password) return false;
+
+  const hostname = locUrl.hostname.toLowerCase();
+
+  // 完全一致
+  if (hostname === "www.googleapis.com" || hostname === "drive.google.com") {
+    return true;
+  }
+
+  // 正規サブドメイン:
+  // - *.googleapis.com
+  // - *.googleusercontent.com
+  const isGoogleApis = /^[a-z0-9.-]+\.googleapis\.com$/.test(hostname);
+  const isGoogleUserContent = /^[a-z0-9.-]+\.googleusercontent\.com$/.test(hostname);
+
+  if (!isGoogleApis && !isGoogleUserContent) {
+    return false;
+  }
+
+  // localhost やプライベート IP の混入防止
+  if (/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)/.test(hostname)) {
+    return false;
+  }
+
+  return true;
+}
+
+const CLEAR_COOKIE_HEADER = "drive_stream_token=; Path=/api; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax";
 
 const ALLOWED_EXT_MIME = {
   flac: "audio/flac",
@@ -142,42 +180,68 @@ export default async function handler(req) {
   }
 
   try {
-    let remoteRes = await fetch(driveUrl, {
-      method: "GET",
-      headers: upstreamHeaders,
-      redirect: "manual",
-      signal: req.signal, // ★ クライアント切断時に上流 fetch を即座に中断
-    });
+    let currentUrl = driveUrl;
+    let redirectCount = 0;
+    const MAX_REDIRECTS = 3;
+    const visitedUrls = new Set([driveUrl]);
+    let remoteRes = null;
 
-    // リダイレクト (301, 302, 307) 安全性検証
-    if ([301, 302, 303, 307, 308].includes(remoteRes.status)) {
-      const location = remoteRes.headers.get("location");
-      if (location) {
+    while (redirectCount <= MAX_REDIRECTS) {
+      remoteRes = await fetch(currentUrl, {
+        method: req.method === "HEAD" ? "HEAD" : "GET",
+        headers: upstreamHeaders,
+        redirect: "manual",
+        signal: req.signal, // ★ クライアント切断時に上流 fetch を即座に中断
+      });
+
+      // リダイレクト (301, 302, 303, 307, 308) の場合、Vercel 内部で安全に追従
+      if ([301, 302, 303, 307, 308].includes(remoteRes.status)) {
+        if (redirectCount >= MAX_REDIRECTS) {
+          return new Response(JSON.stringify({ error: "Too many upstream redirects" }), {
+            status: 502,
+            headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" },
+          });
+        }
+
+        const location = remoteRes.headers.get("location");
+        if (!location) {
+          break; // Location ヘッダーなしはループ終了
+        }
+
+        let locUrl = null;
         try {
-          const locUrl = new URL(location);
-          if (
-            locUrl.hostname.endsWith(".googleapis.com") ||
-            locUrl.hostname.endsWith(".google.com") ||
-            locUrl.hostname.endsWith(".googleusercontent.com")
-          ) {
-            remoteRes = await fetch(location, {
-              method: "GET",
-              headers: upstreamHeaders,
-              signal: req.signal,
-            });
-          } else {
-            return new Response(JSON.stringify({ error: "Upstream redirect rejected" }), {
-              status: 502,
-              headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" },
-            });
-          }
+          locUrl = new URL(location, currentUrl);
         } catch {
           return new Response(JSON.stringify({ error: "Invalid redirect location" }), {
             status: 502,
             headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" },
           });
         }
+
+        // リダイレクト先ホストの厳格な検証 (Google 正規ホストのみ許可)
+        if (!isAllowedGoogleRedirect(locUrl)) {
+          return new Response(JSON.stringify({ error: "Upstream redirect rejected" }), {
+            status: 502,
+            headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" },
+          });
+        }
+
+        // ループ検出
+        if (visitedUrls.has(locUrl.href)) {
+          return new Response(JSON.stringify({ error: "Redirect loop detected" }), {
+            status: 502,
+            headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" },
+          });
+        }
+
+        visitedUrls.add(locUrl.href);
+        currentUrl = locUrl.href;
+        redirectCount++;
+        continue;
       }
+
+      // 通常レスポンス (200, 206, 401 等) が得られたら追従終了
+      break;
     }
 
     // 6. Google Drive エラーハンドリング

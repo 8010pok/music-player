@@ -151,10 +151,10 @@ test("drive-stream: リダイレクト先ホストとして .googleusercontent.c
   ok(streamContent.includes(".googleusercontent.com"), "Must allow googleusercontent.com redirect");
 });
 
-test("drive-session: Cookie 属性が SameSite=Lax かつ Path=/ に設定され Safari メディアサブプロセスで送信されること", () => {
+test("drive-session: Cookie 属性が SameSite=Lax かつ Path=/api に限定され静的資産へ露出しないこと", () => {
   const sessionContent = fs.readFileSync(path.join(__dirname, "../api/drive-session.js"), "utf-8");
   ok(sessionContent.includes("SameSite=Lax"), "Must be SameSite=Lax for CoreMedia audio requests");
-  ok(sessionContent.includes("Path=/;"), "Must be Path=/ to match queried media URLs");
+  ok(sessionContent.includes("Path=/api;"), "Must be Path=/api to restrict cookie to API endpoints");
 });
 
 test("drive-stream: Cache-Control に private, no-store, no-transform が設定されていること", () => {
