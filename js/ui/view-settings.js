@@ -14,6 +14,7 @@
  * - スクロブルキュー状況
  */
 
+import { APP_VERSION, CACHE_VERSION } from "../version.js";
 import { appState } from "../state.js";
 import { getPublic, setPublic, getSecret, classifyAuth } from "../store/settings.js";
 import { prepareAuthorization, completeAuthorization, setReadOnlyKey, signOut, checkReadOnlyKey, verifySession, getAuth } from "../lastfm/auth.js";
@@ -512,29 +513,77 @@ export async function mount(root) {
     remount();
   });
 
-  // ===== 最新版へ強制アップデート =====
-  refs.btnForceUpdate?.addEventListener("click", async () => {
-    toast("キャッシュを消去して最新版を取得中…", "info");
-    try {
-      if ("serviceWorker" in navigator) {
-        const regs = await navigator.serviceWorker.getRegistrations();
-        for (const reg of regs) {
-          await reg.unregister();
-        }
-      }
-      if ("caches" in window) {
-        const keys = await caches.keys();
-        await Promise.all(keys.map((k) => caches.delete(k)));
-      }
-      toast("最新版に更新しました。リロードします", "ok");
-      setTimeout(() => {
-        window.location.reload();
-      }, 400);
-    } catch (e) {
-      console.warn("強制更新エラー", e);
-      window.location.reload();
+  // ===== アプリ最新版確認 & 更新 =====
+  const handleAppUpdate = async () => {
+    toast("最新版の有無を確認しています…", "info", 2000);
+    if (!("serviceWorker" in navigator)) {
+      toast("このブラウザは Service Worker に対応していません", "err", 3000);
+      return;
     }
-  });
+
+    try {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (!reg) {
+        toast("Service Worker が見つかりませんでした。ページを再読込します", "info", 2000);
+        setTimeout(() => window.location.reload(), 500);
+        return;
+      }
+
+      // 1. 新しい SW がすでに待機中 (waiting) の場合: SKIP_WAITING を送って即時反映
+      if (reg.waiting) {
+        toast("待機中の新バージョンを適用しています…", "info", 2000);
+        reg.waiting.postMessage({ type: "SKIP_WAITING" });
+        return;
+      }
+
+      // 2. サーバーから最新の sw.js を確認
+      await reg.update();
+
+      if (reg.installing) {
+        toast("新しいバージョンが見つかりました。インストール中…", "info", 2500);
+        reg.installing.addEventListener("statechange", (e) => {
+          if (e.target.state === "installed") {
+            toast("最新版を適用します…", "ok", 2000);
+            e.target.postMessage({ type: "SKIP_WAITING" });
+          }
+        });
+        return;
+      }
+
+      if (reg.waiting) {
+        toast("最新版を適用しています…", "info", 2000);
+        reg.waiting.postMessage({ type: "SKIP_WAITING" });
+        return;
+      }
+
+      toast(`最新版 (${APP_VERSION}) を使用中です 🟢`, "ok", 2500);
+    } catch (e) {
+      console.warn("[settings] 更新確認エラー:", e);
+      toast("更新確認に失敗しました: " + (e?.message || e), "err", 3000);
+    }
+  };
+
+  refs.btnCheckUpdate?.addEventListener("click", handleAppUpdate);
+  refs.btnForceUpdate?.addEventListener("click", handleAppUpdate);
+
+  // Service Worker 状態の非同期取得・UI反映
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.getRegistration().then((reg) => {
+      const swStatusEl = root.querySelector("#sw-status-text");
+      const updateStatusEl = root.querySelector("#sw-update-status-text");
+      if (!swStatusEl) return;
+      if (reg) {
+        swStatusEl.textContent = reg.active ? "有効 (アクティブ)" : "登録済み";
+        swStatusEl.style.color = "#22c55e";
+        if (reg.waiting && updateStatusEl) {
+          updateStatusEl.textContent = "更新が待機中 (最新版を確認をタップ)";
+          updateStatusEl.style.color = "#eab308";
+        }
+      } else {
+        swStatusEl.textContent = "未登録 (PWAキャッシュなし)";
+      }
+    }).catch(() => {});
+  }
 
   // ===== Google Drive 連携 =====
   refs.btnGdriveConnect?.addEventListener("click", () => {
@@ -1155,16 +1204,22 @@ function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices, dr
       </div>
 
       <div class="settings-section">
-        <h2>データ管理 / アプリ更新</h2>
-        <div class="settings-row">
-          <div>
-            <div class="label" style="display:flex; align-items:center; gap:8px;">
-              <span>最新版へ強制アップデート</span>
-              <span style="font-size:11px; padding:2px 6px; border-radius:4px; background:rgba(59,130,246,0.18); color:var(--accent, #60a5fa); font-weight:700;">v1.11.5</span>
+        <h2>バージョン / アプリ更新</h2>
+        <div class="settings-row" style="background:rgba(255,255,255,0.03); border-radius:8px; padding:12px; margin-bottom:12px;">
+          <div style="flex:1;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-weight:700; font-size:14px;">アプリバージョン</span>
+              <span id="app-version-badge" style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(59,130,246,0.2); color:var(--accent, #60a5fa); font-weight:700;">${APP_VERSION}</span>
             </div>
-            <div class="help">キャッシュを完全消去し、サーバーから最新版 (v1.11.5) を再取得してリロードします。変更が反映されない場合にお使いください。</div>
+            <div id="pwa-status-details" style="font-size:12px; opacity:0.85; margin-top:6px; line-height:1.6;">
+              <div>Service Worker: <span id="sw-status-text" style="color:var(--accent);">確認中…</span></div>
+              <div>キャッシュ: <span>${CACHE_VERSION}</span></div>
+              <div>更新状態: <span id="sw-update-status-text">最新版を使用中</span></div>
+            </div>
           </div>
-          <button class="btn primary" id="btn-force-update" style="white-space:nowrap;">🔄 最新版に更新</button>
+          <div style="display:flex; flex-direction:column; gap:8px; justify-content:center;">
+            <button class="btn primary" id="btn-check-update" style="white-space:nowrap;">🔄 最新版を確認</button>
+          </div>
         </div>
         <div class="settings-row">
           <div>
@@ -1343,7 +1398,8 @@ function collect(root) {
     btnFlush: root.querySelector("#btn-flush"),
     btnWipeQueue: root.querySelector("#btn-wipe-queue"),
     btnWipeAll: root.querySelector("#btn-wipe-all"),
-    btnForceUpdate: root.querySelector("#btn-force-update"),
+    btnCheckUpdate: root.querySelector("#btn-check-update") || root.querySelector("#btn-force-update"),
+    btnForceUpdate: root.querySelector("#btn-force-update") || root.querySelector("#btn-check-update"),
     btnGdriveConnect: root.querySelector("#btn-gdrive-connect"),
     btnGdriveDisconnect: root.querySelector("#btn-gdrive-disconnect"),
     gdriveAutoCacheChk: root.querySelector("#gdrive-autocache-chk"),

@@ -50,6 +50,7 @@ import { getArtworkUrl, releaseArtwork } from "../ui/artwork-cache.js";
 // 再生エラー時のスキップ通知。components.js は UI レイヤだが、
 // ユーザに「読み込めない曲をスキップした」ことを知らせるために最小依存で使う。
 import { toast, openModal } from "../ui/components.js";
+import { APP_VERSION } from "../version.js";
 import {
   getDriveToken,
   getDriveStreamUrl,
@@ -169,7 +170,7 @@ export function generatePlaybackDiagnostics(session, track, error) {
     : 0;
 
   const diag = {
-    appVersion: "1.11.8",
+    appVersion: APP_VERSION,
     displayMode: isPwaStandalone() ? "standalone" : "browser",
     proxyEnabled: Boolean(getPublic()?.driveProxyStreamEnabled),
     sessionStatus: getDriveStreamSessionStatus ? getDriveStreamSessionStatus() : "unknown",

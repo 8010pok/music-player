@@ -7,7 +7,7 @@
  * バージョンを上げると古いキャッシュは破棄される。
  */
 
-const CACHE_VERSION = "v1.11.8";
+const CACHE_VERSION = "v1.11.9";
 const STATIC_CACHE = `static-${CACHE_VERSION}`;
 const API_CACHE = `api-${CACHE_VERSION}`;
 const IMG_CACHE = `img-${CACHE_VERSION}`;
@@ -20,6 +20,7 @@ const PRECACHE_URLS = [
   "./css/theme.css",
   "./css/layout.css",
   "./css/views.css",
+  "./js/version.js",
   "./js/app.js",
   "./js/router.js",
   "./js/state.js",
