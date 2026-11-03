@@ -552,9 +552,22 @@ export async function mount(root) {
     toast(refs.gdriveAutoCacheChk.checked ? "再生時自動キャッシュを有効にしました" : "再生時自動キャッシュを無効にしました（本体ストレージ消費ゼロ）", "ok");
   });
 
-  refs.gdriveProxyStreamChk?.addEventListener("change", () => {
-    setPublic({ driveProxyStreamEnabled: refs.gdriveProxyStreamChk.checked });
-    toast(refs.gdriveProxyStreamChk.checked ? "⚡ Drive 高速ストリーミング中継 (Beta) を有効にしました" : "Drive 高速ストリーミング中継を無効にしました", "ok");
+  refs.gdriveProxyStreamChk?.addEventListener("change", async () => {
+    const enabled = refs.gdriveProxyStreamChk.checked;
+    setPublic({ driveProxyStreamEnabled: enabled });
+    if (enabled) {
+      try {
+        const { ensureDriveStreamSession } = await import("../gdrive/drive-service.js");
+        ensureDriveStreamSession().catch(() => {});
+      } catch {}
+      toast("⚡ Drive 高速ストリーミング中継 (Beta) を有効にしました", "ok");
+    } else {
+      try {
+        const { clearDriveStreamSession } = await import("../gdrive/drive-service.js");
+        clearDriveStreamSession().catch(() => {});
+      } catch {}
+      toast("Drive 高速ストリーミング中継を無効にしました", "ok");
+    }
   });
 
   refs.btnGdriveClearCache?.addEventListener("click", async () => {
