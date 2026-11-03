@@ -138,11 +138,11 @@ function setLocalStorageToken(token, expiry) {
 
 /**
  * 保存されたアクセストークンを取得（有効期限切れ時は自動サイレントリフレッシュ）
- * @param {{ forceRefresh?: boolean }} [opts]
+ * @param {{ forceRefresh?: boolean, allowSilentRefresh?: boolean }} [opts]
  * @returns {Promise<string|null>}
  */
-export async function getDriveToken({ forceRefresh = false } = {}) {
-  const pub = getPublic();
+export async function getDriveToken({ forceRefresh = false, allowSilentRefresh = true } = {}) {
+  const pub = getPublic() || {};
   const now = Date.now();
   // 有効期限の3分前（180秒前）から早めにリフレッシュを試みることで再生中の401切れを防ぐ
   const EXPIRY_MARGIN_MS = 180000;
@@ -175,7 +175,17 @@ export async function getDriveToken({ forceRefresh = false } = {}) {
     setLocalStorageToken(null, 0);
   }
 
-  // 4. 有効期限切れ（または forceRefresh）の場合、自動サイレントリフレッシュを試行
+  // ★ 明示的に接続されたアカウント識別子（メールまたは表示名）が存在しない場合は、
+  //    prompt: "" のサイレント更新でブラウザのデフォルト別アカウントへ自動接続されるのを防ぐため実行しない。
+  const hasConnectedAccountIdentity = Boolean(
+    (pub.gdriveUserEmail && String(pub.gdriveUserEmail).trim()) ||
+    (pub.gdriveUserDisplayName && String(pub.gdriveUserDisplayName).trim())
+  );
+  if (!allowSilentRefresh || !hasConnectedAccountIdentity) {
+    return null;
+  }
+
+  // 4. 有効期限切れ（または forceRefresh）かつ接続アカウントが確定済みの場合のみ自動サイレントリフレッシュを試行
   if (_refreshingPromise) return _refreshingPromise;
 
   const clientId = pub.gdriveClientId;
@@ -204,9 +214,11 @@ export async function getDriveToken({ forceRefresh = false } = {}) {
 /**
  * アクセストークンを保存（IndexedDB + localStorage 永続化）
  * @param {string} token
- * @param {{ expiresIn?: number, email?: string }} [opts]
+ * @param {{ expiresIn?: number, email?: string, displayName?: string }} [opts]
  */
-export async function setDriveToken(token, { expiresIn = 3600, email } = {}) {
+export async function setDriveToken(token, { expiresIn = 3600, email, displayName } = {}) {
+  const pub = getPublic() || {};
+  const prevToken = _cachedToken;
   _cachedToken = token || null;
   const expiry = token && expiresIn ? Date.now() + expiresIn * 1000 : 0;
   setLocalStorageToken(token, expiry);
@@ -214,18 +226,21 @@ export async function setDriveToken(token, { expiresIn = 3600, email } = {}) {
   const patch = {
     gdriveTokenExpiry: expiry,
   };
-  // ★ email が明示的に指定された場合のみ更新する（サイレントリフレッシュ時に既存の gdriveUserEmail を空文字で消さない）
-  if (typeof email === "string" && email.length > 0) {
-    patch.gdriveUserEmail = email;
+  // ★ email / displayName が明示的に指定された場合のみ更新する（サイレントリフレッシュ時に既存の値を空文字で消さない）
+  if (typeof email === "string" && email.trim().length > 0) {
+    patch.gdriveUserEmail = email.trim();
   }
-  setPublic(patch);
-  if (token && pub.driveProxyStreamEnabled) {
-    ensureDriveStreamSession(token).catch(() => {});
+  if (typeof displayName === "string" && displayName.trim().length > 0) {
+    patch.gdriveUserDisplayName = displayName.trim();
+  }
+  const nextPub = setPublic(patch);
+  if (token && nextPub.driveProxyStreamEnabled) {
+    ensureDriveStreamSession(token, { force: token !== prevToken }).catch(() => {});
   }
 }
 
 /**
- * トークンのみをクリア（Client ID やユーザーメールアドレスは保持し、ワンタップ再連携を可能にする）
+ * トークンのみをクリア（Client ID やユーザーメールアドレスは保持し、再連携時に前回アカウントを表示可能にする）
  */
 export async function clearExpiredDriveToken() {
   clearDriveStreamSession().catch(() => {});
@@ -238,7 +253,8 @@ export async function clearExpiredDriveToken() {
 }
 
 /**
- * Google Drive 連携を明示的に切断（設定画面の「切断」ボタン用）
+ * Google Drive 連携を明示的に切断（設定画面の「Drive連携を解除」ボタン用）
+ * ※ 既存ライブラリのローカルデータや旧アカウント由来の登録曲データは削除しない
  */
 export async function disconnectDrive() {
   clearDriveStreamSession().catch(() => {});
@@ -248,7 +264,35 @@ export async function disconnectDrive() {
   setPublic({
     gdriveTokenExpiry: 0,
     gdriveUserEmail: "",
+    gdriveUserDisplayName: "",
   });
+}
+
+/**
+ * 現在の Google Drive アカウント接続状態と識別情報を取得する
+ * @returns {Promise<{ connected: boolean, status: "connected"|"expired"|"disconnected", email: string, displayName: string, accountLabel: string, tokenExpiry: number }>}
+ */
+export async function getDriveAccountInfo() {
+  const pub = getPublic() || {};
+  const token = await getDriveToken({ allowSilentRefresh: false });
+  const email = (pub.gdriveUserEmail || "").trim();
+  const displayName = (pub.gdriveUserDisplayName || "").trim();
+  const accountLabel = email || displayName || "";
+  const connected = !!token;
+  let status = "disconnected";
+  if (connected) {
+    status = "connected";
+  } else if (accountLabel || pub.gdriveTokenExpiry > 0) {
+    status = "expired";
+  }
+  return {
+    connected,
+    status,
+    email,
+    displayName,
+    accountLabel,
+    tokenExpiry: Number(pub.gdriveTokenExpiry) || 0,
+  };
 }
 
 // 画面復帰時（バックグラウンドから戻った時）にトークン有効期限が残り10分未満なら事前リフレッシュを試行
@@ -258,6 +302,7 @@ if (typeof document !== "undefined" && typeof document.addEventListener === "fun
     try {
       const pub = getPublic();
       if (!pub || !pub.gdriveClientId || !pub.gdriveTokenExpiry) return;
+      if (!pub.gdriveUserEmail && !pub.gdriveUserDisplayName) return;
       const remainingMs = pub.gdriveTokenExpiry - Date.now();
       if (remainingMs < 10 * 60 * 1000) {
         getDriveToken({ forceRefresh: remainingMs <= 60000 }).catch(() => {});
@@ -278,10 +323,11 @@ if (typeof window !== "undefined") {
 
 /**
  * Google Drive が接続中（有効なトークンがある）か判定
+ * @param {{ allowSilentRefresh?: boolean }} [opts]
  * @returns {Promise<boolean>}
  */
-export async function isDriveConnected() {
-  const token = await getDriveToken();
+export async function isDriveConnected({ allowSilentRefresh = false } = {}) {
+  const token = await getDriveToken({ allowSilentRefresh });
   return !!token;
 }
 
@@ -388,6 +434,7 @@ export function ensureGisScript() {
 
 /**
  * GIS サイレントトークンリフレッシュ（ユーザー操作ダイアログなしで更新）
+ * ※ すでに明示接続されたアカウントが存在し、かつ取得トークンのアカウントが一致する場合のみ採用する
  * @param {string} clientId
  * @returns {Promise<string>}
  */
@@ -395,6 +442,14 @@ export function silentRefreshGisToken(clientId) {
   return new Promise((resolve, reject) => {
     if (!clientId) {
       reject(new Error("Google OAuth Client ID が指定されていません"));
+      return;
+    }
+
+    const pub = getPublic() || {};
+    const expectedEmail = (pub.gdriveUserEmail || "").trim();
+    const expectedName = (pub.gdriveUserDisplayName || "").trim();
+    if (!expectedEmail && !expectedName) {
+      reject(new Error("接続済みGoogleアカウントが未確定のためサイレント更新を行いません。アカウントを選択してログインしてください。"));
       return;
     }
 
@@ -422,8 +477,7 @@ export function silentRefreshGisToken(clientId) {
     ensureGisScript()
       .then(() => {
         try {
-          const pub = getPublic();
-          const emailHint = pub && pub.gdriveUserEmail ? pub.gdriveUserEmail : undefined;
+          const emailHint = expectedEmail.includes("@") ? expectedEmail : undefined;
           const client = window.google.accounts.oauth2.initTokenClient({
             client_id: clientId,
             scope: "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file",
@@ -434,9 +488,37 @@ export function silentRefreshGisToken(clientId) {
                 return;
               }
               if (resp.access_token) {
-                const expiresIn = resp.expires_in ? parseInt(resp.expires_in, 10) : 3600;
-                await setDriveToken(resp.access_token, { expiresIn });
-                safeResolve(resp.access_token);
+                try {
+                  const expiresIn = resp.expires_in ? parseInt(resp.expires_in, 10) : 3600;
+                  const test = await testConnection(resp.access_token);
+                  if (!test.ok || !test.user) {
+                    safeReject(new Error("サイレント更新トークンのアカウント検証に失敗したため採用を中止しました。アカウントを選択して再ログインしてください。"));
+                    return;
+                  }
+                  const actualEmail = (test.user.emailAddress || "").trim();
+                  const actualName = (test.user.displayName || "").trim();
+                  let isSameAccount = false;
+                  if (expectedEmail && expectedEmail.includes("@")) {
+                    isSameAccount = Boolean(actualEmail && actualEmail.toLowerCase() === expectedEmail.toLowerCase());
+                  } else {
+                    isSameAccount = Boolean(
+                      (expectedEmail && (actualEmail === expectedEmail || actualName === expectedEmail)) ||
+                      (expectedName && (actualName === expectedName || actualEmail === expectedName))
+                    );
+                  }
+                  if (!isSameAccount) {
+                    safeReject(new Error(`サイレント更新で別のGoogleアカウント (${actualEmail || actualName || "不明"}) が返されたため採用しませんでした。アカウントを選び直してください。`));
+                    return;
+                  }
+                  await setDriveToken(resp.access_token, {
+                    expiresIn,
+                    email: actualEmail || expectedEmail,
+                    displayName: actualName || expectedName,
+                  });
+                  safeResolve(resp.access_token);
+                } catch (verifyErr) {
+                  safeReject(verifyErr);
+                }
               } else {
                 safeReject(new Error("アクセストークンが取得できませんでした"));
               }
@@ -455,13 +537,15 @@ export function silentRefreshGisToken(clientId) {
 }
 
 /**
- * Google Identity Services (GIS) スクリプトを読み込み、トークンを取得
+ * Google Identity Services (GIS) スクリプトを読み込み、明示的アカウント選択UI（prompt: "select_account"）でトークンを取得
+ * ※ 保存済み login_hint や既存セッションで別アカウントへ自動確定しないよう hint は渡さない
  * @param {string} clientId
  * @returns {Promise<string>}
  */
 export function requestGisToken(clientId) {
   return new Promise((resolve, reject) => {
-    if (!clientId) {
+    const resolvedClientId = (clientId || getPublic()?.gdriveClientId || "").trim();
+    if (!resolvedClientId) {
       reject(new Error("Google OAuth Client ID を入力してください"));
       return;
     }
@@ -469,12 +553,10 @@ export function requestGisToken(clientId) {
     ensureGisScript()
       .then(() => {
         try {
-          const pub = getPublic();
-          const emailHint = pub && pub.gdriveUserEmail ? pub.gdriveUserEmail : undefined;
           const client = window.google.accounts.oauth2.initTokenClient({
-            client_id: clientId,
+            client_id: resolvedClientId,
             scope: "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file",
-            ...(emailHint ? { hint: emailHint } : {}),
+            prompt: "select_account",
             callback: async (resp) => {
               if (resp.error) {
                 reject(new Error(`Google 認証エラー: ${resp.error_description || resp.error}`));
@@ -482,11 +564,22 @@ export function requestGisToken(clientId) {
               }
               if (resp.access_token) {
                 const expiresIn = resp.expires_in ? parseInt(resp.expires_in, 10) : 3600;
-                // ユーザー情報取得を試行
+                // ユーザー情報取得を試行し、選択されたアカウントのメールアドレス/表示名を確実に記録
                 const test = await testConnection(resp.access_token);
-                const email = (test.ok && test.user && (test.user.emailAddress || test.user.displayName)) || emailHint || "";
-                await setDriveToken(resp.access_token, { expiresIn, email });
-                setPublic({ gdriveClientId: clientId });
+                const actualEmail = (test.ok && test.user && test.user.emailAddress) ? test.user.emailAddress.trim() : "";
+                const actualName = (test.ok && test.user && test.user.displayName) ? test.user.displayName.trim() : "";
+                const primaryIdentity = actualEmail || actualName || "";
+                // 旧アカウントの情報が残らないよう明示更新
+                setPublic({
+                  gdriveClientId: resolvedClientId,
+                  gdriveUserEmail: primaryIdentity,
+                  gdriveUserDisplayName: actualName,
+                });
+                await setDriveToken(resp.access_token, {
+                  expiresIn,
+                  email: primaryIdentity,
+                  displayName: actualName,
+                });
                 resolve(resp.access_token);
               } else {
                 reject(new Error("アクセストークンが取得できませんでした"));
@@ -496,13 +589,27 @@ export function requestGisToken(clientId) {
               reject(new Error(err && err.message ? err.message : "認証ウィンドウが閉じられたか失敗しました"));
             },
           });
-          client.requestAccessToken(emailHint ? { hint: emailHint, prompt: "select_account" } : { prompt: "select_account" });
+          client.requestAccessToken({ prompt: "select_account" });
         } catch (e) {
           reject(e);
         }
       })
       .catch(reject);
   });
+}
+
+/**
+ * Google アカウントを明示的に選び直す（旧アカウントの登録曲データは削除せず、トークン・アカウント情報・Proxy Cookie を更新）
+ * @param {string} [clientId]
+ * @returns {Promise<string>}
+ */
+export async function switchDriveAccount(clientId) {
+  const targetClientId = (clientId || getPublic()?.gdriveClientId || "").trim();
+  if (!targetClientId) {
+    throw new Error("Google OAuth Client ID が未設定です。「接続 / 追加」から Client ID を設定してください。");
+  }
+  await clearDriveStreamSession().catch(() => {});
+  return requestGisToken(targetClientId);
 }
 
 /**
@@ -922,34 +1029,14 @@ export async function promptDriveReconnectModal({ track = null, reason = "", for
   const pub = getPublic() || {};
   const savedClientId = pub.gdriveClientId || "";
 
-  // ★ ユーザー要望: 「google driveと再連携するときに、googleアカウントにログインと同じリンクを勝手に起動するようにしてほしい。」
-  // Client ID が保存されている場合、Google アカウントログイン（OAuth）リンクを直接起動して自動連携
-  if (savedClientId && !forceModal) {
-    try {
-      const redirectUri = (typeof window !== "undefined" && window.location) ? (window.location.origin + window.location.pathname) : "";
-      const oauthDirectUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(savedClientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent("https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file")}&prompt=select_account`;
-
-      // 再生保留中の曲があれば sessionStorage に退避し、リダイレクト復帰後に自動再生
-      if (typeof sessionStorage !== "undefined") {
-        try {
-          sessionStorage.setItem("music-player:pending-track", JSON.stringify({
-            trackId: track?.id || null,
-          }));
-        } catch {}
-      }
-
-      toast("☁ Google ログイン画面へ移動します…", "info", 1800);
-      setTimeout(() => {
-        window.location.href = oauthDirectUrl;
-      }, 250);
-      return new Promise(() => {}); // 画面遷移するため未完了のまま待機
-    } catch (err) {
-      console.warn("[drive-service] 自動OAuth遷移失敗、手動モーダルを表示:", err);
-    }
-  }
-
   _activeReconnectModalPromise = new Promise((resolve) => {
     let settled = false;
+    const closeCurrentModal = () => {
+      try {
+        const closeBtn = document.querySelector("#modal-root .modal-close");
+        if (closeBtn) closeBtn.click();
+      } catch {}
+    };
     const finish = (tokenVal) => {
       if (settled) return;
       settled = true;
@@ -957,81 +1044,88 @@ export async function promptDriveReconnectModal({ track = null, reason = "", for
       resolve(tokenVal || null);
     };
 
-    const savedEmail = pub.gdriveUserEmail || "";
+    const savedEmail = pub.gdriveUserEmail || pub.gdriveUserDisplayName || "";
     const trackTitle = (track && track.title) ? track.title : "Google Drive の曲";
     const redirectUri = (typeof window !== "undefined" && window.location) ? (window.location.origin + window.location.pathname) : "";
     const oauthDirectUrl = savedClientId ? `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(savedClientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent("https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file")}&prompt=select_account` : "";
 
-    const bodyHtml = `
-      <div class="gdrive-reconnect-modal" style="display:flex; flex-direction:column; gap:14px;">
-        <div style="padding:12px 14px; border-radius:10px; background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.3); font-size:0.92rem; line-height:1.5;">
-          <div style="font-weight:700; margin-bottom:4px;">🎵 「${escapeHtml(trackTitle)}」を再生します</div>
-          <div class="muted" style="font-size:0.84rem;">
-            Google Drive の認証有効期限が切れているか未連携のため、Google アカウントにログインするとそのまま再生を開始します。
-            ${savedEmail ? `<br><span style="color:var(--accent, #60a5fa);">前回の連携アカウント: ${escapeHtml(savedEmail)}</span>` : ""}
-          </div>
+    const container = document.createElement("div");
+    container.className = "gdrive-reconnect-modal";
+    container.style.cssText = "display:flex; flex-direction:column; gap:14px;";
+    container.innerHTML = `
+      <div style="padding:12px 14px; border-radius:10px; background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.3); font-size:0.92rem; line-height:1.5;">
+        <div style="font-weight:700; margin-bottom:4px;">🎵 「${escapeHtml(trackTitle)}」を再生します</div>
+        <div class="muted" style="font-size:0.84rem;">
+          Google Drive の認証有効期限が切れているか未連携のため、Google アカウントを選択してログインするとそのまま再生を開始します。
+          ${savedEmail ? `<br><span style="color:var(--accent, #60a5fa);">前回の連携アカウント: ${escapeHtml(savedEmail)}</span>` : ""}
         </div>
-
-        <button type="button" class="btn primary" id="gd-reconnect-now-btn" style="padding:14px 18px; font-size:1.05rem; font-weight:700; display:flex; align-items:center; justify-content:center; gap:8px; width:100%;">
-          🔑 Google アカウントでログイン
-        </button>
-
-        ${oauthDirectUrl ? `
-          <div style="margin-top:-4px; text-align:center;">
-            <a href="${oauthDirectUrl}" class="btn" style="display:flex; align-items:center; justify-content:center; gap:6px; font-size:0.86rem; text-decoration:none; padding:8px 12px; background:transparent; border:1px solid var(--border-color, rgba(255,255,255,0.15));">
-              🌐 ポップアップが開かない場合はこちら（別タブでGoogleログイン）
-            </a>
-          </div>
-        ` : ""}
-
-        <details style="font-size:0.84rem; color:var(--text-muted, #9ca3af);" ${!savedClientId ? "open" : ""}>
-          <summary style="cursor:pointer; user-select:none; padding:4px 0;">詳細設定（Client ID / アクセストークン直接入力）</summary>
-          <div style="display:flex; flex-direction:column; gap:10px; margin-top:10px; padding:10px; border-radius:8px; background:rgba(255,255,255,0.04);">
-            <label style="display:flex; flex-direction:column; gap:4px;">
-              <span>Google OAuth Client ID</span>
-              <input type="text" id="gd-reconnect-client-id" class="input" placeholder="xxxx.apps.googleusercontent.com" value="${escapeAttr(savedClientId)}" style="width:100%;" />
-            </label>
-            <label style="display:flex; flex-direction:column; gap:4px;">
-              <span>またはアクセストークンを直接貼り付け (任意)</span>
-              <div style="display:flex; gap:6px;">
-                <input type="password" id="gd-reconnect-manual-token" class="input" placeholder="ya29.a0..." style="flex:1;" />
-                <button type="button" class="btn" id="gd-reconnect-manual-btn">適用して再生</button>
-              </div>
-            </label>
-          </div>
-        </details>
-
-        <div id="gd-reconnect-status" style="font-size:0.84rem; min-height:1.2em; color:#f87171;"></div>
       </div>
+
+      <button type="button" class="btn primary" id="gd-reconnect-now-btn" style="padding:14px 18px; font-size:1.05rem; font-weight:700; display:flex; align-items:center; justify-content:center; gap:8px; width:100%;">
+        🔑 Google アカウントでログイン（アカウントを選択）
+      </button>
+
+      ${oauthDirectUrl ? `
+        <div style="margin-top:-4px; text-align:center;">
+          <a href="${oauthDirectUrl}" class="btn" id="gd-reconnect-direct-link" style="display:flex; align-items:center; justify-content:center; gap:6px; font-size:0.86rem; text-decoration:none; padding:8px 12px; background:transparent; border:1px solid var(--border-color, rgba(255,255,255,0.15));">
+            🌐 ポップアップが開かない場合はこちら（リダイレクトでアカウント選択）
+          </a>
+        </div>
+      ` : ""}
+
+      <details style="font-size:0.84rem; color:var(--text-muted, #9ca3af);" ${!savedClientId ? "open" : ""}>
+        <summary style="cursor:pointer; user-select:none; padding:4px 0;">詳細設定（Client ID / アクセストークン直接入力）</summary>
+        <div style="display:flex; flex-direction:column; gap:10px; margin-top:10px; padding:10px; border-radius:8px; background:rgba(255,255,255,0.04);">
+          <label style="display:flex; flex-direction:column; gap:4px;">
+            <span>Google OAuth Client ID</span>
+            <input type="text" id="gd-reconnect-client-id" class="input" placeholder="xxxx.apps.googleusercontent.com" value="${escapeAttr(savedClientId)}" style="width:100%;" />
+          </label>
+          <label style="display:flex; flex-direction:column; gap:4px;">
+            <span>またはアクセストークンを直接貼り付け (任意)</span>
+            <div style="display:flex; gap:6px;">
+              <input type="password" id="gd-reconnect-manual-token" class="input" placeholder="ya29.a0..." style="flex:1;" />
+              <button type="button" class="btn" id="gd-reconnect-manual-btn">適用して再生</button>
+            </div>
+          </label>
+        </div>
+      </details>
+
+      <div id="gd-reconnect-status" style="font-size:0.84rem; min-height:1.2em; color:#f87171;"></div>
     `;
 
-    const modal = openModal({
+    openModal({
       title: "☁ Google Drive の再連携",
-      bodyHtml,
-      buttons: [
+      body: container,
+      actions: [
         {
           label: "キャンセル",
           onClick: () => {
             finish(null);
-            modal.close();
           },
         },
       ],
+    }).then(() => {
+      finish(null);
     });
 
-    // 背景クリックや×ボタンで閉じられた場合も resolve(null) を保証
-    const origClose = modal.close;
-    modal.close = () => {
-      finish(null);
-      origClose();
-    };
+    const nowBtn = container.querySelector("#gd-reconnect-now-btn");
+    const directLink = container.querySelector("#gd-reconnect-direct-link");
+    const clientIdInput = container.querySelector("#gd-reconnect-client-id");
+    const manualInput = container.querySelector("#gd-reconnect-manual-token");
+    const manualBtn = container.querySelector("#gd-reconnect-manual-btn");
+    const statusEl = container.querySelector("#gd-reconnect-status");
 
-    const root = modal.el;
-    const nowBtn = root.querySelector("#gd-reconnect-now-btn");
-    const clientIdInput = root.querySelector("#gd-reconnect-client-id");
-    const manualInput = root.querySelector("#gd-reconnect-manual-token");
-    const manualBtn = root.querySelector("#gd-reconnect-manual-btn");
-    const statusEl = root.querySelector("#gd-reconnect-status");
+    if (directLink) {
+      directLink.addEventListener("click", () => {
+        if (typeof sessionStorage !== "undefined") {
+          try {
+            sessionStorage.setItem("music-player:pending-track", JSON.stringify({
+              trackId: track?.id || null,
+            }));
+          } catch {}
+        }
+      });
+    }
 
     if (nowBtn) {
       nowBtn.addEventListener("click", async () => {
@@ -1042,28 +1136,21 @@ export async function promptDriveReconnectModal({ track = null, reason = "", for
           return;
         }
         setPublic({ gdriveClientId: cid });
-        if (typeof sessionStorage !== "undefined") {
-          try {
-            sessionStorage.setItem("music-player:pending-track", JSON.stringify({
-              trackId: track?.id || null,
-            }));
-          } catch {}
-        }
         nowBtn.disabled = true;
-        nowBtn.textContent = "⏳ Google 認証画面へ移動中…";
-        const redirectUri = (typeof window !== "undefined" && window.location) ? (window.location.origin + window.location.pathname) : "";
-        const oauthDirectUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(cid)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent("https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file")}&prompt=select_account`;
-        window.location.href = oauthDirectUrl;
-      });
-    }
-
-    // Client ID がある場合はモーダル表示と同時に Google ログインを自動起動
-    if (savedClientId && nowBtn) {
-      setTimeout(() => {
+        nowBtn.textContent = "⏳ アカウント選択画面を開いています…";
         try {
-          if (!nowBtn.disabled && !settled) nowBtn.click();
-        } catch {}
-      }, 60);
+          const tok = await requestGisToken(cid);
+          const latestPub = getPublic() || {};
+          const accLabel = latestPub.gdriveUserEmail || latestPub.gdriveUserDisplayName || "OK";
+          toast(`☁ Google Drive に接続しました (${accLabel})`, "ok");
+          finish(tok);
+          closeCurrentModal();
+        } catch (err) {
+          if (statusEl) statusEl.textContent = err?.message || "認証に失敗しました。";
+          nowBtn.disabled = false;
+          nowBtn.textContent = "🔑 Google アカウントでログイン（アカウントを選択）";
+        }
+      });
     }
 
     if (manualBtn) {
@@ -1081,13 +1168,14 @@ export async function promptDriveReconnectModal({ track = null, reason = "", for
             if (statusEl) statusEl.textContent = check.error || "無効なトークンです";
             return;
           }
-          const email = (check.user && (check.user.emailAddress || check.user.displayName)) || "";
-          await setDriveToken(rawTok, { expiresIn: 3600, email });
-          toast("☁ Google Drive に再連携しました！再生を開始します", "ok");
-          settled = true;
-          _activeReconnectModalPromise = null;
-          resolve(rawTok);
-          origClose();
+          const actualEmail = (check.user && check.user.emailAddress) ? check.user.emailAddress.trim() : "";
+          const actualName = (check.user && check.user.displayName) ? check.user.displayName.trim() : "";
+          const email = actualEmail || actualName || "";
+          setPublic({ gdriveUserEmail: email, gdriveUserDisplayName: actualName });
+          await setDriveToken(rawTok, { expiresIn: 3600, email, displayName: actualName });
+          toast(`☁ Google Drive に再連携しました (${email || "OK"})`, "ok");
+          finish(rawTok);
+          closeCurrentModal();
         } finally {
           manualBtn.disabled = false;
         }
@@ -1623,8 +1711,11 @@ export async function openDriveImportModal({ onImported } = {}) {
           directBtn.textContent = "⚡ トークンで接続";
           return;
         }
-        const email = (test.user && (test.user.emailAddress || test.user.displayName)) || "";
-        await setDriveToken(token, { expiresIn: 3600, email });
+        const actualEmail = (test.user && test.user.emailAddress) ? test.user.emailAddress.trim() : "";
+        const actualName = (test.user && test.user.displayName) ? test.user.displayName.trim() : "";
+        const email = actualEmail || actualName || "";
+        setPublic({ gdriveUserEmail: email, gdriveUserDisplayName: actualName });
+        await setDriveToken(token, { expiresIn: 3600, email, displayName: actualName });
         toast(`Google Drive に接続しました (${email || "OK"})`, "ok");
         const closeBtn = document.querySelector(".modal-close");
         if (closeBtn) closeBtn.click();
@@ -1653,16 +1744,20 @@ export async function openDriveImportModal({ onImported } = {}) {
     existingTrackIds = new Set(existing.map((t) => t.id));
   } catch {}
 
-  const emailDisplay = pub.gdriveUserEmail ? ` (${escapeHtml(pub.gdriveUserEmail)})` : "";
+  const accountLabel = pub.gdriveUserEmail || pub.gdriveUserDisplayName || "";
+  const emailDisplay = accountLabel ? ` (${escapeHtml(accountLabel)})` : "";
 
   container.innerHTML = `
     <div style="display: flex; flex-direction: column; gap: 8px;">
       <!-- 接続ヘッダー -->
-      <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px;">
-        <div>
-          <span style="color: var(--success); font-weight: bold;">● 接続中</span>${emailDisplay}
+      <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px; flex-wrap: wrap; gap: 6px;">
+        <div id="drive-modal-account-status">
+          <span style="color: var(--success); font-weight: bold;">● 接続中</span><span id="drive-modal-account-label">${emailDisplay}</span>
         </div>
-        <button class="btn danger" id="btn-drive-disconnect" style="padding: 2px 8px; font-size: 11px;">切断</button>
+        <div style="display: flex; gap: 6px; align-items: center;">
+          <button class="btn" id="btn-drive-switch-account" style="padding: 2px 8px; font-size: 11px;">🔄 アカウントを選び直す</button>
+          <button class="btn danger" id="btn-drive-disconnect" style="padding: 2px 8px; font-size: 11px;">Drive連携を解除</button>
+        </div>
       </div>
 
       <!-- 検索バー -->
@@ -2198,6 +2293,57 @@ export async function openDriveImportModal({ onImported } = {}) {
   container.querySelector("#btn-drive-unselect-all").addEventListener("click", () => {
     selectedFileIds.clear();
     renderItems(displayedItems, false);
+  });
+
+  // 接続中だがアカウント識別情報が未保存の場合、バックグラウンドで取得して補完
+  if (!accountLabel) {
+    getDriveToken({ allowSilentRefresh: false })
+      .then((tok) => (tok ? testConnection(tok) : null))
+      .then((res) => {
+        if (res && res.ok && res.user) {
+          const email = (res.user.emailAddress || "").trim();
+          const name = (res.user.displayName || "").trim();
+          const label = email || name || "";
+          if (label) {
+            setPublic({ gdriveUserEmail: label, gdriveUserDisplayName: name });
+            const lblEl = container.querySelector("#drive-modal-account-label");
+            if (lblEl) lblEl.textContent = ` (${label})`;
+          }
+        }
+      })
+      .catch(() => {});
+  }
+
+  // アカウントを選び直す
+  container.querySelector("#btn-drive-switch-account")?.addEventListener("click", async () => {
+    const switchBtn = container.querySelector("#btn-drive-switch-account");
+    const cid = (getPublic()?.gdriveClientId || "").trim();
+    if (!cid) {
+      await disconnectDrive();
+      const closeBtn = document.querySelector(".modal-close");
+      if (closeBtn) closeBtn.click();
+      openDriveImportModal({ onImported });
+      return;
+    }
+    if (switchBtn) {
+      switchBtn.disabled = true;
+      switchBtn.textContent = "選択中…";
+    }
+    try {
+      await switchDriveAccount(cid);
+      const nextPub = getPublic() || {};
+      const nextAcc = nextPub.gdriveUserEmail || nextPub.gdriveUserDisplayName || "OK";
+      toast(`Google アカウントを切り替えました (${nextAcc})`, "ok");
+      const closeBtn = document.querySelector(".modal-close");
+      if (closeBtn) closeBtn.click();
+      openDriveImportModal({ onImported });
+    } catch (err) {
+      toast(err?.message || "アカウントの切り替えに失敗しました", "err");
+      if (switchBtn) {
+        switchBtn.disabled = false;
+        switchBtn.textContent = "🔄 アカウントを選び直す";
+      }
+    }
   });
 
   // 切断

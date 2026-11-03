@@ -81,8 +81,11 @@ async function main() {
       if (token) {
         const { setDriveToken, testConnection } = await import("./gdrive/drive-service.js");
         const test = await testConnection(token);
-        const email = (test.ok && test.user && (test.user.emailAddress || test.user.displayName)) || "";
-        await setDriveToken(token, { expiresIn, email });
+        const actualEmail = (test.ok && test.user && test.user.emailAddress) ? test.user.emailAddress.trim() : "";
+        const actualName = (test.ok && test.user && test.user.displayName) ? test.user.displayName.trim() : "";
+        const email = actualEmail || actualName || "";
+        setPublic({ gdriveUserEmail: email, gdriveUserDisplayName: actualName });
+        await setDriveToken(token, { expiresIn, email, displayName: actualName });
         window.history.replaceState(null, "", window.location.pathname);
         const { toast } = await import("./ui/components.js");
         toast("☁ Google Drive に再連携しました！", "ok");

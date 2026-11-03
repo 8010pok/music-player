@@ -26,7 +26,7 @@ import { wipeAll as wipeStats } from "../lastfm/stats-storage.js";
 import { cancel as cancelStatsService, reset as resetStatsService, startIfNeeded as startStatsIfNeeded } from "../lastfm/stats-service.js";
 import { toast, confirm, promptForm, escapeHtml, escapeAttr } from "./components.js";
 import { releaseAllArtwork } from "./artwork-cache.js";
-import { isDriveConnected, disconnectDrive, openDriveImportModal, getDriveStreamSessionStatus } from "../gdrive/drive-service.js";
+import { isDriveConnected, disconnectDrive, openDriveImportModal, getDriveStreamSessionStatus, switchDriveAccount, getDriveToken, testConnection as testDriveConnection } from "../gdrive/drive-service.js";
 import { openYouTubeDownloadModal } from "./youtube-modal.js";
 import { shareOrDownloadLibrary, importLibraryData, exportLibraryToDrive, importLibraryFromDrive, getDriveSyncFileInfo } from "../store/sync-service.js";
 import { findDuplicateGroups, cleanDuplicateTracks } from "../store/dedup-service.js";
@@ -586,10 +586,55 @@ export async function mount(root) {
   }
 
   // ===== Google Drive 連携 =====
+  if (driveConnected && !pub.gdriveUserEmail && !pub.gdriveUserDisplayName) {
+    getDriveToken({ allowSilentRefresh: false })
+      .then((tok) => (tok ? testDriveConnection(tok) : null))
+      .then((res) => {
+        if (res && res.ok && res.user) {
+          const email = (res.user.emailAddress || "").trim();
+          const name = (res.user.displayName || "").trim();
+          const label = email || name || "";
+          if (label) {
+            setPublic({ gdriveUserEmail: label, gdriveUserDisplayName: name });
+            const accEl = root.querySelector("#gdrive-current-account");
+            if (accEl) accEl.textContent = label;
+          }
+        }
+      })
+      .catch(() => {});
+  }
+
   refs.btnGdriveConnect?.addEventListener("click", () => {
     openDriveImportModal({
       onImported: () => remount(),
     });
+  });
+
+  refs.btnGdriveSwitchAccount?.addEventListener("click", async () => {
+    const cid = (getPublic()?.gdriveClientId || "").trim();
+    if (!cid) {
+      await disconnectDrive();
+      openDriveImportModal({
+        onImported: () => remount(),
+      });
+      return;
+    }
+    const origText = refs.btnGdriveSwitchAccount.textContent;
+    refs.btnGdriveSwitchAccount.disabled = true;
+    refs.btnGdriveSwitchAccount.textContent = "⏳ アカウント選択中…";
+    try {
+      await switchDriveAccount(cid);
+      const nextPub = getPublic() || {};
+      const nextAcc = nextPub.gdriveUserEmail || nextPub.gdriveUserDisplayName || "OK";
+      toast(`Google アカウントを切り替えました (${nextAcc})`, "ok");
+      remount();
+    } catch (err) {
+      toast(err?.message || "アカウントの選択がキャンセルされたか失敗しました", "err");
+      if (refs.btnGdriveSwitchAccount) {
+        refs.btnGdriveSwitchAccount.disabled = false;
+        refs.btnGdriveSwitchAccount.textContent = origText;
+      }
+    }
   });
 
   refs.btnGdriveDisconnect?.addEventListener("click", async () => {
@@ -1004,16 +1049,32 @@ function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices, dr
         <h2>Google Drive 連携</h2>
         <div class="settings-row">
           <div>
-            <div class="label">状態</div>
-            <div class="help" id="gdrive-status-help">
-              ${driveConnected ? `<span style="color:var(--success); font-weight:600;">接続中</span> ${pub.gdriveUserEmail ? `(${escapeHtml(pub.gdriveUserEmail)})` : ""}` : `<span style="color:var(--fg-muted);">未接続</span>`}
+            <div class="label">接続状態 / 現在接続中のGoogleアカウント</div>
+            <div class="help" id="gdrive-status-help" style="line-height: 1.6;">
+              ${(() => {
+                const accountLabel = (pub.gdriveUserEmail || pub.gdriveUserDisplayName || "").trim();
+                if (driveConnected) {
+                  return `<div>状態: <span style="color:var(--success); font-weight:700;">● 接続中</span></div>
+                          <div>現在のGoogleアカウント: <strong id="gdrive-current-account" style="color:var(--fg);">${escapeHtml(accountLabel || "確認中…")}</strong></div>`;
+                }
+                if (accountLabel) {
+                  return `<div>状態: <span style="color:#eab308; font-weight:600;">● 未接続（トークン期限切れ）</span></div>
+                          <div>前回の接続アカウント: <strong id="gdrive-current-account" style="color:var(--fg);">${escapeHtml(accountLabel)}</strong></div>`;
+                }
+                return `<div>状態: <span style="color:var(--fg-muted);">○ 未接続</span></div>
+                        <div>現在のGoogleアカウント: <span id="gdrive-current-account" style="color:var(--fg-muted);">未選択</span></div>`;
+              })()}
             </div>
           </div>
-          <div style="display:flex;gap:6px;">
+          <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; justify-content:flex-end;">
             ${driveConnected ? `
-              <button class="btn danger" id="btn-gdrive-disconnect">切断</button>
+              <button class="btn primary" id="btn-gdrive-connect">📂 曲を追加</button>
+              <button class="btn" id="btn-gdrive-switch-account">🔄 アカウントを選び直す</button>
+              <button class="btn danger" id="btn-gdrive-disconnect">Drive連携を解除</button>
             ` : `
-              <button class="btn primary" id="btn-gdrive-connect">接続 / 追加</button>
+              <button class="btn primary" id="btn-gdrive-connect">🔑 Googleアカウントでログイン</button>
+              <button class="btn" id="btn-gdrive-switch-account">🔄 アカウントを選び直す</button>
+              ${(pub.gdriveUserEmail || pub.gdriveUserDisplayName) ? `<button class="btn danger" id="btn-gdrive-disconnect">Drive連携を解除</button>` : ""}
             `}
           </div>
         </div>
@@ -1401,6 +1462,7 @@ function collect(root) {
     btnCheckUpdate: root.querySelector("#btn-check-update") || root.querySelector("#btn-force-update"),
     btnForceUpdate: root.querySelector("#btn-force-update") || root.querySelector("#btn-check-update"),
     btnGdriveConnect: root.querySelector("#btn-gdrive-connect"),
+    btnGdriveSwitchAccount: root.querySelector("#btn-gdrive-switch-account"),
     btnGdriveDisconnect: root.querySelector("#btn-gdrive-disconnect"),
     gdriveAutoCacheChk: root.querySelector("#gdrive-autocache-chk"),
     gdriveProxyStreamChk: root.querySelector("#gdrive-proxy-stream-chk"),

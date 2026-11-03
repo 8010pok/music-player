@@ -38,7 +38,8 @@ const PUBLIC_DEFAULTS = {
   // === Google Drive 連携 ===
   gdriveClientId: "",         // Google OAuth Client ID
   gdriveAutoCache: true,      // 再生時に自動でローカル IndexedDB にキャッシュ
-  gdriveUserEmail: "",        // 連携中アカウントのメール/表示名
+  gdriveUserEmail: "",        // 連携中アカウントのメールアドレス（または識別子）
+  gdriveUserDisplayName: "",  // 連携中アカウントの表示名
   gdriveTokenExpiry: 0,       // トークン有効期限タイムスタンプ
   // === 実験的機能フラグ (Stage B: デフォルト false) ===
   driveProxyStreamEnabled: false, // Google Drive 音源の同一オリジン Range ストリーミング中継 (Beta)
