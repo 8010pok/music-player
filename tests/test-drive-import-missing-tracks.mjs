@@ -284,12 +284,32 @@ await asyncTest("同一 Drive file ID の再インポート時、ユーザーデ
   strictEqual(updated.lyrics, "[00:10.00]テスト歌詞", "lyrics が保持されること");
   strictEqual(updated.artworkDataUrl, "data:image/jpeg;base64,USER_CUSTOM_ARTWORK", "カスタムアートワークが保持されること");
   strictEqual(updated.artworkUpdatedAt, 1725000000000, "artworkUpdatedAt が保持されること");
-  strictEqual(updated.cached, true, "cached 状態が保持されること");
+  strictEqual(updated.cached, false, "ファイルサイズ変更時は古いBlobキャッシュが無効化(cached=false)されること");
 
   // 2. 更新されるべき Drive 実体情報
   strictEqual(updated.originalName, "new_filename_renamed.mp3", "変更されたファイル名が更新されること");
   strictEqual(updated.fileSize, 10500000, "変更されたファイルサイズが更新されること");
   strictEqual(updated.driveModifiedTime, "2026-11-04T00:00:00Z", "Drive modifiedTime が記録されること");
+
+  // 3. ファイルサイズ・更新日時が不変の同一実体再インポート時は cached: true が保持されること
+  const unchangedDriveFile = {
+    id: "existing_song_123",
+    name: "new_filename_renamed.mp3",
+    size: "10500000",
+    modifiedTime: "2026-11-04T00:00:00Z",
+    mimeType: "audio/mpeg",
+  };
+  // 一度 cached: true として保存
+  updated.cached = true;
+  await libDbMod.putTrack(updated, null);
+
+  const resUnchanged = await driveMod.importDriveFilesToLibrary([unchangedDriveFile], {
+    cacheBlobs: false,
+    defaultAlbumName: "Different Folder",
+  });
+  strictEqual(resUnchanged.updated, 1, "変更のない再インポートは updated=1");
+  const trackAfterUnchanged = await libDbMod.getTrack("gd-existing_song_123");
+  strictEqual(trackAfterUnchanged.cached, true, "同一実体再インポート時は cached: true が保持されること");
 });
 
 console.log("\n=== 3. buildDriveTrackRecord 単体テスト ===");
@@ -384,7 +404,8 @@ await asyncTest("fetchFolderAudioFilesRecursive: 401時にトークンをリフ�
     };
   };
 
-  const audioFiles = await driveMod.fetchFolderAudioFilesRecursive("root_folder_test");
+  const res = await driveMod.fetchFolderAudioFilesRecursive("root_folder_test");
+  const audioFiles = res.files;
   strictEqual(audioFiles.length, 2, "401発生後もリフレッシュされて全2曲が取得されること");
   strictEqual(audioFiles[0].id, "sub_file_1");
   strictEqual(audioFiles[1].id, "sub_file_2");

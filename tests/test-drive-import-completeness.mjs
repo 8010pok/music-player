@@ -49,6 +49,7 @@ if (typeof globalThis.Blob === "undefined") {
 
 const idbTracks = new Map();
 const idbBlobs = new Map();
+let shouldFailPutTrack = false;
 
 globalThis.indexedDB = {
   open: () => {
@@ -84,6 +85,14 @@ globalThis.indexedDB = {
                 return r;
               },
               put: (item, key) => {
+                if (shouldFailPutTrack && name === "tracks") {
+                  const err = new Error("QuotaExceededError: IDB Disk Full");
+                  queueMicrotask(() => {
+                    if (tx.onerror) tx.onerror({ target: { error: err } });
+                    if (tx.onabort) tx.onabort({ target: { error: err } });
+                  });
+                  throw err;
+                }
                 const k = key !== undefined ? key : (item && item.id);
                 if (name === "tracks") idbTracks.set(k, { ...item });
                 else if (name === "blobs") idbBlobs.set(k, item);
@@ -249,7 +258,7 @@ await test("fetchFolderAudioFilesRecursive: 403 権限不足 (SERVICE_DISABLED) 
   strictEqual(result.partial, true, "Result must be marked partial=true");
   strictEqual(result.failedFolders.length, 1, "Failed folder should be recorded");
   strictEqual(result.failedFolders[0].errorCode, "HTTP_403");
-  strictEqual(result.length, 0, "Files should be empty");
+  strictEqual(result.files.length, 0, "Files should be empty");
 });
 
 await test("fetchFolderAudioFilesRecursive: 403 レート制限 (rateLimitExceeded) は指数バックオフで再試行すること", async () => {
@@ -292,8 +301,8 @@ await test("fetchFolderAudioFilesRecursive: 403 レート制限 (rateLimitExceed
   strictEqual(fetchCount, 2, "Rate limit should be retried and succeed on second attempt");
   strictEqual(mockSleepCalls.length, 1, "One backoff sleep performed");
   strictEqual(result.partial, false, "Result should be fully successful");
-  strictEqual(result.length, 1);
-  strictEqual(result[0].id, "song_rate_limit_recovered");
+  strictEqual(result.files.length, 1);
+  strictEqual(result.files[0].id, "song_rate_limit_recovered");
 });
 
 await test("fetchFolderAudioFilesRecursive: 429 Too Many Requests の Retry-After ヘッダを尊重して再試行すること", async () => {
@@ -331,8 +340,8 @@ await test("fetchFolderAudioFilesRecursive: 429 Too Many Requests の Retry-Afte
   strictEqual(fetchCount, 2);
   strictEqual(mockSleepCalls.length, 1);
   strictEqual(mockSleepCalls[0], 3000, "Retry-After: 3 should result in 3000ms sleep");
-  strictEqual(result.length, 1);
-  strictEqual(result[0].id, "song_after_429");
+  strictEqual(result.files.length, 1);
+  strictEqual(result.files[0].id, "song_after_429");
 });
 
 await test("fetchFolderAudioFilesRecursive: 循環参照フォルダおよび重複ファイルの無限ループを確実に防止すること", async () => {
@@ -370,7 +379,7 @@ await test("fetchFolderAudioFilesRecursive: 循環参照フォルダおよび重
 
   const result = await driveMod.fetchFolderAudioFilesRecursive("parentA", { maxDepth: 10 });
 
-  strictEqual(result.length, 2, "Duplicate file ID should be de-duplicated (2 unique tracks)");
+  strictEqual(result.files.length, 2, "Duplicate file ID should be de-duplicated (2 unique tracks)");
   ok(result.warnings.some((w) => w.includes("循環")), "Circular reference warning must be generated");
   strictEqual(result.foldersVisited, 2, "Only parentA and parentB visited once each");
 });
@@ -396,6 +405,45 @@ await test("fetchFolderAudioFilesRecursive: AbortSignal によるユーザー中
   strictEqual(result.partial, true, "partial flag must be true");
 });
 
+await test("fetchFolderAudioFilesRecursive: 戻り値がプレーンオブジェクトでありスプレッドやJSONシリアライズでプロパティが維持されること", async () => {
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      files: [{ id: "song_spread_test", name: "Spread.mp3", mimeType: "audio/mpeg" }],
+      nextPageToken: null,
+    }),
+  });
+
+  await driveMod.setDriveToken("ya29.valid_token");
+
+  const result = await driveMod.fetchFolderAudioFilesRecursive("spread_folder");
+
+  strictEqual(Array.isArray(result), false, "戻り値は配列ではなくプレーンオブジェクトであること");
+  ok(Array.isArray(result.files), "result.files は配列であること");
+  strictEqual(result.files.length, 1);
+  strictEqual(typeof result.foldersVisited, "number");
+  strictEqual(typeof result.pagesFetched, "number");
+  strictEqual(typeof result.partial, "boolean");
+  strictEqual(typeof result.aborted, "boolean");
+  strictEqual(typeof result.authRequired, "boolean");
+
+  // スプレッド構文でコピーしても全プロパティが保持されること
+  const spreadCopy = { ...result };
+  strictEqual(spreadCopy.files.length, 1);
+  strictEqual(spreadCopy.foldersVisited, result.foldersVisited);
+  strictEqual(spreadCopy.partial, result.partial);
+  strictEqual(spreadCopy.aborted, result.aborted);
+  strictEqual(spreadCopy.authRequired, result.authRequired);
+
+  // JSONシリアライズ/デシリアライズ後もプロパティが保持されること
+  const jsonCopy = JSON.parse(JSON.stringify(result));
+  strictEqual(jsonCopy.files.length, 1);
+  strictEqual(jsonCopy.partial, result.partial);
+  strictEqual(jsonCopy.aborted, result.aborted);
+  strictEqual(jsonCopy.authRequired, result.authRequired);
+});
+
 console.log("\n=== 4. Tombstone (削除同期) 安全解除 & 同一性分離テスト ===");
 
 setDefaultFetchMock();
@@ -410,7 +458,7 @@ await test("removeTombstone: 削除済みアイテムのTombstoneを明示解除
   strictEqual(tombstoneMod.isTombstoned("gd-track-deleted-1", 0, "track"), false, "Tombstone must be cleared");
 });
 
-await test("importDriveFilesToLibrary: 削除済み曲をユーザーが明示再追加した際に Tombstone を安全解除し restored カウントすること", async () => {
+await test("importDriveFilesToLibrary: 削除済み曲をユーザーが明示再追加した際に putTrack 成功後にのみ Tombstone を安全解除し restored カウントすること", async () => {
   tombstoneMod.clearTombstones();
   const trackId = "gd-restored_file_999";
   tombstoneMod.recordTombstone(trackId, "track");
@@ -432,6 +480,66 @@ await test("importDriveFilesToLibrary: 削除済み曲をユーザーが明示�
   strictEqual(res.tombstoned, 1, "tombstoned count must be 1");
   strictEqual(res.added, 1, "added count must be 1");
   strictEqual(tombstoneMod.isTombstoned(trackId, 0, "track"), false, "Tombstone must be removed from storage");
+});
+
+await test("Tombstone安全順序: putTrack 失敗時は Tombstone が維持され restored は増えず failed が加算されること", async () => {
+  tombstoneMod.clearTombstones();
+  const trackId = "gd-fail_save_file";
+  tombstoneMod.recordTombstone(trackId, "track");
+  strictEqual(tombstoneMod.isTombstoned(trackId, 0, "track"), true);
+
+  // IndexedDB putTrack を失敗させる
+  shouldFailPutTrack = true;
+
+  try {
+    const driveFile = {
+      id: "fail_save_file",
+      name: "Fail Save.mp3",
+      size: "3000000",
+      mimeType: "audio/mpeg",
+    };
+
+    const res = await driveMod.importDriveFilesToLibrary([driveFile], { cacheBlobs: false });
+
+    strictEqual(res.failed, 1, "putTrack 失敗時は failed=1 となること");
+    strictEqual(res.restored, 0, "保存失敗時は restored がカウントされないこと");
+    strictEqual(res.added, 0, "保存失敗時は added がカウントされないこと");
+    strictEqual(tombstoneMod.isTombstoned(trackId, 0, "track"), true, "保存失敗時は Tombstone が確実に維持されること");
+  } finally {
+    shouldFailPutTrack = false;
+  }
+});
+
+await test("Tombstone解除失敗時: removeTombstone が失敗した場合は restored にカウントされず警告が記録されること", async () => {
+  tombstoneMod.clearTombstones();
+  const trackId = "gd-remove_fail_file";
+  tombstoneMod.recordTombstone(trackId, "track");
+
+  // Tombstone 保存(localStorage.setItem)を一時的に失敗させることで removeTombstone を false にする
+  const originalSetItem = globalThis.localStorage.setItem;
+  globalThis.localStorage.setItem = (k, v) => {
+    if (String(k).includes("tombstone")) {
+      throw new Error("DiskIOError: Failed to save tombstone");
+    }
+    return originalSetItem(k, v);
+  };
+
+  try {
+    const driveFile = {
+      id: "remove_fail_file",
+      name: "Remove Fail.mp3",
+      size: "3500000",
+      mimeType: "audio/mpeg",
+    };
+
+    const res = await driveMod.importDriveFilesToLibrary([driveFile], { cacheBlobs: false });
+
+    strictEqual(res.added, 1, "トラック自体は保存成功するため added=1");
+    strictEqual(res.restored, 0, "Tombstone解除失敗時は restored にカウントされないこと");
+    ok(res.failures.some((f) => f.errorCode === "TOMBSTONE_REMOVE_FAILED"), "TOMBSTONE_REMOVE_FAILED 警告が failures に記録されること");
+  } finally {
+    globalThis.localStorage.setItem = originalSetItem;
+  }
 });
 
 await test("Tombstone分離: 削除済み曲と同名だが別Drive file IDの曲は Tombstone に引っかからず正常追加されること", async () => {
@@ -456,9 +564,9 @@ await test("Tombstone分離: 削除済み曲と同名だが別Drive file IDの�
   strictEqual(tombstoneMod.isTombstoned("gd-old_file_deleted", 0, "track"), true, "Old ID remains tombstoned");
 });
 
-console.log("\n=== 5. 構造化インポート結果カウントテスト ===");
+console.log("\n=== 5. 構造化インポート結果カウントテスト & 件数整合性 ===");
 
-await test("importDriveFilesToLibrary: 新規追加、既存更新、非対応形式、Tombstone復元の構造化結果を正確に返却すること", async () => {
+await test("importDriveFilesToLibrary: 新規追加、既存更新、非対応形式、Tombstone復元の構造化結果と件数整合性を正確に返却すること", async () => {
   tombstoneMod.clearTombstones();
 
   const existingTrack = {
@@ -468,32 +576,85 @@ await test("importDriveFilesToLibrary: 新規追加、既存更新、非対応�
     album: "Album",
     source: "gdrive",
     driveFileId: "existing_id",
+    fileSize: 2000000,
+    cached: true,
   };
   await libDbMod.putTrack(existingTrack, null);
 
   tombstoneMod.recordTombstone("gd-revived_id", "track");
 
   const files = [
-    { id: "new_id", name: "Brand New.mp3", mimeType: "audio/mpeg" },
-    { id: "existing_id", name: "Existing.mp3", mimeType: "audio/mpeg" },
-    { id: "revived_id", name: "Revived.mp3", mimeType: "audio/mpeg" },
-    { id: "unsupported_id", name: "video.mp4", mimeType: "video/mp4" },
-    { id: "wma_id", name: "song.wma", mimeType: "audio/x-ms-wma" },
+    { id: "new_id", name: "Brand New.mp3", mimeType: "audio/mpeg", size: "3000000" },
+    { id: "existing_id", name: "Existing.mp3", mimeType: "audio/mpeg", size: "2000000" }, // 実体変更なし
+    { id: "revived_id", name: "Revived.mp3", mimeType: "audio/mpeg", size: "4000000" },
+    { id: "unsupported_id", name: "video.mp4", mimeType: "video/mp4", size: "15000000" },
+    { id: "wma_id", name: "song.wma", mimeType: "audio/x-ms-wma", size: "5000000" },
   ];
 
   const res = await driveMod.importDriveFilesToLibrary(files, { cacheBlobs: false });
 
+  // 1. 件数定義の整合性検証
+  // attempted = added + updated + failed + skippedSameFile
+  // selected = attempted + unsupported
+  // restored は added または updated の内数
   strictEqual(res.selected, 5, "selected = 5");
-  strictEqual(res.attempted, 5, "attempted = 5");
+  strictEqual(res.unsupported, 2, "unsupported = 2 (mp4 video, wma)");
   strictEqual(res.added, 2, "added = 2 (new_id, revived_id)");
   strictEqual(res.updated, 1, "updated = 1 (existing_id)");
+  strictEqual(res.failed, 0, "failed = 0 (no unexpected exceptions)");
+  strictEqual(res.skippedSameFile, 0, "skippedSameFile = 0");
+  strictEqual(res.attempted, res.added + res.updated + res.failed + res.skippedSameFile, "attempted = added + updated + failed + skippedSameFile");
+  strictEqual(res.attempted, 3, "attempted = 3");
+  strictEqual(res.selected, res.attempted + res.unsupported, "selected = attempted + unsupported");
+
+  // 内数の検証
   strictEqual(res.restored, 1, "restored = 1 (revived_id)");
   strictEqual(res.tombstoned, 1, "tombstoned = 1 (revived_id)");
-  strictEqual(res.unsupported, 2, "unsupported = 2 (mp4 video, wma)");
-  strictEqual(res.failed, 0, "failed = 0 (no unexpected exceptions)");
+  ok(res.restored <= res.added + res.updated, "restored は added または updated の内数であり総数に二重加算されないこと");
+
   strictEqual(res.failures.length, 2, "failures contains 2 unsupported records");
   strictEqual(res.failures[0].errorCode, "UNSUPPORTED_FORMAT");
   strictEqual(res.failures[1].errorCode, "UNSUPPORTED_FORMAT");
+
+  // 2. 実体不変の既存曲キャッシュ保持の検証
+  const savedExisting = await libDbMod.getTrack("gd-existing_id");
+  strictEqual(savedExisting.cached, true, "実体変更がない既存曲の cached: true が保持されること");
+});
+
+await test("Blobキャッシュ整合性: fileSize変更検知時に古いキャッシュBlobが削除され cached: false に更新されること", async () => {
+  idbBlobs.set("gd-blob_invalidation_track", new Blob(["old_audio_data"]));
+
+  const track = {
+    id: "gd-blob_invalidation_track",
+    title: "Blob Test Song",
+    artist: "Artist",
+    album: "Album",
+    source: "gdrive",
+    driveFileId: "blob_invalidation_track",
+    fileSize: 1000000,
+    driveModifiedTime: "2026-11-01T00:00:00Z",
+    cached: true,
+  };
+  await libDbMod.putTrack(track, null);
+
+  // Drive 側のサイズが 1000000 -> 2000000 に変更されたファイル
+  const updatedDriveFile = {
+    id: "blob_invalidation_track",
+    name: "Blob Test Song.mp3",
+    size: "2000000",
+    modifiedTime: "2026-11-04T00:00:00Z",
+    mimeType: "audio/mpeg",
+  };
+
+  const res = await driveMod.importDriveFilesToLibrary([updatedDriveFile], {
+    cacheBlobs: false, // 今回は音源ダウンロードを行わないインポート
+  });
+
+  strictEqual(res.updated, 1, "updated = 1");
+  const reloaded = await libDbMod.getTrack("gd-blob_invalidation_track");
+  strictEqual(reloaded.fileSize, 2000000, "新しいファイルサイズに更新されること");
+  strictEqual(reloaded.cached, false, "実体変更検知により cached: false に落とされること");
+  strictEqual(idbBlobs.has("gd-blob_invalidation_track"), false, "古い音源キャッシュBlobが安全に削除されていること");
 });
 
 console.log(`\n🎉 全 ${passed} 件の完全性検証テストにすべて合格しました！`);
