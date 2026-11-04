@@ -32,6 +32,34 @@
   min-height: calc(100vh - 120px);
 }
 
+/* ドラッグ中・閉じる・キャンセル時のアニメーション制御 */
+.player-view.is-dragging {
+  will-change: transform;
+  animation: none !important;
+  transition: none !important;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.player-view.is-dismissing {
+  will-change: transform;
+  animation: none !important;
+  transition: transform 0.24s cubic-bezier(0.25, 1, 0.5, 1) !important;
+}
+
+.player-view.is-cancelling {
+  will-change: transform;
+  animation: none !important;
+  transition: transform 0.22s cubic-bezier(0.25, 1, 0.5, 1) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .player-view.is-dismissing,
+  .player-view.is-cancelling {
+    transition: none !important;
+  }
+}
+
 /* アートワーク抽出色から生成される動的アンビエントオーロラ背景 */
 .player-ambient-bg {
   position: fixed;
@@ -70,6 +98,57 @@
     filter: blur(28px);
     transition: none;
   }
+}
+
+/* ===== 再生中画面 Apple Music 風ドラッグハンドル ===== */
+.player-drag-handle-wrap {
+  width: 100%;
+  max-width: 140px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  margin: -6px auto 2px;
+  padding: 4px 0;
+  z-index: 2;
+  border-radius: 999px;
+  background: transparent;
+  border: none;
+}
+
+.player-drag-handle-wrap:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.player-drag-handle {
+  width: 36px;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.30);
+  transition: background 0.15s ease, transform 0.15s ease;
+  pointer-events: none;
+}
+
+:root[data-theme="light"] .player-drag-handle {
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.player-drag-handle-wrap:hover .player-drag-handle {
+  background: rgba(255, 255, 255, 0.50);
+  transform: scaleY(1.1);
+}
+
+:root[data-theme="light"] .player-drag-handle-wrap:hover .player-drag-handle {
+  background: rgba(0, 0, 0, 0.38);
+}
+
+.player-view.is-dragging .player-drag-handle-wrap {
+  cursor: grabbing;
 }
 
 .player-top-bar {

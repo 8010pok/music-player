@@ -53,9 +53,361 @@ const ICONS = {
 // updateUI は mount 外の関数のため module スコープに置く。pointerdown〜pointerup/change で制御。
 let isSeeking = false;
 
+/**
+ * 下スワイプによるシート閉じる操作の設定定数
+ */
+export const SWIPE_DISMISS_CONFIG = {
+  MIN_DRAG_DISTANCE: 8,         // 方向判定の最小移動距離 (px)
+  DIRECTION_RATIO: 1.5,          // 縦横比 (|dy| >= |dx| * 1.5)
+  DISMISS_DISTANCE: 100,         // 距離閾値 (px)
+  DISMISS_HEIGHT_RATIO: 0.20,    // 画面高さ閾値 (20%)
+  FLICK_DISTANCE: 40,            // フリックに必要な最小移動距離 (px)
+  FLICK_VELOCITY: 0.7,           // フリック速度閾値 (px/ms)
+  RESISTANCE_HEIGHT_RATIO: 0.70, // 抵抗感をかけ始める画面高さ割合 (70%)
+  RESISTANCE_FACTOR: 0.35,       // 抵抗区間の移動倍率
+  TRANSITION_MS_DISMISS: 240,    // 閉じるアニメーション時間 (ms)
+  TRANSITION_MS_CANCEL: 220,     // キャンセルアニメーション時間 (ms)
+  FALLBACK_BUFFER_MS: 60,        // transitionend未発火時の安全フォールバックバッファ (ms)
+};
+
+/**
+ * 下スワイプによるシート閉じるジェスチャーの初期化
+ * @param {HTMLElement} playerView
+ * @param {HTMLElement} dragHandleWrap
+ * @returns {() => void} cleanup
+ */
+export function setupSwipeDismiss(playerView, dragHandleWrap) {
+  if (!playerView || !dragHandleWrap) return () => {};
+
+  let activePointerId = null;
+  let startX = 0;
+  let startY = 0;
+  let startTime = 0;
+  let currentDy = 0;
+  let isVerticalDrag = false;
+  let isDragging = false;
+  let isClosing = false;
+  let isCleanedUp = false;
+  let dismissed = false;
+  let rafId = 0;
+  let dismissFallbackTimer = null;
+  let cancelCleanupTimer = null;
+
+  const releaseCapture = (id) => {
+    if (typeof id === "number" && typeof dragHandleWrap.releasePointerCapture === "function") {
+      try {
+        if (typeof dragHandleWrap.hasPointerCapture === "function") {
+          if (dragHandleWrap.hasPointerCapture(id)) {
+            dragHandleWrap.releasePointerCapture(id);
+          }
+        } else {
+          dragHandleWrap.releasePointerCapture(id);
+        }
+      } catch {}
+    }
+  };
+
+  const removeWindowListeners = () => {
+    if (typeof window !== "undefined") {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerCancel);
+    }
+  };
+
+  const cancelDrag = (animate = true) => {
+    if (rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+    }
+    const pid = activePointerId;
+    activePointerId = null;
+    removeWindowListeners();
+    if (pid !== null) {
+      releaseCapture(pid);
+    }
+    isDragging = false;
+    isVerticalDrag = false;
+    playerView.classList.remove("is-dragging");
+
+    if (!animate) {
+      playerView.classList.remove("is-cancelling");
+      playerView.style.transform = "";
+      return;
+    }
+
+    const reduceMotion = typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduceMotion) {
+      playerView.classList.remove("is-cancelling");
+      playerView.style.transform = "";
+      return;
+    }
+
+    playerView.classList.add("is-cancelling");
+    playerView.style.transform = "translate3d(0, 0, 0)";
+
+    const finishCancel = () => {
+      if (cancelCleanupTimer) {
+        clearTimeout(cancelCleanupTimer);
+        cancelCleanupTimer = null;
+      }
+      playerView.removeEventListener("transitionend", onCancelEnd);
+      playerView.classList.remove("is-cancelling");
+      playerView.style.transform = "";
+    };
+
+    const onCancelEnd = (ev) => {
+      if (ev && ev.target !== playerView) return;
+      if (ev && ev.propertyName && ev.propertyName !== "transform") return;
+      finishCancel();
+    };
+
+    playerView.addEventListener("transitionend", onCancelEnd);
+    cancelCleanupTimer = setTimeout(finishCancel, SWIPE_DISMISS_CONFIG.TRANSITION_MS_CANCEL + SWIPE_DISMISS_CONFIG.FALLBACK_BUFFER_MS);
+  };
+
+  const dismissSheet = () => {
+    isClosing = true;
+    isDragging = false;
+    isVerticalDrag = false;
+    if (rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+    }
+    const pid = activePointerId;
+    activePointerId = null;
+    removeWindowListeners();
+    if (pid !== null) {
+      releaseCapture(pid);
+    }
+
+    playerView.classList.remove("is-dragging");
+    playerView.classList.remove("is-cancelling");
+    playerView.classList.add("is-dismissing");
+    playerView.style.transform = "translate3d(0, 100%, 0)";
+
+    const executeDismiss = () => {
+      if (dismissed || isCleanedUp) return;
+      dismissed = true;
+      if (dismissFallbackTimer) {
+        clearTimeout(dismissFallbackTimer);
+        dismissFallbackTimer = null;
+      }
+      playerView.removeEventListener("transitionend", onDismissEnd);
+      back("library");
+    };
+
+    const onDismissEnd = (ev) => {
+      if (ev && ev.target !== playerView) return;
+      if (ev && ev.propertyName && ev.propertyName !== "transform") return;
+      executeDismiss();
+    };
+
+    const reduceMotion = typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduceMotion) {
+      executeDismiss();
+    } else {
+      playerView.addEventListener("transitionend", onDismissEnd);
+      dismissFallbackTimer = setTimeout(executeDismiss, SWIPE_DISMISS_CONFIG.TRANSITION_MS_DISMISS + SWIPE_DISMISS_CONFIG.FALLBACK_BUFFER_MS);
+    }
+  };
+
+  const onPointerDown = (e) => {
+    if (isClosing || isCleanedUp) return;
+    if (activePointerId !== null) return;
+
+    // ドラッグハンドル周辺からの入力か確認
+    if (!dragHandleWrap.contains(e.target)) return;
+
+    // ボタン・入力・インタラクティブ要素からの開始を絶対防止
+    if (e.target && typeof e.target.closest === "function") {
+      const interactive = e.target.closest("button, input, select, textarea, a, #seek-bar, .player-lyrics-overlay, .queue-list, [role='dialog']");
+      if (interactive && interactive !== dragHandleWrap) return;
+    }
+
+    // 主ボタンまたはタッチ/ペン入力か確認
+    const isTouchOrPen = e.pointerType === "touch" || e.pointerType === "pen";
+    const isPrimaryButton = e.button === 0;
+    if (!isTouchOrPen && !isPrimaryButton) return;
+
+    activePointerId = e.pointerId;
+    startX = e.clientX;
+    startY = e.clientY;
+    startTime = (typeof performance !== "undefined" && typeof performance.now === "function") ? performance.now() : Date.now();
+    currentDy = 0;
+    isVerticalDrag = false;
+    isDragging = false;
+
+    if (typeof dragHandleWrap.setPointerCapture === "function") {
+      try {
+        dragHandleWrap.setPointerCapture(e.pointerId);
+      } catch {}
+    }
+
+    if (typeof window !== "undefined") {
+      window.addEventListener("pointermove", onPointerMove, { passive: false });
+      window.addEventListener("pointerup", onPointerUp);
+      window.addEventListener("pointercancel", onPointerCancel);
+    }
+  };
+
+  const onPointerMove = (e) => {
+    if (isClosing || isCleanedUp) return;
+    if (e.pointerId !== activePointerId) return;
+
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+
+    if (!isVerticalDrag) {
+      const absDist = Math.hypot(dx, dy);
+      if (absDist < SWIPE_DISMISS_CONFIG.MIN_DRAG_DISTANCE) {
+        return; // 8px 未満は方向未確定
+      }
+
+      // 上方向または横優先ならキャンセル
+      if (dy <= 0 || Math.abs(dy) < Math.abs(dx) * SWIPE_DISMISS_CONFIG.DIRECTION_RATIO) {
+        cancelDrag(false);
+        return;
+      }
+
+      // 縦方向かつ下方向へロック
+      isVerticalDrag = true;
+      isDragging = true;
+      playerView.classList.add("is-dragging");
+    }
+
+    // 縦ドラッグ確定後のみ preventDefault
+    if (e.cancelable && typeof e.preventDefault === "function") {
+      e.preventDefault();
+    }
+
+    // 抵抗感の計算
+    const windowHeight = (typeof window !== "undefined" && window.innerHeight) ? window.innerHeight : 800;
+    const resistanceStart = windowHeight * SWIPE_DISMISS_CONFIG.RESISTANCE_HEIGHT_RATIO;
+    let targetDy = dy;
+    if (dy > resistanceStart) {
+      targetDy = resistanceStart + (dy - resistanceStart) * SWIPE_DISMISS_CONFIG.RESISTANCE_FACTOR;
+    }
+    currentDy = Math.max(0, targetDy);
+
+    if (!rafId) {
+      rafId = requestAnimationFrame(() => {
+        rafId = 0;
+        if (isDragging && !isClosing && !isCleanedUp) {
+          playerView.style.transform = `translate3d(0, ${currentDy}px, 0)`;
+        }
+      });
+    }
+  };
+
+  const onPointerUp = (e) => {
+    if (isClosing || isCleanedUp) return;
+    if (e.pointerId !== activePointerId) return;
+
+    if (!isDragging || !isVerticalDrag) {
+      cancelDrag(false);
+      return;
+    }
+
+    const now = (typeof performance !== "undefined" && typeof performance.now === "function") ? performance.now() : Date.now();
+    const dt = Math.max(1, now - startTime);
+    const velocity = currentDy / dt; // px/ms
+    const windowHeight = (typeof window !== "undefined" && window.innerHeight) ? window.innerHeight : 800;
+    const heightThreshold = Math.max(
+      SWIPE_DISMISS_CONFIG.DISMISS_DISTANCE,
+      windowHeight * SWIPE_DISMISS_CONFIG.DISMISS_HEIGHT_RATIO
+    );
+
+    const shouldDismiss =
+      (currentDy >= SWIPE_DISMISS_CONFIG.FLICK_DISTANCE && velocity >= SWIPE_DISMISS_CONFIG.FLICK_VELOCITY) ||
+      (currentDy >= heightThreshold);
+
+    if (shouldDismiss) {
+      dismissSheet();
+    } else {
+      cancelDrag(true);
+    }
+  };
+
+  const onPointerCancel = (e) => {
+    if (isClosing || isCleanedUp) return;
+    if (e.pointerId === activePointerId) {
+      cancelDrag(true);
+    }
+  };
+
+  const onLostPointerCapture = (e) => {
+    if (isClosing || isCleanedUp) return;
+    if (e.pointerId === activePointerId && isDragging) {
+      cancelDrag(true);
+    }
+  };
+
+  const onWindowResizeOrOrientation = () => {
+    if (isClosing || isCleanedUp) return;
+    if (isDragging) {
+      cancelDrag(true);
+    }
+  };
+
+  const onKeyDown = (e) => {
+    if (isClosing || isCleanedUp) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      dismissSheet();
+    }
+  };
+
+  dragHandleWrap.addEventListener("pointerdown", onPointerDown);
+  dragHandleWrap.addEventListener("pointercancel", onPointerCancel);
+  dragHandleWrap.addEventListener("lostpointercapture", onLostPointerCapture);
+  dragHandleWrap.addEventListener("keydown", onKeyDown);
+
+  if (typeof window !== "undefined") {
+    window.addEventListener("resize", onWindowResizeOrOrientation, { passive: true });
+    window.addEventListener("orientationchange", onWindowResizeOrOrientation, { passive: true });
+  }
+
+  return () => {
+    isCleanedUp = true;
+    if (rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+    }
+    if (dismissFallbackTimer) {
+      clearTimeout(dismissFallbackTimer);
+      dismissFallbackTimer = null;
+    }
+    if (cancelCleanupTimer) {
+      clearTimeout(cancelCleanupTimer);
+      cancelCleanupTimer = null;
+    }
+    removeWindowListeners();
+    if (activePointerId !== null) {
+      releaseCapture(activePointerId);
+      activePointerId = null;
+    }
+    dragHandleWrap.removeEventListener("pointerdown", onPointerDown);
+    dragHandleWrap.removeEventListener("pointercancel", onPointerCancel);
+    dragHandleWrap.removeEventListener("lostpointercapture", onLostPointerCapture);
+    dragHandleWrap.removeEventListener("keydown", onKeyDown);
+
+    if (typeof window !== "undefined") {
+      window.removeEventListener("resize", onWindowResizeOrOrientation);
+      window.removeEventListener("orientationchange", onWindowResizeOrOrientation);
+    }
+
+    playerView.classList.remove("is-dragging", "is-dismissing", "is-cancelling");
+    playerView.style.transform = "";
+  };
+}
+
 export async function mount(root) {
   root.innerHTML = render();
   const refs = collectRefs(root);
+
+  // 下スワイプによるシート閉じる操作 (Apple Music風)
+  const cleanupSwipeDismiss = setupSwipeDismiss(refs.playerView, refs.dragHandleWrap);
 
   // 上部閉じるボタン (下スワイプ / 戻る 相当で前画面へ)
   if (refs.dismissBtn) {
@@ -1058,6 +1410,9 @@ export async function mount(root) {
   // クリーンアップ
   return () => {
     alive = false; // in-flight な decodeUnsub コールバックの await 復帰後処理を無効化
+    if (typeof cleanupSwipeDismiss === "function") {
+      cleanupSwipeDismiss();
+    }
     unsub();
     decodeUnsub();
     if (infoUnsub) infoUnsub();
@@ -1072,6 +1427,9 @@ function render() {
   return `
     <section class="player-view">
       <div class="player-ambient-bg" id="player-ambient-bg" aria-hidden="true"></div>
+      <div class="player-drag-handle-wrap" id="player-drag-handle-wrap" role="button" tabindex="0" aria-label="再生中画面を閉じる" title="下へスワイプして閉じる">
+        <div class="player-drag-handle" aria-hidden="true"></div>
+      </div>
       <div class="player-top-bar">
         <button class="player-dismiss-btn" id="btn-player-dismiss" aria-label="閉じる" title="閉じる">
           ${ICONS.dismiss}
@@ -1232,6 +1590,8 @@ function render() {
 
 function collectRefs(root) {
   return {
+    playerView: root.querySelector(".player-view"),
+    dragHandleWrap: root.querySelector("#player-drag-handle-wrap"),
     ambientBg: root.querySelector("#player-ambient-bg"),
     dismissBtn: root.querySelector("#btn-player-dismiss"),
     playerMoreBtn: root.querySelector("#btn-player-more"),
