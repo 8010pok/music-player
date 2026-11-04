@@ -676,6 +676,31 @@ export async function hasCachedBlob(id) {
   }
 }
 
+/**
+ * 特定トラックの音源Blobキャッシュ（blobsストア）のみを安全に削除する
+ * @param {string} id
+ * @returns {Promise<boolean>}
+ */
+export async function deleteCachedBlob(id) {
+  if (!id) return false;
+  _memoryBlobCache.delete(id);
+  try {
+    return await withWriteRetry(async () => {
+      const db = await openDb();
+      const tx = db.transaction("blobs", "readwrite");
+      tx.objectStore("blobs").delete(id);
+      return new Promise((res, rej) => {
+        tx.oncomplete = () => res(true);
+        tx.onerror = () => rej(tx.error);
+        tx.onabort = () => rej(tx.error);
+      });
+    });
+  } catch (err) {
+    console.warn(`[library-db] deleteCachedBlob failed for ${id}:`, err);
+    return false;
+  }
+}
+
 const _cachingDriveIds = new Set();
 
 /**

@@ -8,7 +8,7 @@
  */
 
 import { getPublic, setPublic, getSecret, setSecret } from "../store/settings.js";
-import { putTrack, getTrack, getAllTracks } from "../store/library-db.js";
+import { putTrack, getTrack, getAllTracks, deleteCachedBlob } from "../store/library-db.js";
 import { extractMetadata, readDurationViaAudio } from "../metadata/index.js";
 import { formatFromName, mimeFromName } from "../metadata/util.js";
 import { openModal, toast, escapeHtml, escapeAttr } from "../ui/components.js";
@@ -796,17 +796,17 @@ export async function fetchFolderAudioFilesRecursive(
       stage: "init",
     });
     failedFolders.push(safeErr);
-    const res = audioFiles;
-    res.files = audioFiles;
-    res.foldersVisited = visitedFolderIds.size;
-    res.pagesFetched = 0;
-    res.failedFolders = failedFolders;
-    res.failedPages = failedPages;
-    res.warnings = warnings;
-    res.aborted = false;
-    res.authRequired = true;
-    res.partial = true;
-    return res;
+    return {
+      files: audioFiles,
+      foldersVisited: visitedFolderIds.size,
+      pagesFetched: 0,
+      failedFolders,
+      failedPages,
+      warnings,
+      aborted: false,
+      authRequired: true,
+      partial: true,
+    };
   }
 
   while (folderQueue.length > 0) {
@@ -1049,18 +1049,17 @@ export async function fetchFolderAudioFilesRecursive(
   }
 
   const partial = failedFolders.length > 0 || failedPages.length > 0 || aborted || authRequired;
-  const result = audioFiles;
-  result.files = audioFiles;
-  result.foldersVisited = visitedFolderIds.size;
-  result.pagesFetched = totalPagesFetched;
-  result.failedFolders = failedFolders;
-  result.failedPages = failedPages;
-  result.warnings = warnings;
-  result.aborted = aborted;
-  result.authRequired = authRequired;
-  result.partial = partial;
-
-  return result;
+  return {
+    files: audioFiles,
+    foldersVisited: visitedFolderIds.size,
+    pagesFetched: totalPagesFetched,
+    failedFolders,
+    failedPages,
+    warnings,
+    aborted,
+    authRequired,
+    partial,
+  };
 }
 
 /**
@@ -1830,6 +1829,19 @@ export function buildDriveTrackRecord({
     : undefined;
 
   // 7. トラックレコードの組み立て
+  // 実体変更の検知 (サイズまたは更新日時の相違)
+  const remoteSize = parseInt(file.size, 10) || 0;
+  const existingSize = existing ? (existing.fileSize || 0) : 0;
+  const sizeChanged = Boolean(remoteSize && existingSize && remoteSize !== existingSize);
+  const remoteMod = file.modifiedTime || "";
+  const existingMod = existing ? (existing.driveModifiedTime || "") : "";
+  const modChanged = Boolean(remoteMod && existingMod && remoteMod !== existingMod);
+  const fileContentChanged = sizeChanged || modChanged;
+
+  // 以前のキャッシュを安全に引き継げるのは「実体変更がない場合」のみ
+  const retainExistingCache = Boolean(existing && existing.cached && !fileContentChanged);
+  const cached = Boolean(isCached || retainExistingCache);
+
   const track = {
     id: trackId,
     title,
@@ -1855,7 +1867,7 @@ export function buildDriveTrackRecord({
     _noEmbeddedArt,
     source: "gdrive",
     driveFileId: file.id,
-    cached: Boolean(isCached || (existing && existing.cached)),
+    cached,
   };
 
   if (artworkUpdatedAt) track.artworkUpdatedAt = artworkUpdatedAt;
@@ -1916,10 +1928,10 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
   let unsupported = 0;
   let tombstoned = 0;
   const skippedSameFile = 0;
+  let attempted = 0;
   const failures = [];
   const selected = Array.isArray(driveFiles) ? driveFiles.length : 0;
   const discovered = selected;
-  const attempted = selected;
   let partialFolders = 0;
 
   const allExistingTracks = await getAllTracks().catch(() => []);
@@ -1936,7 +1948,7 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
       onProgress(i + 1, driveFiles.length, file);
     }
 
-    // 1. サポート音声形式チェック
+    // 1. サポート音声形式チェック (形式外は attempted に含めず unsupported として除外)
     if (!isSupportedDriveAudioFile(file)) {
       unsupported++;
       failures.push({
@@ -1948,19 +1960,28 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
       continue;
     }
 
+    // 実際に保存処理へ進む件数をカウント (attempted)
+    attempted++;
+
     try {
       const trackId = trackIdFromDriveFileId(file.id);
       // 同一 Drive file ID の既存レコードのみを引き継ぐ（別ファイルIDの曲は絶対に引き継がない！）
       let existing = existingByIdMap.get(trackId) || existingByDriveIdMap.get(file.id) || (await getTrack(trackId).catch(() => null));
       const isExisting = Boolean(existing);
 
-      // 2. ユーザーによる明示的な再インポート時、該当トラックの Tombstone を安全に解除
-      if (isTombstoned(trackId, 0, "track")) {
+      // 実体変更の検知
+      const remoteSize = parseInt(file.size, 10) || 0;
+      const existingSize = existing ? (existing.fileSize || 0) : 0;
+      const sizeChanged = Boolean(remoteSize && existingSize && remoteSize !== existingSize);
+      const remoteMod = file.modifiedTime || "";
+      const existingMod = existing ? (existing.driveModifiedTime || "") : "";
+      const modChanged = Boolean(remoteMod && existingMod && remoteMod !== existingMod);
+      const fileContentChanged = sizeChanged || modChanged;
+
+      // Tombstone の事前検知（※この時点では解除しない！putTrack 成功後にのみ解除する）
+      const wasTombstoned = isTombstoned(trackId, 0, "track");
+      if (wasTombstoned) {
         tombstoned++;
-        const didRemove = removeTombstone(trackId, "track");
-        if (didRemove) {
-          restored++;
-        }
       }
 
       const folder = file.folderName || defaultAlbumName || "";
@@ -2014,7 +2035,25 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           isCached: true,
         });
 
+        // 3. putTrack 実行
         await putTrack(track, blob);
+
+        // 4. putTrack 成功確認後にのみ同一 track ID の Tombstone を安全に解除
+        if (wasTombstoned) {
+          const didRemove = removeTombstone(trackId, "track");
+          if (didRemove) {
+            restored++;
+          } else {
+            console.warn(`[drive-service] ⚠️ 曲 ${trackId} の Tombstone 解除に失敗しました`);
+            failures.push({
+              name: file?.name || "unknown",
+              stage: "tombstone_restore",
+              errorCode: "TOMBSTONE_REMOVE_FAILED",
+              message: "トラック保存後のTombstone解除に失敗しました。次回同期で再削除される恐れがあります",
+            });
+          }
+        }
+
         existingByIdMap.set(track.id, track);
         existingByDriveIdMap.set(file.id, track);
         if (isExisting) {
@@ -2045,7 +2084,32 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           isCached: false,
         });
 
+        // 実体変更があり今回Blobを取得しない場合は、古いキャッシュBlobを削除して不整合を防止
+        if (fileContentChanged && existing && existing.cached) {
+          await deleteCachedBlob(track.id).catch((delErr) => {
+            console.warn("[drive-service] 古いBlobキャッシュ削除失敗:", delErr);
+          });
+        }
+
+        // 3. putTrack 実行
         await putTrack(track, null);
+
+        // 4. putTrack 成功確認後にのみ同一 track ID の Tombstone を安全に解除
+        if (wasTombstoned) {
+          const didRemove = removeTombstone(trackId, "track");
+          if (didRemove) {
+            restored++;
+          } else {
+            console.warn(`[drive-service] ⚠️ 曲 ${trackId} の Tombstone 解除に失敗しました`);
+            failures.push({
+              name: file?.name || "unknown",
+              stage: "tombstone_restore",
+              errorCode: "TOMBSTONE_REMOVE_FAILED",
+              message: "トラック保存後のTombstone解除に失敗しました。次回同期で再削除される恐れがあります",
+            });
+          }
+        }
+
         existingByIdMap.set(track.id, track);
         existingByDriveIdMap.set(file.id, track);
         if (isExisting) {
@@ -2482,15 +2546,30 @@ export async function openDriveImportModal({ onImported } = {}) {
         onProgress: (msg) => { progressEl.textContent = msg; },
       });
 
-      const audioFiles = Array.isArray(folderRes) ? folderRes : (folderRes?.files || []);
-      if (folderRes?.partial) {
-        toast("⚠️ フォルダの一部を取得できませんでした。取得できた曲のみ表示しています", "warn");
+      // 1. 中断時の処理（エラーとみなさずキャンセルとして扱う）
+      if (folderRes.aborted) {
+        toast("フォルダ探索をキャンセルしました", "info");
+        progressEl.style.display = "none";
+        if (folderBtn) folderBtn.disabled = false;
+        return;
       }
 
+      // 2. 認証切れ時の専用メッセージ
+      if (folderRes.authRequired) {
+        toast("Google Driveとの接続が切れています。再接続後、取得できなかったフォルダをもう一度開いてください。", "warn");
+      }
+
+      // 3. 部分成功時の詳細通知（失敗フォルダ数・失敗ページ数）
+      if (folderRes.partial && !folderRes.authRequired) {
+        const failFolderCount = folderRes.failedFolders?.length || 0;
+        const failPageCount = folderRes.failedPages?.length || 0;
+        const failDetail = failFolderCount > 0 ? ` (失敗: フォルダ ${failFolderCount}件)` : (failPageCount > 0 ? ` (失敗: ページ ${failPageCount}件)` : "");
+        toast(`⚠️ フォルダの一部を取得できませんでした${failDetail}。取得できた曲のみ追加します`, "warn");
+      }
+
+      const audioFiles = folderRes.files || [];
       if (audioFiles.length === 0) {
-        if (folderRes?.partial) {
-          toast(`⚠️ フォルダ「${folderName}」の取得に一部失敗し、追加可能な音源は見つかりませんでした`, "warn");
-        } else {
+        if (!folderRes.authRequired) {
           toast(`フォルダ「${folderName}」内に音源ファイルは見つかりませんでした`, "info");
         }
         progressEl.style.display = "none";

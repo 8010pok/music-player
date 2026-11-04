@@ -249,8 +249,7 @@ export function removeTombstone(id, type = "track") {
     const targetKey = makeTombstoneKey(normType, id);
     const filtered = list.filter((t) => makeTombstoneKey(t.type, t.id) !== targetKey);
     if (filtered.length !== list.length) {
-      safeSaveTombstones(filtered);
-      return true;
+      return safeSaveTombstones(filtered);
     }
     return false;
   } catch (_) {
