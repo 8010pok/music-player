@@ -352,6 +352,7 @@ export function setupSwipeDismiss(playerView, dragHandleWrap) {
 
   const onKeyDown = (e) => {
     if (isClosing || isCleanedUp) return;
+    if (e.repeat) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       dismissSheet();

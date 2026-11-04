@@ -815,4 +815,139 @@ test("ドラッグハンドルが keydown (Enter/Space) によるアクセシブ
   cleanup();
 });
 
+console.log("=== 9. touch-action および CSS 監査 ===");
+
+test("ハンドルラッパーだけに touch-action: none が設定され、ビュー全体や歌詞は維持されること", () => {
+  const css = fs.readFileSync(path.join(__dirname, "../css/views.css"), "utf-8");
+
+  // .player-drag-handle-wrap ブロックを抽出
+  const handleBlockMatch = css.match(/\.player-drag-handle-wrap\s*\{([^}]+)\}/);
+  ok(handleBlockMatch, ".player-drag-handle-wrap が定義されている");
+  ok(handleBlockMatch[1].includes("touch-action: none;"), "ハンドルラッパーに touch-action: none が設定されている");
+
+  // .player-view 自体に touch-action: none が設定されていないこと
+  const viewBlockMatch = css.match(/\.player-view\s*\{([^}]+)\}/);
+  ok(viewBlockMatch, ".player-view が定義されている");
+  strictEqual(viewBlockMatch[1].includes("touch-action: none"), false, "player-view 自体には touch-action: none を設定しない");
+
+  // 歌詞領域に touch-action: none が設定されていないこと
+  const lyricsBlockMatch = css.match(/\.player-lyrics-overlay\s*\{([^}]+)\}/);
+  ok(lyricsBlockMatch, ".player-lyrics-overlay が定義されている");
+  strictEqual(lyricsBlockMatch[1].includes("touch-action: none"), false, "歌詞領域には touch-action: none を設定しない");
+});
+
+test("アニメーション競合防止: is-dragging / is-dismissing / is-cancelling で animation: none が指定されていること", () => {
+  const css = fs.readFileSync(path.join(__dirname, "../css/views.css"), "utf-8");
+
+  for (const cls of [".player-view.is-dragging", ".player-view.is-dismissing", ".player-view.is-cancelling"]) {
+    const reg = new RegExp(`${cls.replace(/\./g, "\\.")}\\s*\\{([^}]+)\\}`);
+    const m = css.match(reg);
+    ok(m, `${cls} が定義されている`);
+    ok(m[1].includes("animation: none !important"), `${cls} で初回アニメーションが無効化されている`);
+  }
+});
+
+console.log("=== 10. イベント・競合詳細監査 ===");
+
+test("子要素からの transitionend や transform 以外の transitionend を無視すること", () => {
+  const playerView = new MockElement("section", "", "player-view");
+  const handleWrap = new MockElement("div", "player-drag-handle-wrap");
+  const child = new MockElement("span", "child-descendant");
+  playerView.appendChild(handleWrap);
+  playerView.appendChild(child);
+
+  const cleanup = setupSwipeDismiss(playerView, handleWrap);
+
+  handleWrap.dispatchEvent({
+    type: "pointerdown",
+    pointerId: 50,
+    button: 0,
+    pointerType: "touch",
+    clientX: 100,
+    clientY: 0,
+    target: handleWrap,
+  });
+
+  window.dispatchEvent({
+    type: "pointermove",
+    pointerId: 50,
+    clientX: 100,
+    clientY: 200,
+    cancelable: true,
+  });
+  flushRaf();
+
+  window.dispatchEvent({
+    type: "pointerup",
+    pointerId: 50,
+    clientX: 100,
+    clientY: 200,
+  });
+
+  // 1. 子要素からバブリングした transitionend -> 無視される
+  playerView.dispatchEvent({
+    type: "transitionend",
+    propertyName: "transform",
+    target: child,
+  });
+  // 2. transform 以外の transitionend (例: opacity) -> 無視される
+  playerView.dispatchEvent({
+    type: "transitionend",
+    propertyName: "opacity",
+    target: playerView,
+  });
+
+  strictEqual(playerView.classList.contains("is-dismissing"), true, "不正な transitionend では状態が壊れない");
+
+  cleanup();
+});
+
+test("Enter / Space のキーリピート (長押し) で複数回 dismissSheet() されないこと & Space でスクロール防止", () => {
+  const playerView = new MockElement("section", "", "player-view");
+  const handleWrap = new MockElement("div", "player-drag-handle-wrap");
+  playerView.appendChild(handleWrap);
+
+  const cleanup = setupSwipeDismiss(playerView, handleWrap);
+
+  let spacePrevented = false;
+  handleWrap.dispatchEvent({
+    type: "keydown",
+    key: " ",
+    repeat: false,
+    preventDefault() { spacePrevented = true; },
+  });
+  strictEqual(spacePrevented, true, "Space 押下で preventDefault が実行される");
+  strictEqual(playerView.classList.contains("is-dismissing"), true);
+
+  // 長押しリピート
+  let repeatPrevented = false;
+  handleWrap.dispatchEvent({
+    type: "keydown",
+    key: " ",
+    repeat: true,
+    preventDefault() { repeatPrevented = true; },
+  });
+  strictEqual(repeatPrevented, false, "repeat: true のイベントは早期リターンされる");
+
+  cleanup();
+});
+
+test("cleanup 実行後に transform とクラスが完全にクリアされ、再マウント時も初期位置が保持されること", () => {
+  const playerView = new MockElement("section", "", "player-view");
+  const handleWrap = new MockElement("div", "player-drag-handle-wrap");
+  playerView.appendChild(handleWrap);
+
+  const cleanup = setupSwipeDismiss(playerView, handleWrap);
+
+  playerView.classList.add("is-dragging");
+  playerView.style.transform = "translate3d(0, 150px, 0)";
+
+  cleanup();
+
+  strictEqual(playerView.classList.contains("is-dragging"), false, "is-dragging が除去される");
+  strictEqual(playerView.classList.contains("is-dismissing"), false, "is-dismissing が除去される");
+  strictEqual(playerView.classList.contains("is-cancelling"), false, "is-cancelling が除去される");
+  strictEqual(playerView.style.transform, "", "inline transform が消去される");
+});
+
 console.log(`\n✓ All ${passed} tests in test-player-sheet-gesture.mjs passed!`);
