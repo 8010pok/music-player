@@ -15,6 +15,25 @@ import { openModal, toast, escapeHtml, escapeAttr } from "../ui/components.js";
 import { processAudioNormalization } from "../audio/normalize-service.js";
 import { isPlaceholderArtist, parseArtistAndTitle } from "../lastfm/scrobble-cleaner.js";
 import { removeTombstone, isTombstoned } from "../store/tombstone.js";
+import { getAlbumKey, getAlbumArtist } from "../metadata/album-util.js";
+
+const MAX_DIAGNOSES = 50;
+const _importAlbumDiagnoses = [];
+
+/**
+ * 直近のアルバム分類診断情報（最大50件）を取得
+ * @returns {Array<object>}
+ */
+export function getRecentImportAlbumDiagnoses() {
+  return [..._importAlbumDiagnoses];
+}
+
+/**
+ * アルバム分類診断情報をクリア（テスト・検証用）
+ */
+export function clearImportAlbumDiagnoses() {
+  _importAlbumDiagnoses.length = 0;
+}
 
 let _cachedToken = null;
 let _gisTokenClient = null;
@@ -1732,6 +1751,7 @@ export function buildDriveTrackRecord({
   normResult = null,
   blob = null,
   isCached = false,
+  importTarget = null,
 }) {
   const trackId = trackIdFromDriveFileId(file.id);
   const isNumeric = (s) => typeof s === "string" && /^\d+$/.test(s.trim());
@@ -1763,25 +1783,66 @@ export function buildDriveTrackRecord({
     validParsedArtist ||
     "(不明アーティスト)";
 
-  // 3. アルバムの決定
+  // 3. アルバム & アルバムアーティストの決定（明示的 importTarget / 優先順位監査）
+  const validTargetAlbum = importTarget && typeof importTarget.album === "string" && importTarget.album.trim() ? importTarget.album.trim() : null;
+  const validTargetAlbumArtist = importTarget && importTarget.albumArtist != null ? String(importTarget.albumArtist).trim() : null;
+
   const validExistingAlbum = existing && typeof existing.album === "string" && !isInvalidDriveAlbum(existing.album) ? existing.album : null;
   const validMetaAlbum = extractedMeta && typeof extractedMeta.album === "string" && !isInvalidDriveAlbum(extractedMeta.album) ? extractedMeta.album : null;
-  const validInferredAlbum = inferred && inferred.album && !isInvalidDriveAlbum(inferred.album) ? inferred.album : null;
   const validFolderAlbum = folder && !isInvalidDriveAlbum(folder) ? folder : null;
+  const validInferredAlbum = inferred && inferred.album && !isInvalidDriveAlbum(inferred.album) ? inferred.album : null;
 
-  const album =
-    (existing && existing.userEdited && validExistingAlbum ? validExistingAlbum : null) ||
-    validMetaAlbum ||
-    validExistingAlbum ||
-    validInferredAlbum ||
-    validFolderAlbum ||
-    "Google Drive";
+  let album = "";
+  let albumArtist = "";
+  let albumDecisionSource = "fallback";
+  let importTargetMismatch = null;
+
+  if (existing && existing.userEdited) {
+    // 既存曲かつ手動編集済み: ユーザー編集値を最優先保護（importTarget による無条件上書きを防止）
+    album = validExistingAlbum || "Google Drive";
+    albumArtist = existing.albumArtist != null ? existing.albumArtist : "";
+    albumDecisionSource = "user_edited";
+    if (validTargetAlbum && (validTargetAlbum !== album || (validTargetAlbumArtist != null && validTargetAlbumArtist !== albumArtist))) {
+      importTargetMismatch = {
+        targetAlbum: validTargetAlbum,
+        targetAlbumArtist: validTargetAlbumArtist,
+        preservedAlbum: album,
+        preservedAlbumArtist: albumArtist,
+      };
+    }
+  } else if (validTargetAlbum) {
+    // 明示的 importTarget (新規曲、または既存曲で userEdited: false)
+    album = validTargetAlbum;
+    albumArtist = validTargetAlbumArtist != null ? validTargetAlbumArtist : "";
+    albumDecisionSource = "import_target";
+  } else if (validMetaAlbum) {
+    // 埋め込みタグ
+    album = validMetaAlbum;
+    albumArtist = (extractedMeta && extractedMeta.albumArtist) || (existing && existing.albumArtist) || "";
+    albumDecisionSource = "embedded_tag";
+  } else if (existing && validExistingAlbum) {
+    // 既存レコード（同一 file ID の過去の保存値）
+    album = validExistingAlbum;
+    albumArtist = (existing && existing.albumArtist) || "";
+    albumDecisionSource = "existing_record";
+  } else if (validFolderAlbum) {
+    // 親フォルダ名
+    album = validFolderAlbum;
+    albumArtist = (existing && existing.albumArtist) || "";
+    albumDecisionSource = "parent_folder";
+  } else if (validInferredAlbum) {
+    // ファイル名推測
+    album = validInferredAlbum;
+    albumArtist = (existing && existing.albumArtist) || "";
+    albumDecisionSource = "filename_inference";
+  } else {
+    // フォールバック
+    album = "Google Drive";
+    albumArtist = (existing && existing.albumArtist) || "";
+    albumDecisionSource = "fallback";
+  }
 
   // 4. その他メタデータ（ユーザー編集時は既存優先）
-  const albumArtist = (existing && existing.userEdited && existing.albumArtist != null ? existing.albumArtist : null) ||
-    (extractedMeta && extractedMeta.albumArtist) ||
-    (existing && existing.albumArtist) ||
-    "";
   const year = (existing && existing.userEdited && existing.year != null ? existing.year : null) ||
     (extractedMeta && extractedMeta.year) ||
     (existing && existing.year) ||
@@ -1907,6 +1968,31 @@ export function buildDriveTrackRecord({
     track.normalizedPeakDb = existing.normalizedPeakDb;
   }
 
+  // 8. アルバム分類診断情報の構築（機密情報を除外）
+  const driveFileIdSuffix = file && file.id ? String(file.id).slice(-6) : "";
+  const diagnosis = {
+    fileName: file?.name || "",
+    driveFileIdSuffix,
+    embeddedAlbum: extractedMeta?.album || null,
+    embeddedAlbumArtist: extractedMeta?.albumArtist || null,
+    existingAlbum: existing?.album || null,
+    existingAlbumArtist: existing?.albumArtist || null,
+    existingUserEdited: Boolean(existing?.userEdited),
+    inferredAlbum: inferred?.album || null,
+    parentFolderName: folder || null,
+    selectedTargetAlbum: validTargetAlbum,
+    selectedTargetAlbumArtist: validTargetAlbumArtist,
+    albumDecisionSource,
+    normalizedAlbumKey: getAlbumKey(track),
+    finalAlbumGroupKey: getAlbumKey(track),
+    finalAlbum: track.album,
+    finalAlbumArtist: getAlbumArtist(track),
+  };
+  if (importTargetMismatch) {
+    diagnosis.importTargetMismatch = importTargetMismatch;
+  }
+  track._importDiagnosis = diagnosis;
+
   return track;
 }
 
@@ -1920,7 +2006,7 @@ export function buildDriveTrackRecord({
  * @param {{ cacheBlobs?: boolean, normalizeAudio?: boolean, defaultAlbumName?: string, onProgress?: (current: number, total: number, file: object) => void }} [opts]
  * @returns {Promise<{ selected: number, discovered: number, attempted: number, added: number, updated: number, skippedSameFile: number, restored: number, failed: number, unsupported: number, tombstoned: number, partialFolders: number, failures: Array<object> }>}
  */
-export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false, normalizeAudio = false, defaultAlbumName = "", onProgress } = {}) {
+export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false, normalizeAudio = false, defaultAlbumName = "", importTarget = null, onProgress } = {}) {
   let added = 0;
   let updated = 0;
   let restored = 0;
@@ -2033,6 +2119,7 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           normResult,
           blob,
           isCached: true,
+          importTarget,
         });
 
         // 3. putTrack 実行
@@ -2051,6 +2138,13 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
               errorCode: "TOMBSTONE_REMOVE_FAILED",
               message: "トラック保存後のTombstone解除に失敗しました。次回同期で再削除される恐れがあります",
             });
+          }
+        }
+
+        if (track._importDiagnosis) {
+          _importAlbumDiagnoses.push(track._importDiagnosis);
+          if (_importAlbumDiagnoses.length > MAX_DIAGNOSES) {
+            _importAlbumDiagnoses.shift();
           }
         }
 
@@ -2082,6 +2176,7 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
           normResult: null,
           blob: null,
           isCached: false,
+          importTarget,
         });
 
         // 実体変更があり今回Blobを取得しない場合は、古いキャッシュBlobを削除して不整合を防止
@@ -2107,6 +2202,13 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
               errorCode: "TOMBSTONE_REMOVE_FAILED",
               message: "トラック保存後のTombstone解除に失敗しました。次回同期で再削除される恐れがあります",
             });
+          }
+        }
+
+        if (track._importDiagnosis) {
+          _importAlbumDiagnoses.push(track._importDiagnosis);
+          if (_importAlbumDiagnoses.length > MAX_DIAGNOSES) {
+            _importAlbumDiagnoses.shift();
           }
         }
 
@@ -2151,6 +2253,8 @@ export async function importDriveFilesToLibrary(driveFiles, { cacheBlobs = false
     tombstoned,
     partialFolders,
     failures,
+    diagnoses: [..._importAlbumDiagnoses],
+    importTarget: importTarget || null,
   };
 }
 
@@ -2160,9 +2264,9 @@ function stripExt(name) {
 
 /**
  * Google Drive インポートモーダルを表示
- * @param {{ onImported?: () => void }} [opts]
+ * @param {{ onImported?: (res?: object) => void, importTarget?: object|null }} [opts]
  */
-export async function openDriveImportModal({ onImported } = {}) {
+export async function openDriveImportModal({ onImported, importTarget = null } = {}) {
   const isConnected = await isDriveConnected();
   const pub = getPublic();
 
@@ -2227,7 +2331,7 @@ export async function openDriveImportModal({ onImported } = {}) {
         // モーダルを再表示（接続済み画面へ遷移）
         const closeBtn = document.querySelector(".modal-close");
         if (closeBtn) closeBtn.click();
-        openDriveImportModal({ onImported });
+        openDriveImportModal({ onImported, importTarget });
       } catch (err) {
         toast(err.message, "err");
         gisBtn.disabled = false;
@@ -2261,7 +2365,7 @@ export async function openDriveImportModal({ onImported } = {}) {
         toast(`Google Drive に接続しました (${email || "OK"})`, "ok");
         const closeBtn = document.querySelector(".modal-close");
         if (closeBtn) closeBtn.click();
-        openDriveImportModal({ onImported });
+        openDriveImportModal({ onImported, importTarget });
       } catch (err) {
         toast(err.message, "err");
         directBtn.disabled = false;
@@ -2289,6 +2393,16 @@ export async function openDriveImportModal({ onImported } = {}) {
   const accountLabel = pub.gdriveUserEmail || pub.gdriveUserDisplayName || "";
   const emailDisplay = accountLabel ? ` (${escapeHtml(accountLabel)})` : "";
 
+  const targetBannerHtml = (importTarget && importTarget.album)
+    ? `<div style="background: rgba(70, 79, 235, 0.08); border: 1px solid rgba(70, 79, 235, 0.25); border-radius: 6px; padding: 6px 10px; font-size: 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+        <div>
+          <span style="font-weight: 600; color: var(--accent);">追加先アルバム:</span>
+          <span style="margin-left: 4px; font-weight: 500;">${escapeHtml(importTarget.album)}</span>
+          ${importTarget.albumArtist ? `<span style="color: var(--fg-muted); font-size: 11px; margin-left: 4px;">(${escapeHtml(importTarget.albumArtist)})</span>` : ""}
+        </div>
+      </div>`
+    : "";
+
   container.innerHTML = `
     <div style="display: flex; flex-direction: column; gap: 8px;">
       <!-- 接続ヘッダー -->
@@ -2301,6 +2415,8 @@ export async function openDriveImportModal({ onImported } = {}) {
           <button class="btn danger" id="btn-drive-disconnect" style="padding: 2px 8px; font-size: 11px;">Drive連携を解除</button>
         </div>
       </div>
+
+      ${targetBannerHtml}
 
       <!-- 検索バー -->
       <div style="display: flex; gap: 6px;">
@@ -2384,6 +2500,7 @@ export async function openDriveImportModal({ onImported } = {}) {
               cacheBlobs: cacheNow,
               normalizeAudio: normalizeNow,
               defaultAlbumName: currentFolderName,
+              importTarget,
               onProgress: (cur, tot, file) => {
                 progressEl.textContent = `追加中 ${cur} / ${tot}: ${escapeHtml(file.name)}…`;
               },
@@ -2394,15 +2511,26 @@ export async function openDriveImportModal({ onImported } = {}) {
             const totalFailed = (failed || 0) + (unsupported || 0);
 
             if (totalFailed === 0) {
-              if (updated > 0 && added > 0) {
-                toast(`✅ ${added} 曲を追加、${updated} 曲を更新しました`, "ok");
-              } else if (updated > 0 && added === 0) {
-                toast(`✅ ${updated} 曲を更新しました`, "ok");
+              if (importTarget && importTarget.album) {
+                if (updated > 0 && added > 0) {
+                  toast(`✅ ${added}曲を追加、${updated}曲を更新しました\n追加先：${importTarget.album}`, "ok");
+                } else if (updated > 0 && added === 0) {
+                  toast(`✅ ${updated}曲を更新しました\n追加先：${importTarget.album}`, "ok");
+                } else {
+                  toast(`✅ ${added}曲を追加しました\n追加先：${importTarget.album}`, "ok");
+                }
               } else {
-                toast(`✅ ${added} 曲を追加しました`, "ok");
+                if (updated > 0 && added > 0) {
+                  toast(`✅ ${added} 曲を追加、${updated} 曲を更新しました`, "ok");
+                } else if (updated > 0 && added === 0) {
+                  toast(`✅ ${updated} 曲を更新しました`, "ok");
+                } else {
+                  toast(`✅ ${added} 曲を追加しました`, "ok");
+                }
               }
             } else if (totalSuccess > 0) {
-              toast(`⚠️ ${attempted} 曲中 ${totalSuccess} 曲を追加しました。${totalFailed} 曲は追加できませんでした`, "warn");
+              const targetNote = importTarget && importTarget.album ? ` (追加先: ${importTarget.album})` : "";
+              toast(`⚠️ ${attempted} 曲中 ${totalSuccess} 曲を追加しました${targetNote}。${totalFailed} 曲は追加できませんでした`, "warn");
             } else {
               toast("❌ 曲を追加できませんでした", "err");
             }
@@ -2413,7 +2541,7 @@ export async function openDriveImportModal({ onImported } = {}) {
             selectedFileIds.clear();
             renderItems(displayedItems, false);
             updateCount();
-            if (typeof onImported === "function") onImported();
+            if (typeof onImported === "function") onImported(importRes);
             progressEl.textContent = totalFailed > 0
               ? `⚠️ ${totalSuccess} 件を追加/更新、${totalFailed} 件失敗しました。続けて別のフォルダや曲もインポートできます`
               : `✅ ${totalSuccess} 件を追加/更新しました！続けて別のフォルダや曲もインポートできます`;
@@ -2585,6 +2713,7 @@ export async function openDriveImportModal({ onImported } = {}) {
         cacheBlobs: cacheNow,
         normalizeAudio: normalizeNow,
         defaultAlbumName: folderName,
+        importTarget,
         onProgress: (cur, tot, file) => {
           progressEl.textContent = `追加中 ${cur} / ${tot}: ${escapeHtml(file.name)}…`;
         },
@@ -2595,15 +2724,26 @@ export async function openDriveImportModal({ onImported } = {}) {
       const totalFailed = (failed || 0) + (unsupported || 0);
 
       if (totalFailed === 0) {
-        if (updated > 0 && added > 0) {
-          toast(`✅ ${added} 曲を追加、${updated} 曲を更新しました`, "ok");
-        } else if (updated > 0 && added === 0) {
-          toast(`✅ ${updated} 曲を更新しました`, "ok");
+        if (importTarget && importTarget.album) {
+          if (updated > 0 && added > 0) {
+            toast(`✅ ${added}曲を追加、${updated}曲を更新しました\n追加先：${importTarget.album}`, "ok");
+          } else if (updated > 0 && added === 0) {
+            toast(`✅ ${updated}曲を更新しました\n追加先：${importTarget.album}`, "ok");
+          } else {
+            toast(`✅ ${added}曲を追加しました\n追加先：${importTarget.album}`, "ok");
+          }
         } else {
-          toast(`✅ 「${folderName}」から ${added} 曲を追加しました`, "ok");
+          if (updated > 0 && added > 0) {
+            toast(`✅ ${added} 曲を追加、${updated} 曲を更新しました`, "ok");
+          } else if (updated > 0 && added === 0) {
+            toast(`✅ ${updated} 曲を更新しました`, "ok");
+          } else {
+            toast(`✅ 「${folderName}」から ${added} 曲を追加しました`, "ok");
+          }
         }
       } else if (totalSuccess > 0) {
-        toast(`⚠️ ${attempted} 曲中 ${totalSuccess} 曲を追加しました。${totalFailed} 曲は追加できませんでした`, "warn");
+        const targetNote = importTarget && importTarget.album ? ` (追加先: ${importTarget.album})` : "";
+        toast(`⚠️ ${attempted} 曲中 ${totalSuccess} 曲を追加しました${targetNote}。${totalFailed} 曲は追加できませんでした`, "warn");
       } else {
         toast("❌ 曲を追加できませんでした", "err");
       }
@@ -2612,7 +2752,7 @@ export async function openDriveImportModal({ onImported } = {}) {
         existingTrackIds.add(trackIdFromDriveFileId(f.id));
       }
       renderItems(displayedItems, false);
-      if (typeof onImported === "function") onImported();
+      if (typeof onImported === "function") onImported(importRes);
     } catch (err) {
       toast(`フォルダ追加エラー: ${err.message}`, "err");
     } finally {

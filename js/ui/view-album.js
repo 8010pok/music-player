@@ -16,6 +16,7 @@ import { escapeHtml, escapeAttr, toast, confirm, openModal, dismissActiveModal, 
 import { editTrackMetadata, editAlbumMetadata, editSelectedTracksMetadata } from "./metadata-editor.js";
 import { openPlayerSoundModal } from "./view-player.js";
 import { openArtworkFetcherModal } from "./artwork-fetcher-modal.js";
+import { openDriveImportModal } from "../gdrive/drive-service.js";
 
 let album = null;
 let unsubState = null;
@@ -80,6 +81,50 @@ export async function mount(root, options = {}) {
       await mount(root);
     });
   };
+  if (refs.addDriveBtn) {
+    refs.addDriveBtn.addEventListener("click", () => {
+      if (!album) return;
+      const currentKey = album.key;
+      const importTarget = {
+        targetType: "album",
+        album: album.title,
+        albumArtist: album.albumArtist,
+        albumKey: album.key,
+      };
+
+      openDriveImportModal({
+        importTarget,
+        onImported: async () => {
+          // 1. IndexedDB から最新トラックを再取得
+          const latestTracks = await getAllTracks().catch(() => []);
+          // 2. appState.tracks を更新（検索インデックス等も連動）
+          if (appState && typeof appState.setTracks === "function") {
+            appState.setTracks(latestTracks);
+          }
+          // 3. album grouping を再計算
+          const latestAlbums = groupTracksIntoAlbums(latestTracks);
+          const updatedAlb = latestAlbums.find((a) => a.key === currentKey);
+
+          // 4. scrollTop を退避
+          const scrollEl = document.querySelector(".content-pane") || document.scrollingElement || window;
+          const prevScrollTop = scrollEl.scrollTop !== undefined ? scrollEl.scrollTop : window.scrollY;
+
+          // 5. 現在のアルバム画面を再描画（アーティスト一覧やライブラリ先頭へ戻さない）
+          if (updatedAlb) {
+            album = updatedAlb;
+          }
+          await mount(root, { keepSelection: false });
+
+          // 6. scrollTop を復元
+          if (scrollEl.scrollTop !== undefined) {
+            scrollEl.scrollTop = prevScrollTop;
+          } else {
+            window.scrollTo(0, prevScrollTop);
+          }
+        },
+      });
+    });
+  }
   if (refs.editAlbumBtn) {
     refs.editAlbumBtn.addEventListener("click", openAlbumEditor);
   }
@@ -319,6 +364,10 @@ function render(alb) {
             </button>`
           : ""
         }
+        <button class="album-action-btn secondary" id="btn-album-add-drive" title="Google Drive からこのアルバムに曲を追加">
+          <svg class="ic" viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
+          <span>Driveから追加</span>
+        </button>
         <button class="album-action-btn secondary" id="btn-album-edit" title="アルバム全体の情報・収録曲を一括編集">
           <svg class="ic" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
           <span>一括編集</span>
@@ -423,6 +472,7 @@ function collectRefs(root) {
     playShuffleBtn: root.querySelector("#btn-album-play-shuffle"),
     cacheAllBtn: root.querySelector("#btn-album-cache-all"),
     cacheBtnText: root.querySelector("#album-cache-btn-text"),
+    addDriveBtn: root.querySelector("#btn-album-add-drive"),
     editAlbumBtn: root.querySelector("#btn-album-edit"),
     fetchArtBtn: root.querySelector("#btn-album-fetch-art"),
     selectModeBtn: root.querySelector("#btn-album-select-mode"),
