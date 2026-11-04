@@ -6,14 +6,35 @@
  */
 
 /**
- * アルバム識別比較用テキスト正規化
- * - 前後の空白を除去し、小文字化
+ * アルバム識別比較用テキスト正規化（安全な比較用正規化）
+ * - 表示用テキストは変更せず、グループキー比較時のみ適用
+ * - 安全な正規化のみ行い、波ダッシュ・ハイフン類・Edition等は意図的に統一しない
  * @param {unknown} value
  * @returns {string}
  */
 export function normalizeAlbumText(value) {
   if (value == null) return "";
-  return String(value).trim().toLowerCase();
+  let s = String(value);
+
+  // 1. Unicode NFC 正規化 (濁点・半濁点の結合文字 NFD などを統一)
+  try {
+    s = s.normalize("NFC");
+  } catch (_) {}
+
+  // 2. ゼロ幅文字・BOM・不可視制御文字を除去
+  s = s.replace(/[\u200B-\u200D\uFEFF\u0000-\u001F\u007F-\u009F]/g, "");
+
+  // 3. 全角スペースを半角スペースへ変換
+  s = s.replace(/\u3000/g, " ");
+
+  // 4. 連続空白を単一の半角スペースへ統一
+  s = s.replace(/\s+/g, " ");
+
+  // 5. スマートクォートを通常クォートへ統一
+  s = s.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
+
+  // 6. 前後の空白を除去し、英字の大文字小文字を統一
+  return s.trim().toLowerCase();
 }
 
 /**
