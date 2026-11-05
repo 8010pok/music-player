@@ -74,9 +74,10 @@ export const SWIPE_DISMISS_CONFIG = {
  * 下スワイプによるシート閉じるジェスチャーの初期化
  * @param {HTMLElement} playerView
  * @param {HTMLElement} dragHandleWrap
+ * @param {{ artWrap?: HTMLElement, artEl?: HTMLElement, lyricsOverlay?: HTMLElement, isLyricsVisible?: () => boolean }} [options]
  * @returns {() => void} cleanup
  */
-export function setupSwipeDismiss(playerView, dragHandleWrap) {
+export function setupSwipeDismiss(playerView, dragHandleWrap, options = {}) {
   if (!playerView || !dragHandleWrap) return () => {};
 
   let activePointerId = null;
@@ -89,6 +90,8 @@ export function setupSwipeDismiss(playerView, dragHandleWrap) {
   let isClosing = false;
   let isCleanedUp = false;
   let dismissed = false;
+  let suppressNextClick = false;
+  let suppressClickTimer = null;
   let rafId = 0;
   let dismissFallbackTimer = null;
   let cancelCleanupTimer = null;
@@ -125,6 +128,12 @@ export function setupSwipeDismiss(playerView, dragHandleWrap) {
     removeWindowListeners();
     if (pid !== null) {
       releaseCapture(pid);
+    }
+    // 明確なドラッグ操作確定後のキャンセルなら後続の誤click(歌詞表示)を1回抑制
+    if (isVerticalDrag) {
+      suppressNextClick = true;
+      if (suppressClickTimer) clearTimeout(suppressClickTimer);
+      suppressClickTimer = setTimeout(() => { suppressNextClick = false; }, 400);
     }
     isDragging = false;
     isVerticalDrag = false;
@@ -170,6 +179,10 @@ export function setupSwipeDismiss(playerView, dragHandleWrap) {
     isClosing = true;
     isDragging = false;
     isVerticalDrag = false;
+    suppressNextClick = true;
+    if (suppressClickTimer) clearTimeout(suppressClickTimer);
+    suppressClickTimer = setTimeout(() => { suppressNextClick = false; }, 400);
+
     if (rafId) {
       cancelAnimationFrame(rafId);
       rafId = 0;
@@ -216,9 +229,6 @@ export function setupSwipeDismiss(playerView, dragHandleWrap) {
     if (isClosing || isCleanedUp) return;
     if (activePointerId !== null) return;
 
-    // ドラッグハンドル周辺からの入力か確認
-    if (!dragHandleWrap.contains(e.target)) return;
-
     // ボタン・入力・インタラクティブ要素からの開始を絶対防止
     if (e.target && typeof e.target.closest === "function") {
       const interactive = e.target.closest("button, input, select, textarea, a, #seek-bar, .player-lyrics-overlay, .queue-list, [role='dialog']");
@@ -230,6 +240,30 @@ export function setupSwipeDismiss(playerView, dragHandleWrap) {
     const isPrimaryButton = e.button === 0;
     if (!isTouchOrPen && !isPrimaryButton) return;
 
+    // 1. ドラッグハンドルからの開始か判定
+    const isFromHandle = dragHandleWrap && dragHandleWrap.contains(e.target);
+
+    // 2. ジャケット画像上半分からの開始か判定
+    let isFromArtTopHalf = false;
+    const artTarget = options.artEl || (options.artWrap ? options.artWrap.querySelector(".player-art") : null);
+    const artWrapTarget = options.artWrap;
+    const isLyricsOpen = typeof options.isLyricsVisible === "function" ? options.isLyricsVisible() : false;
+    const isLyricsShowing = isLyricsOpen || (options.lyricsOverlay && !options.lyricsOverlay.hidden);
+    const isModalOpen = typeof document !== "undefined" && !!document.querySelector("#modal-root:not([hidden])");
+
+    if (!isFromHandle && artTarget && !isLyricsShowing && !isModalOpen && !isSeeking) {
+      const isInsideArt = (artWrapTarget && artWrapTarget.contains(e.target)) || (artTarget && artTarget.contains(e.target)) || (e.target === artTarget);
+      if (isInsideArt && typeof artTarget.getBoundingClientRect === "function") {
+        const rect = artTarget.getBoundingClientRect();
+        if (rect.height > 0 && e.clientY <= rect.top + rect.height * 0.5) {
+          isFromArtTopHalf = true;
+        }
+      }
+    }
+
+    // ハンドルでもジャケット上半分でもない場合は無視
+    if (!isFromHandle && !isFromArtTopHalf) return;
+
     activePointerId = e.pointerId;
     startX = e.clientX;
     startY = e.clientY;
@@ -238,7 +272,7 @@ export function setupSwipeDismiss(playerView, dragHandleWrap) {
     isVerticalDrag = false;
     isDragging = false;
 
-    if (typeof dragHandleWrap.setPointerCapture === "function") {
+    if (isFromHandle && typeof dragHandleWrap.setPointerCapture === "function") {
       try {
         dragHandleWrap.setPointerCapture(e.pointerId);
       } catch {}
@@ -264,7 +298,7 @@ export function setupSwipeDismiss(playerView, dragHandleWrap) {
         return; // 8px 未満は方向未確定
       }
 
-      // 上方向または横優先ならキャンセル
+      // 上方向 (dy <= 0) または横優先 (|dy| < |dx| * 1.5) ならキャンセル
       if (dy <= 0 || Math.abs(dy) < Math.abs(dx) * SWIPE_DISMISS_CONFIG.DIRECTION_RATIO) {
         cancelDrag(false);
         return;
@@ -273,6 +307,9 @@ export function setupSwipeDismiss(playerView, dragHandleWrap) {
       // 縦方向かつ下方向へロック
       isVerticalDrag = true;
       isDragging = true;
+      suppressNextClick = true;
+      if (suppressClickTimer) clearTimeout(suppressClickTimer);
+      suppressClickTimer = setTimeout(() => { suppressNextClick = false; }, 400);
       playerView.classList.add("is-dragging");
     }
 
@@ -359,10 +396,28 @@ export function setupSwipeDismiss(playerView, dragHandleWrap) {
     }
   };
 
+  const onClickCapture = (e) => {
+    if (suppressNextClick) {
+      suppressNextClick = false;
+      if (suppressClickTimer) {
+        clearTimeout(suppressClickTimer);
+        suppressClickTimer = null;
+      }
+      if (typeof e.stopPropagation === "function") e.stopPropagation();
+      if (typeof e.preventDefault === "function") e.preventDefault();
+    }
+  };
+
   dragHandleWrap.addEventListener("pointerdown", onPointerDown);
   dragHandleWrap.addEventListener("pointercancel", onPointerCancel);
   dragHandleWrap.addEventListener("lostpointercapture", onLostPointerCapture);
   dragHandleWrap.addEventListener("keydown", onKeyDown);
+
+  const artWrapTarget = options.artWrap;
+  if (artWrapTarget) {
+    artWrapTarget.addEventListener("pointerdown", onPointerDown);
+    artWrapTarget.addEventListener("click", onClickCapture, true);
+  }
 
   if (typeof window !== "undefined") {
     window.addEventListener("resize", onWindowResizeOrOrientation, { passive: true });
@@ -383,6 +438,10 @@ export function setupSwipeDismiss(playerView, dragHandleWrap) {
       clearTimeout(cancelCleanupTimer);
       cancelCleanupTimer = null;
     }
+    if (suppressClickTimer) {
+      clearTimeout(suppressClickTimer);
+      suppressClickTimer = null;
+    }
     removeWindowListeners();
     if (activePointerId !== null) {
       releaseCapture(activePointerId);
@@ -392,6 +451,11 @@ export function setupSwipeDismiss(playerView, dragHandleWrap) {
     dragHandleWrap.removeEventListener("pointercancel", onPointerCancel);
     dragHandleWrap.removeEventListener("lostpointercapture", onLostPointerCapture);
     dragHandleWrap.removeEventListener("keydown", onKeyDown);
+
+    if (artWrapTarget) {
+      artWrapTarget.removeEventListener("pointerdown", onPointerDown);
+      artWrapTarget.removeEventListener("click", onClickCapture, true);
+    }
 
     if (typeof window !== "undefined") {
       window.removeEventListener("resize", onWindowResizeOrOrientation);
@@ -407,8 +471,13 @@ export async function mount(root) {
   root.innerHTML = render();
   const refs = collectRefs(root);
 
-  // 下スワイプによるシート閉じる操作 (Apple Music風)
-  const cleanupSwipeDismiss = setupSwipeDismiss(refs.playerView, refs.dragHandleWrap);
+  // 下スワイプによるシート閉じる操作 (Apple Music風: ドラッグハンドル + ジャケット上半分)
+  const cleanupSwipeDismiss = setupSwipeDismiss(refs.playerView, refs.dragHandleWrap, {
+    artWrap: refs.artWrap,
+    artEl: refs.art,
+    lyricsOverlay: refs.lyricsOverlay,
+    isLyricsVisible: () => lyricsVisible,
+  });
 
   // 上部閉じるボタン (下スワイプ / 戻る 相当で前画面へ)
   if (refs.dismissBtn) {
