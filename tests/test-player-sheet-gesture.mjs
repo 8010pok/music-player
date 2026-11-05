@@ -43,6 +43,15 @@ class MockElement {
     this.capturedPointerId = null;
     this.children = [];
     this.parentElement = null;
+    this._rect = { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
+  }
+
+  setBoundingClientRect(rect) {
+    this._rect = { ...this._rect, ...rect };
+  }
+
+  getBoundingClientRect() {
+    return { ...this._rect };
   }
 
   appendChild(child) {
@@ -85,27 +94,73 @@ class MockElement {
   }
 
   addEventListener(type, fn, opts) {
-    if (!this.listeners.has(type)) {
-      this.listeners.set(type, new Set());
+    const isCapture = typeof opts === "boolean" ? opts : !!(opts && opts.capture);
+    const key = `${type}:${isCapture ? "capture" : "bubble"}`;
+    if (!this.listeners.has(key)) {
+      this.listeners.set(key, new Set());
     }
-    this.listeners.get(type).add(fn);
+    this.listeners.get(key).add(fn);
   }
 
-  removeEventListener(type, fn) {
-    if (this.listeners.has(type)) {
-      this.listeners.get(type).delete(fn);
+  removeEventListener(type, fn, opts) {
+    const isCapture = typeof opts === "boolean" ? opts : !!(opts && opts.capture);
+    const key = `${type}:${isCapture ? "capture" : "bubble"}`;
+    if (this.listeners.has(key)) {
+      this.listeners.get(key).delete(fn);
     }
   }
 
   dispatchEvent(event) {
     event.target = event.target || this;
-    event.currentTarget = this;
-    const fns = this.listeners.get(event.type);
-    if (fns) {
-      for (const fn of Array.from(fns)) {
-        fn(event);
+    let stopped = false;
+    const origStop = event.stopPropagation;
+    event.stopPropagation = () => {
+      stopped = true;
+      if (typeof origStop === "function") origStop.call(event);
+    };
+    const origPrevent = event.preventDefault;
+    event.preventDefault = () => {
+      event.defaultPrevented = true;
+      if (typeof origPrevent === "function") origPrevent.call(event);
+    };
+
+    // 祖先パスを取得 (root -> this)
+    const path = [];
+    let cur = this;
+    while (cur) {
+      path.unshift(cur);
+      cur = cur.parentElement;
+    }
+
+    // 1. キャプチャフェーズ (root -> this)
+    for (const elem of path) {
+      if (stopped) break;
+      event.currentTarget = elem;
+      const fns = elem.listeners.get(`${event.type}:capture`);
+      if (fns) {
+        for (const fn of Array.from(fns)) {
+          fn(event);
+          if (stopped) break;
+        }
       }
     }
+
+    // 2. バブルフェーズ (this -> root)
+    if (!stopped) {
+      const bubblePath = [...path].reverse();
+      for (const elem of bubblePath) {
+        if (stopped) break;
+        event.currentTarget = elem;
+        const fns = elem.listeners.get(`${event.type}:bubble`);
+        if (fns) {
+          for (const fn of Array.from(fns)) {
+            fn(event);
+            if (stopped) break;
+          }
+        }
+      }
+    }
+
     return !event.defaultPrevented;
   }
 
@@ -948,6 +1003,293 @@ test("cleanup 実行後に transform とクラスが完全にクリアされ、�
   strictEqual(playerView.classList.contains("is-dismissing"), false, "is-dismissing が除去される");
   strictEqual(playerView.classList.contains("is-cancelling"), false, "is-cancelling が除去される");
   strictEqual(playerView.style.transform, "", "inline transform が消去される");
+});
+
+console.log("=== 11. ジャケット画像上半分からのスワイプ & タップ分離 ===");
+
+test("ジャケット画像上半分 (clientY <= top + height*0.5) からスワイプが開始できる", () => {
+  const playerView = new MockElement("section", "", "player-view");
+  const handleWrap = new MockElement("div", "player-drag-handle-wrap");
+  const artWrap = new MockElement("div", "player-art-wrap");
+  const artEl = new MockElement("img", "player-art");
+  artEl.setBoundingClientRect({ top: 100, height: 300, width: 300, bottom: 400 });
+  artWrap.appendChild(artEl);
+  playerView.appendChild(handleWrap);
+  playerView.appendChild(artWrap);
+
+  const cleanup = setupSwipeDismiss(playerView, handleWrap, { artWrap, artEl, isLyricsVisible: () => false });
+
+  // 上半分: top(100) + height*0.5(150) = 250 -> clientY = 180 (上半分)
+  artWrap.dispatchEvent({
+    type: "pointerdown",
+    pointerId: 60,
+    button: 0,
+    pointerType: "touch",
+    clientX: 150,
+    clientY: 180,
+    target: artEl,
+  });
+
+  window.dispatchEvent({
+    type: "pointermove",
+    pointerId: 60,
+    clientX: 150,
+    clientY: 220, // dy = 40px (> 8px)
+    cancelable: true,
+  });
+  flushRaf();
+
+  strictEqual(playerView.classList.contains("is-dragging"), true, "ジャケット上半分からドラッグ確定");
+  strictEqual(playerView.style.transform, "translate3d(0, 40px, 0)");
+
+  cleanup();
+});
+
+test("ジャケット画像下半分 (clientY > top + height*0.5) からはスワイプが開始しない", () => {
+  const playerView = new MockElement("section", "", "player-view");
+  const handleWrap = new MockElement("div", "player-drag-handle-wrap");
+  const artWrap = new MockElement("div", "player-art-wrap");
+  const artEl = new MockElement("img", "player-art");
+  artEl.setBoundingClientRect({ top: 100, height: 300, width: 300, bottom: 400 });
+  artWrap.appendChild(artEl);
+  playerView.appendChild(handleWrap);
+  playerView.appendChild(artWrap);
+
+  const cleanup = setupSwipeDismiss(playerView, handleWrap, { artWrap, artEl, isLyricsVisible: () => false });
+
+  // 下半分: clientY = 280 (> 250)
+  artWrap.dispatchEvent({
+    type: "pointerdown",
+    pointerId: 61,
+    button: 0,
+    pointerType: "touch",
+    clientX: 150,
+    clientY: 280,
+    target: artEl,
+  });
+
+  window.dispatchEvent({
+    type: "pointermove",
+    pointerId: 61,
+    clientX: 150,
+    clientY: 320,
+    cancelable: true,
+  });
+  flushRaf();
+
+  strictEqual(playerView.classList.contains("is-dragging"), false, "ジャケット下半分からはドラッグ開始しない");
+
+  cleanup();
+});
+
+test("歌詞表示中はジャケット画像からのスワイプ開始が無効化されるが、ハンドルからは開始できる", () => {
+  const playerView = new MockElement("section", "", "player-view");
+  const handleWrap = new MockElement("div", "player-drag-handle-wrap");
+  const artWrap = new MockElement("div", "player-art-wrap");
+  const artEl = new MockElement("img", "player-art");
+  artEl.setBoundingClientRect({ top: 100, height: 300, width: 300, bottom: 400 });
+  artWrap.appendChild(artEl);
+  playerView.appendChild(handleWrap);
+  playerView.appendChild(artWrap);
+
+  let lyricsShowing = true;
+  const cleanup = setupSwipeDismiss(playerView, handleWrap, {
+    artWrap,
+    artEl,
+    isLyricsVisible: () => lyricsShowing,
+  });
+
+  // 1. 歌詞表示中にジャケット上半分をスワイプ -> 無効
+  artWrap.dispatchEvent({
+    type: "pointerdown",
+    pointerId: 62,
+    button: 0,
+    pointerType: "touch",
+    clientX: 150,
+    clientY: 180,
+    target: artEl,
+  });
+  window.dispatchEvent({
+    type: "pointermove",
+    pointerId: 62,
+    clientX: 150,
+    clientY: 220,
+    cancelable: true,
+  });
+  flushRaf();
+  strictEqual(playerView.classList.contains("is-dragging"), false, "歌詞表示中はジャケットスワイプ無効");
+
+  // 2. 歌詞表示中でもハンドルからのスワイプ -> 有効
+  handleWrap.dispatchEvent({
+    type: "pointerdown",
+    pointerId: 63,
+    button: 0,
+    pointerType: "touch",
+    clientX: 150,
+    clientY: 10,
+    target: handleWrap,
+  });
+  window.dispatchEvent({
+    type: "pointermove",
+    pointerId: 63,
+    clientX: 150,
+    clientY: 40,
+    cancelable: true,
+  });
+  flushRaf();
+  strictEqual(playerView.classList.contains("is-dragging"), true, "歌詞表示中でもハンドルスワイプは有効");
+
+  cleanup();
+});
+
+test("ジャケット通常タップ (移動量 < 8px) で click イベントが維持され、歌詞表示トグルが発火すること", () => {
+  const playerView = new MockElement("section", "", "player-view");
+  const handleWrap = new MockElement("div", "player-drag-handle-wrap");
+  const artWrap = new MockElement("div", "player-art-wrap");
+  const artEl = new MockElement("img", "player-art");
+  artEl.setBoundingClientRect({ top: 100, height: 300, width: 300, bottom: 400 });
+  artWrap.appendChild(artEl);
+  playerView.appendChild(handleWrap);
+  playerView.appendChild(artWrap);
+
+  let lyricsToggled = false;
+  artEl.addEventListener("click", () => { lyricsToggled = true; });
+
+  const cleanup = setupSwipeDismiss(playerView, handleWrap, { artWrap, artEl, isLyricsVisible: () => false });
+
+  // 通常タップ: pointerdown -> 微小移動 (2px) -> pointerup -> click
+  artWrap.dispatchEvent({
+    type: "pointerdown",
+    pointerId: 64,
+    button: 0,
+    pointerType: "touch",
+    clientX: 150,
+    clientY: 150,
+    target: artEl,
+  });
+  window.dispatchEvent({
+    type: "pointermove",
+    pointerId: 64,
+    clientX: 151,
+    clientY: 152, // 2px
+    cancelable: true,
+  });
+  window.dispatchEvent({
+    type: "pointerup",
+    pointerId: 64,
+    clientX: 151,
+    clientY: 152,
+  });
+
+  // ブラウザによる click イベント発火 (ターゲットは artEl)
+  artEl.dispatchEvent({ type: "click" });
+
+  strictEqual(lyricsToggled, true, "通常タップで歌詞トグルが正常発火する");
+
+  cleanup();
+});
+
+test("ジャケット下スワイプ確定後およびキャンセル後は、直後の誤 click が 1回だけ抑制されること", () => {
+  const playerView = new MockElement("section", "", "player-view");
+  const handleWrap = new MockElement("div", "player-drag-handle-wrap");
+  const artWrap = new MockElement("div", "player-art-wrap");
+  const artEl = new MockElement("img", "player-art");
+  artEl.setBoundingClientRect({ top: 100, height: 300, width: 300, bottom: 400 });
+  artWrap.appendChild(artEl);
+  playerView.appendChild(handleWrap);
+  playerView.appendChild(artWrap);
+
+  let lyricsToggledCount = 0;
+  artEl.addEventListener("click", () => { lyricsToggledCount++; });
+
+  const cleanup = setupSwipeDismiss(playerView, handleWrap, { artWrap, artEl, isLyricsVisible: () => false });
+
+  // 1. スワイプ確定して閾値未満でキャンセルした場合
+  artWrap.dispatchEvent({
+    type: "pointerdown",
+    pointerId: 65,
+    button: 0,
+    pointerType: "touch",
+    clientX: 150,
+    clientY: 150,
+    target: artEl,
+  });
+  window.dispatchEvent({
+    type: "pointermove",
+    pointerId: 65,
+    clientX: 150,
+    clientY: 180, // dy = 30px (確定)
+    cancelable: true,
+  });
+  flushRaf();
+  window.dispatchEvent({
+    type: "pointerup",
+    pointerId: 65,
+    clientX: 150,
+    clientY: 180,
+  });
+
+  // 直後の誤 click 発火試行 -> artWrap の capture リスナーにより抑制される
+  artEl.dispatchEvent({ type: "click" });
+  strictEqual(lyricsToggledCount, 0, "スワイプキャンセル直後の誤 click は抑制される");
+
+  // 2. その次の通常タップ -> 抑制が解除され正常発火する
+  artWrap.dispatchEvent({
+    type: "pointerdown",
+    pointerId: 66,
+    button: 0,
+    pointerType: "touch",
+    clientX: 150,
+    clientY: 150,
+    target: artEl,
+  });
+  window.dispatchEvent({
+    type: "pointerup",
+    pointerId: 66,
+    clientX: 150,
+    clientY: 150,
+  });
+  artEl.dispatchEvent({ type: "click" });
+  strictEqual(lyricsToggledCount, 1, "次の通常タップは正常に click が通る");
+
+  cleanup();
+});
+
+test("ジャケット上半分からの横スワイプ優勢時はシート操作がキャンセルされ、曲送り処理は呼ばれないこと", () => {
+  const playerView = new MockElement("section", "", "player-view");
+  const handleWrap = new MockElement("div", "player-drag-handle-wrap");
+  const artWrap = new MockElement("div", "player-art-wrap");
+  const artEl = new MockElement("img", "player-art");
+  artEl.setBoundingClientRect({ top: 100, height: 300, width: 300, bottom: 400 });
+  artWrap.appendChild(artEl);
+  playerView.appendChild(handleWrap);
+  playerView.appendChild(artWrap);
+
+  const cleanup = setupSwipeDismiss(playerView, handleWrap, { artWrap, artEl, isLyricsVisible: () => false });
+
+  artWrap.dispatchEvent({
+    type: "pointerdown",
+    pointerId: 67,
+    button: 0,
+    pointerType: "touch",
+    clientX: 150,
+    clientY: 150,
+    target: artEl,
+  });
+  // 横方向優勢: dx = 35px, dy = 10px
+  window.dispatchEvent({
+    type: "pointermove",
+    pointerId: 67,
+    clientX: 185,
+    clientY: 160,
+    cancelable: true,
+  });
+  flushRaf();
+
+  strictEqual(playerView.classList.contains("is-dragging"), false, "横スワイプではシート操作がキャンセルされる");
+  strictEqual(playerView.style.transform, "", "transform は適用されない");
+
+  cleanup();
 });
 
 console.log(`\n✓ All ${passed} tests in test-player-sheet-gesture.mjs passed!`);
