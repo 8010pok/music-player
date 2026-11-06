@@ -558,6 +558,9 @@ export function editAlbumMetadata(album, onUpdated) {
     const body = document.createElement("div");
     body.className = "metadata-form";
 
+    const validArtists = [...new Set(album.tracks.map((t) => String(t?.artist || "").trim()).filter((a) => a && a !== "(不明アーティスト)" && a !== "true"))];
+    const commonArtist = validArtists.length === 1 ? validArtists[0] : (validArtists.length === 0 && album.albumArtist ? album.albumArtist : "");
+
     const cleanArtist = cleanQuery(album.albumArtist || "");
     const cleanAlb = cleanQuery(album.title || "");
     const initialQuery = `${cleanArtist ? cleanArtist + " " : ""}${cleanAlb !== "Google Drive" ? cleanAlb : ""}`.trim();
@@ -613,7 +616,7 @@ export function editAlbumMetadata(album, onUpdated) {
       </div>
       <div class="modal-row">
         <label for="meta-alb-track-artist">全曲のアーティスト名を統一する (任意)</label>
-        <input type="text" id="meta-alb-track-artist" value="${escapeAttr(album.albumArtist || "")}" placeholder="全曲に適用するアーティスト名" />
+        <input type="text" id="meta-alb-track-artist" value="${escapeAttr(commonArtist)}" placeholder="${validArtists.length > 1 ? "複数のアーティスト（空欄なら各曲の元のアーティストを維持）" : "全曲に適用するアーティスト名"}" />
       </div>
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
         <div class="modal-row">
@@ -991,8 +994,8 @@ export function editAlbumMetadata(album, onUpdated) {
                 const individualPatch = { ...basePatch };
                 if (perTrack.title) individualPatch.title = perTrack.title;
                 if (perTrack.trackNo !== undefined) individualPatch.trackNo = perTrack.trackNo;
-                if (perTrack.artist) individualPatch.artist = perTrack.artist;
-                else if (trackArtist) individualPatch.artist = trackArtist;
+                if (trackArtist) individualPatch.artist = trackArtist;
+                else if (perTrack.artist) individualPatch.artist = perTrack.artist;
                 if (perTrack.memo !== undefined) individualPatch.memo = perTrack.memo;
 
                 releaseArtwork(t.id);
