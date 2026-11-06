@@ -5,25 +5,48 @@
  * - 副作用のない純粋関数として実装（単体テスト容易性を確保）
  */
 
-import { getAlbumArtist, groupTracksIntoAlbums, normalizeAlbumText, sortAlbums } from "./album-util.js";
+import { getAlbumArtist, groupTracksIntoAlbums, sortAlbums } from "./album-util.js";
 
 /**
  * アーティスト識別比較用テキスト正規化
+ * - アルバム正規化とは独立したアーティスト専用の安全な正規化
+ * - アポストロフィ系表記揺れ（B'z / B’z / Bʼz 等）や全角空白・不可視文字を統一
  * @param {unknown} value
  * @returns {string}
  */
 export function normalizeArtistText(value) {
-  return normalizeAlbumText(value);
+  if (value == null) return "";
+  let s = String(value);
+
+  // 1. Unicode NFC 正規化 (結合文字を統一)
+  try {
+    s = s.normalize("NFC");
+  } catch (_) {}
+
+  // 2. ゼロ幅文字・BOM・不可視制御文字を除去
+  s = s.replace(/[\u200B-\u200D\uFEFF\u0000-\u001F\u007F-\u009F]/g, "");
+
+  // 3. 全角スペースを半角スペースへ変換
+  s = s.replace(/\u3000/g, " ");
+
+  // 4. 連続空白を単一の半角スペースへ統一
+  s = s.replace(/\s+/g, " ");
+
+  // 5. アポストロフィ系・スマートクォートを通常クォートへ統一
+  s = s.replace(/[\u2018\u2019\u02BC\uFF07\u2032]/g, "'").replace(/[\u201C\u201D\uFF02]/g, '"');
+
+  // 6. 前後の空白を除去し、英字の大文字小文字を統一
+  return s.trim().toLowerCase();
 }
 
 /**
- * アーティスト識別用の一意キーを生成
+ * アーティスト識別用の一意キーを生成（URLエンコードから独立した raw キー）
  * @param {string} artistName
  * @returns {string}
  */
 export function getArtistKey(artistName) {
   const norm = normalizeArtistText(artistName || "不明なアーティスト");
-  return `art:${encodeURIComponent(norm)}`;
+  return `art:${norm}`;
 }
 
 /**

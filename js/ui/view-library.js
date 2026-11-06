@@ -248,11 +248,10 @@ export async function mount(root) {
       const row = e.target.closest(".artist-row");
       if (row && (row.dataset.key || row.dataset.name)) {
         persistLibraryState();
-        if (row.dataset.key) {
-          go("artist", { key: row.dataset.key });
-        } else {
-          go("artist", { name: row.dataset.name });
-        }
+        go("artist", {
+          key: row.dataset.key || "",
+          name: row.dataset.name || "",
+        });
       }
     });
   }
