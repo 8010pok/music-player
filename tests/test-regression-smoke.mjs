@@ -554,15 +554,15 @@ await asyncTest("画像同期の競合規則監査: 古い画像による上書�
   ok(h1 !== h3, "Different artwork DataURL must produce different hash");
 });
 
-await asyncTest("バージョン 1.11.18 / v1.11.18 が全ファイルで完全一致していること", async () => {
-  strictEqual(versionMod.APP_VERSION, "1.11.18");
-  strictEqual(versionMod.CACHE_VERSION, "v1.11.18");
+await asyncTest("バージョン 1.11.19 / v1.11.19 が全ファイルで完全一致していること", async () => {
+  strictEqual(versionMod.APP_VERSION, "1.11.19");
+  strictEqual(versionMod.CACHE_VERSION, "v1.11.19");
 
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "../package.json"), "utf-8"));
-  strictEqual(pkg.version, "1.11.18");
+  strictEqual(pkg.version, "1.11.19");
 
   const sw = fs.readFileSync(path.join(__dirname, "../sw.js"), "utf-8");
-  ok(sw.includes('const CACHE_VERSION = "v1.11.18";'));
+  ok(sw.includes('const CACHE_VERSION = "v1.11.19";'));
 });
 
 await asyncTest("共通 openModal / confirm / promptForm 回帰監査: actions/buttons形式、キャンセル、背景タップ、Esc、resolve1回・close1回、非同期action・例外保護、多重モーダル遷移が正常に動作すること", async () => {
