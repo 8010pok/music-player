@@ -1388,8 +1388,16 @@ let _activeReconnectModalPromise = null;
  * @param {{ track?: object, reason?: string }} [opts]
  * @returns {Promise<string|null>} 再連携成功時は新しいアクセストークン、キャンセル時は null
  */
-export async function promptDriveReconnectModal({ track = null, reason = "", forceModal = false } = {}) {
-  clearDriveStreamSession().catch(() => {});
+export async function promptDriveReconnectModal({
+  track = null,
+  reason = "",
+  forceModal = false,
+  title = null,
+  bodyText = null,
+} = {}) {
+  if (!title && !bodyText && !forceModal) {
+    clearDriveStreamSession().catch(() => {});
+  }
   if (typeof document === "undefined") return Promise.resolve(null);
   if (_activeReconnectModalPromise) return _activeReconnectModalPromise;
 
@@ -1413,6 +1421,8 @@ export async function promptDriveReconnectModal({ track = null, reason = "", for
 
     const savedEmail = pub.gdriveUserEmail || pub.gdriveUserDisplayName || "";
     const trackTitle = (track && track.title) ? track.title : "Google Drive の曲";
+    const modalTitle = title || "☁ Google Drive の再連携";
+    const modalBodyIntro = bodyText || "Google Drive の認証有効期限が切れているか未連携のため、Google アカウントを選択してログインするとそのまま再生を開始します。";
     const redirectUri = (typeof window !== "undefined" && window.location) ? (window.location.origin + window.location.pathname) : "";
     const oauthDirectUrl = savedClientId ? `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(savedClientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent("https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file")}&prompt=select_account` : "";
 
@@ -1421,15 +1431,15 @@ export async function promptDriveReconnectModal({ track = null, reason = "", for
     container.style.cssText = "display:flex; flex-direction:column; gap:14px;";
     container.innerHTML = `
       <div style="padding:12px 14px; border-radius:10px; background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.3); font-size:0.92rem; line-height:1.5;">
-        <div style="font-weight:700; margin-bottom:4px;">🎵 「${escapeHtml(trackTitle)}」を再生します</div>
+        <div style="font-weight:700; margin-bottom:4px;">🎵 「${escapeHtml(trackTitle)}」</div>
         <div class="muted" style="font-size:0.84rem;">
-          Google Drive の認証有効期限が切れているか未連携のため、Google アカウントを選択してログインするとそのまま再生を開始します。
+          ${escapeHtml(modalBodyIntro)}
           ${savedEmail ? `<br><span style="color:var(--accent, #60a5fa);">前回の連携アカウント: ${escapeHtml(savedEmail)}</span>` : ""}
         </div>
       </div>
 
       <button type="button" class="btn primary" id="gd-reconnect-now-btn" style="padding:14px 18px; font-size:1.05rem; font-weight:700; display:flex; align-items:center; justify-content:center; gap:8px; width:100%;">
-        🔑 Google アカウントでログイン（アカウントを選択）
+        🔑 Driveへ再接続
       </button>
 
       ${oauthDirectUrl ? `
@@ -1461,9 +1471,22 @@ export async function promptDriveReconnectModal({ track = null, reason = "", for
     `;
 
     openModal({
-      title: "☁ Google Drive の再連携",
+      title: modalTitle,
       body: container,
       actions: [
+        {
+          label: "診断情報をコピー",
+          onClick: () => {
+            if (typeof window !== "undefined" && typeof window.__getLastPlaybackDiagnostics === "function") {
+              const diag = window.__getLastPlaybackDiagnostics();
+              import("../player/audio-engine.js").then((mod) => {
+                if (typeof mod.showDiagnosticsModal === "function") {
+                  mod.showDiagnosticsModal(diag);
+                }
+              }).catch(() => {});
+            }
+          },
+        },
         {
           label: "キャンセル",
           onClick: () => {

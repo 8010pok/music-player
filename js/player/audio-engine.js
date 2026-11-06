@@ -62,6 +62,9 @@ import {
   checkBlobFlac,
   getDriveStreamSessionStatus,
   isDriveStreamSessionReady,
+  getLastSilentRefreshFailure,
+  getDriveSessionDiagnostics,
+  getDriveTokenDiagnostics,
 } from "../gdrive/drive-service.js";
 
 /**
@@ -197,9 +200,10 @@ export function buildSafePlayRejectDiagnostics(err, curEl, session = activePlayb
  * @param {object} session
  * @param {object} track
  * @param {Error|object} error
+ * @param {object} [extra]
  * @returns {object}
  */
-export function generatePlaybackDiagnostics(session, track, error) {
+export function generatePlaybackDiagnostics(session, track, error, extra = {}) {
   const resolvedEl = (session && session.activeElement) ? session.activeElement : getAudioElement();
   const curEl = resolvedEl || getAudioElement();
   const rawId = resolveDriveFileId(track);
@@ -208,9 +212,40 @@ export function generatePlaybackDiagnostics(session, track, error) {
     : 0;
   const rawSid = session?.sessionId || session?.id || "";
 
+  const tokenDiag = typeof getDriveTokenDiagnostics === "function" ? getDriveTokenDiagnostics() : {};
+  const proxyDiag = typeof getDriveSessionDiagnostics === "function" ? getDriveSessionDiagnostics() : {};
+  const isOnline = typeof navigator !== "undefined" ? navigator.onLine : true;
+
+  const currentSrcPath = curEl?.currentSrc
+    ? (() => { try { return new URL(curEl.currentSrc).pathname; } catch { return "[redacted]"; } })()
+    : null;
+
+  const rawErrMsg = error ? (error.message || String(error)) : "";
+  const sanitizedErrorMsg = rawErrMsg
+    ? rawErrMsg
+        .replace(/ya29\.[a-zA-Z0-9_.-]+/g, "[redacted-token]")
+        .replace(/[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+/g, "[redacted-email]")
+        .replace(/(?:cookie:?\s*)?[a-zA-Z0-9_-]*session=[a-zA-Z0-9_.-]+/gi, "[redacted-cookie]")
+        .replace(/\?[^ \n\r"']+/g, "")
+    : null;
+
+  const sanitizedFileId = rawId
+    ? (rawId.length > 8 ? `${rawId.slice(0, 4)}...${rawId.slice(-4)}` : rawId)
+    : null;
+
+  const tokenAcquiredAt = tokenDiag.acquiredAt || null;
+  const tokenExpiresAt = tokenDiag.expiresAt || null;
+  const tokenRemainingMs = typeof tokenDiag.remainingMs === "number" ? tokenDiag.remainingMs : null;
+
+  const proxySessionCreatedAt = proxyDiag.createdAt || null;
+  const proxySessionExpiresAt = proxyDiag.expiresAt || null;
+  const proxySessionRemainingMs = typeof proxyDiag.remainingMs === "number" ? proxyDiag.remainingMs : null;
+
   const diag = {
     appVersion: APP_VERSION,
     displayMode: isPwaStandalone() ? "standalone" : "browser",
+    online: isOnline,
+    visibilityState: typeof document !== "undefined" ? document.visibilityState : "unknown",
     proxyEnabled: Boolean(getPublic()?.driveProxyStreamEnabled),
     sessionStatus: getDriveStreamSessionStatus ? getDriveStreamSessionStatus() : "unknown",
     sourceType: session?.sourceType || (state.isDirectStream ? "direct_stream" : (state.currentObjectUrl ? "blob" : "none")),
@@ -232,17 +267,22 @@ export function generatePlaybackDiagnostics(session, track, error) {
     lastPlayReject: session?.lastPlayRejectInfo || null,
     readyState: curEl?.readyState ?? null,
     networkState: curEl?.networkState ?? null,
+    currentSrcPath,
     bufferedEnd,
     trackExtension: getTrackExtension(track),
     trackMimeType: track?.mimeType || "",
     isDriveTrack: isDriveTrack(track),
     hasDriveFileId: Boolean(rawId),
+    sanitizedFileId,
     cached: session?.isCached ?? false,
     tokenState: session?.hasToken ? "present" : (session?.tokenError ? "expired" : "unknown"),
     errorName: error?.name || (error instanceof Error ? error.constructor.name : ""),
+    errorMessage: sanitizedErrorMsg,
     mediaErrorCode: curEl?.error?.code || (typeof error?.code === "number" ? error.code : null),
     canPlayType: curEl && typeof curEl.canPlayType === "function" ? curEl.canPlayType("audio/flac") : null,
     sessionId: rawSid ? rawSid.slice(-4) : "",
+    currentPlayAttemptIdSuffix: (state.currentPlayAttemptId || "").slice(-6),
+    playRejectName: session?.lastPlayRejectInfo?.name || error?.name || null,
     timeline: (session?.timeline && session.timeline.length > 0)
       ? session.timeline.map((item) => {
           const detailStr = item.detail
@@ -257,6 +297,7 @@ export function generatePlaybackDiagnostics(session, track, error) {
     timelineRaw: session?.timeline || [],
     artworkDiagnostics: getLastArtworkDiagnostics(),
   };
+
   lastPlaybackDiagnostics = diag;
   if (typeof window !== "undefined") {
     window.__getLastPlaybackDiagnostics = () => lastPlaybackDiagnostics;
@@ -386,6 +427,232 @@ export function categorizePlaybackError(error, context = {}) {
     category: "general",
     message: "再生を開始できませんでした。もう一度お試しください",
   };
+}
+
+/**
+ * Google Drive 再接続・復帰用の保留中状態
+ * @type {{
+ *   trackId: string,
+ *   time: number,
+ *   queueIndex: number,
+ *   reason: string,
+ *   sourcePlayAttemptId: string | null,
+ *   createdAt: number,
+ *   reconnectInProgress: boolean,
+ *   promptShown: boolean
+ * } | null}
+ */
+let pendingDriveResume = null;
+
+export function getPendingDriveResume() {
+  return pendingDriveResume ? { ...pendingDriveResume } : null;
+}
+
+export function clearPendingDriveResume() {
+  pendingDriveResume = null;
+}
+
+export function _setPendingDriveResumeForTest(pending) {
+  pendingDriveResume = pending;
+}
+
+/**
+ * 切断時・エラー時の安全な復帰位置を決定
+ * streamAudioEl.currentTime > 0 ならその値、なければ appState.currentTime > 0、無効なら 0
+ * 0 <= time < duration に安全に clamp
+ */
+export function resolveSafeResumePosition(targetEl, track) {
+  const elTime = targetEl?.currentTime;
+  const stateTime = appState.get().currentTime;
+  let pos = 0;
+  if (typeof elTime === "number" && isFinite(elTime) && elTime > 0) {
+    pos = elTime;
+  } else if (typeof stateTime === "number" && isFinite(stateTime) && stateTime > 0) {
+    pos = stateTime;
+  }
+  const dur = (track && typeof track.duration === "number" && isFinite(track.duration) && track.duration > 0)
+    ? track.duration
+    : (targetEl && isFinite(targetEl.duration) && targetEl.duration > 0 ? targetEl.duration : 0);
+  if (dur > 0) {
+    pos = Math.max(0, Math.min(pos, Math.max(0, dur - 0.1)));
+  } else {
+    pos = Math.max(0, pos);
+  }
+  return pos;
+}
+
+/**
+ * Drive ストリーミングのエラーを優先順位に従って分類
+ * @param {Error|object} error
+ * @param {{ mediaErrorCode?: number|null, isMidTrack?: boolean }} [context]
+ * @returns {{ type: string, needsReconnect: boolean, title: string, message: string }}
+ */
+export function classifyDriveStreamError(error, context = {}) {
+  const isOnline = typeof navigator !== "undefined" ? navigator.onLine : true;
+  if (!isOnline) {
+    return {
+      type: "offline",
+      needsReconnect: false,
+      title: "オフラインのため再生できません",
+      message: "インターネット接続を確認してください。",
+    };
+  }
+
+  const errStr = error ? (error.message || String(error)) : "";
+  const code = context.mediaErrorCode || (typeof error?.code === "number" ? error.code : 0);
+
+  // 1. 明示的なレート制限 (429)
+  if (/429|rate_limited|RATE_LIMIT/i.test(errStr)) {
+    return {
+      type: "rate_limited",
+      needsReconnect: false,
+      title: "アクセス制限が発生しました",
+      message: "Google Drive へのリクエストが集中しています。しばらく待ってから再開してください。",
+    };
+  }
+
+  // 2. 明示的な 5xx サーバーエラー
+  if (/5\d\d|STREAM_ERROR|Upstream|SERVER_ERROR/i.test(errStr)) {
+    return {
+      type: "drive_server_5xx",
+      needsReconnect: false,
+      title: "中継サーバーエラーが発生しました",
+      message: "サーバーとの通信に一時的な問題が発生しました。しばらく待ってから再開してください。",
+    };
+  }
+
+  // 3. トークン期限切れ (有効期限チェック または 明示的エラー)
+  const pub = getPublic() || {};
+  const now = Date.now();
+  const tokenExpiry = context.tokenExpiry || pub.gdriveTokenExpiry || 0;
+  if ((tokenExpiry > 0 && now >= tokenExpiry) || /token.*expired|トークン.*期限/i.test(errStr)) {
+    return {
+      type: "token_expired",
+      needsReconnect: true,
+      title: "Drive音源の再生を続けるには接続確認が必要です",
+      message: "再生位置とキューは保持されています。接続すると、この曲から再開します。",
+    };
+  }
+
+  // 4. サイレントリフレッシュ失敗
+  const lastSilentFailure = context.lastSilentFailure || (typeof getLastSilentRefreshFailure === "function" ? getLastSilentRefreshFailure() : null);
+  if ((lastSilentFailure && (now - lastSilentFailure.at < 60000)) || /silent.*refresh.*fail/i.test(errStr)) {
+    return {
+      type: "silent_refresh_failed",
+      needsReconnect: true,
+      title: "Drive音源の再生を続けるには接続確認が必要です",
+      message: "再生位置とキューは保持されています。接続すると、この曲から再開します。",
+    };
+  }
+
+  // 5. Google 401 認証エラー
+  if (/401|AUTH_REQUIRED|DRIVE_TOKEN_EXPIRED|認証/.test(errStr)) {
+    return {
+      type: "google_401",
+      needsReconnect: true,
+      title: "Drive音源の再生を続けるには接続確認が必要です",
+      message: "再生位置とキューは保持されています。接続すると、この曲から再開します。",
+    };
+  }
+
+  // 6. Cookie 欠落 / プロキシセッション失効
+  if (/cookie_missing|COOKIE_REQUIRED|proxy.*session/i.test(errStr)) {
+    return {
+      type: "proxy_session_expired",
+      needsReconnect: true,
+      title: "Drive音源の再生を続けるには接続確認が必要です",
+      message: "再生位置とキューは保持されています。接続すると、この曲から再開します。",
+    };
+  }
+
+  // 7. 曲頭（非途中）でのデコード / 非対応フォーマットエラー
+  if (!context.isMidTrack && (code === 3 || code === 4 || /decode|support/i.test(errStr))) {
+    return {
+      type: "decode_error",
+      needsReconnect: false,
+      title: "音源のデコードに失敗しました",
+      message: "この音源ファイル形式はブラウザで再生できない可能性があります。",
+    };
+  }
+
+  // 8. プロキシセッション準備状態チェック (途中切断時の状態確認)
+  const sessionReady = typeof context.isSessionReady === "boolean"
+    ? context.isSessionReady
+    : (typeof isDriveStreamSessionReady === "function" ? isDriveStreamSessionReady() : true);
+  if (context.isMidTrack && !sessionReady) {
+    return {
+      type: "proxy_session_expired",
+      needsReconnect: true,
+      title: "Drive音源の再生を続けるには接続確認が必要です",
+      message: "再生位置とキューは保持されています。接続すると、この曲から再開します。",
+    };
+  }
+
+  // 9. 不明な途中切断 (HTMLAudioElement error のみ)
+  return {
+    type: context.isMidTrack ? "unknown_stream_error" : "unknown_playback_error",
+    needsReconnect: true,
+    title: "Drive音源の再生を続けるには接続確認が必要です",
+    message: "再生位置とキューは保持されています。接続を確認すると、この曲から再開できます。",
+  };
+}
+
+/**
+ * ユーザーの明示的な再接続アクションを実行し、同じ曲・位置から復帰
+ * @returns {Promise<boolean>}
+ */
+export async function triggerDrivePlaybackReconnect() {
+  if (!pendingDriveResume) return false;
+  if (pendingDriveResume.reconnectInProgress) return false;
+  pendingDriveResume.reconnectInProgress = true;
+
+  try {
+    const curTrack = appState.get().currentTrack || state.queue[pendingDriveResume.queueIndex];
+    const { promptDriveReconnectModal, ensureDriveStreamSession } = await import("../gdrive/drive-service.js");
+
+    const token = await promptDriveReconnectModal({
+      track: curTrack,
+      reason: pendingDriveResume.reason,
+      title: "Drive音源の再生を続けるには接続確認が必要です",
+      bodyText: "再生位置とキューは保持されています。接続すると、この曲から再開します。",
+    });
+
+    if (!token) {
+      pendingDriveResume.reconnectInProgress = false;
+      return false;
+    }
+
+    const sessionOk = await ensureDriveStreamSession(token, { force: true });
+    if (!sessionOk) {
+      toast("Drive 中継セッションの確立に失敗しました", "err");
+      pendingDriveResume.reconnectInProgress = false;
+      return false;
+    }
+
+    const resumeTrackId = pendingDriveResume.trackId;
+    const resumeTime = pendingDriveResume.time;
+    const resumeQueueIndex = pendingDriveResume.queueIndex;
+
+    const track = state.queue.find((t) => t.id === resumeTrackId) || curTrack;
+    if (!track) {
+      pendingDriveResume.reconnectInProgress = false;
+      return false;
+    }
+
+    state.queueIndex = resumeQueueIndex;
+    appState.set({ queueIndex: resumeQueueIndex });
+
+    pendingDriveResume.reconnectInProgress = false;
+
+    // loadAndPlay は内部で beginPlaybackSession を呼び新 Session を生成
+    await loadAndPlay(track, { startTime: resumeTime });
+
+    return true;
+  } catch (err) {
+    console.warn("[audio-engine] Drive 復帰処理失敗:", err);
+    if (pendingDriveResume) pendingDriveResume.reconnectInProgress = false;
+    return false;
+  }
 }
 
 const UNCACHED_STREAM_TOAST_KEY = "music_player_uncached_fast_stream_notified";
@@ -1289,6 +1556,25 @@ export function shouldAttemptBlobFallback(session, track, error) {
     return false;
   }
 
+  // ★ 再生途中の drive_proxy_stream エラー、トークン/セッション期限切れ、オフライン、レート制限等は Blob フォールバック禁止
+  const curTime = curEl?.currentTime || appState.get().currentTime || 0;
+  if (session.sourceType === "drive_proxy_stream" && curTime > 0) {
+    return false;
+  }
+  if (typeof navigator !== "undefined" && !navigator.onLine) {
+    return false;
+  }
+  const pub = getPublic() || {};
+  if (pub.gdriveTokenExpiry && Date.now() >= pub.gdriveTokenExpiry) {
+    return false;
+  }
+  if (typeof isDriveStreamSessionReady === "function" && !isDriveStreamSessionReady()) {
+    return false;
+  }
+  if (/cookie_missing|COOKIE_REQUIRED|rate_limited|RATE_LIMIT|429/i.test(errStr)) {
+    return false;
+  }
+
   // ★ 要件 # 7: Range 中継 (drive_proxy_stream) 再生時のガード:
   //   単なるタイムアウトや loadstart 前の一過性エラーで即全量Blobへ切り替えない
   if (session.sourceType === "drive_proxy_stream") {
@@ -1475,7 +1761,7 @@ export async function attemptDriveFlacBlobFallback(session, track, myAttemptId, 
 /**
  * 再生失敗の最終処理（勝手に次曲へスキップせず、ユーザーへ分かりやすく通知して停止）
  */
-function handlePlaybackFinalFailure(attemptId, track, error) {
+function handlePlaybackFinalFailure(attemptId, track, error, extra = {}) {
   clearPlayingWatchdog();
   if (attemptId && attemptId !== state.currentPlayAttemptId) return;
   state.transitioning = false;
@@ -1487,7 +1773,7 @@ function handlePlaybackFinalFailure(attemptId, track, error) {
   try { curEl.pause(); } catch {}
 
   const session = activePlaybackSession;
-  const diag = generatePlaybackDiagnostics(session, track, error);
+  const diag = generatePlaybackDiagnostics(session, track, error, extra);
   const { message: userMsg } = categorizePlaybackError(error, {
     mediaErrorCode: curEl?.error?.code,
     authError: /401|403|トークン|期限|認証/.test(error?.message || ""),
@@ -1671,6 +1957,7 @@ export function attachElementListeners(el) {
 
   const syncRealAudioDuration = (e) => {
     if (!isFromActive(e)) return;
+    if (activePlaybackSession && activePlaybackSession.isStale) return;
     const curAudio = getAudioElement();
     if (state.transitioning || (curAudio?.src && curAudio.src.startsWith("data:audio/wav"))) return;
     const d = curAudio?.duration;
@@ -1783,7 +2070,51 @@ export function attachElementListeners(el) {
     console.warn("[audio-engine] audio error", e, curAudio?.error);
 
     const session = activePlaybackSession;
+    if (session && session.isStale) return;
     const err = curAudio?.error || new Error("HTMLAudioElement error event");
+
+    // ★ Drive Proxy 再生途中の切断判定
+    const isProxyStream = session?.sourceType === "drive_proxy_stream";
+    const resumeTime = resolveSafeResumePosition(curAudio, cur);
+    const isMidTrack = resumeTime > 0;
+
+    if (isProxyStream && isMidTrack && !pendingDriveResume) {
+      const classification = classifyDriveStreamError(err, {
+        mediaErrorCode: curAudio?.error?.code,
+        isMidTrack: true,
+      });
+
+      try { curAudio.pause(); } catch {}
+      if (session) session.isStale = true;
+
+      pendingDriveResume = {
+        trackId: cur?.id,
+        time: resumeTime,
+        queueIndex: state.queueIndex,
+        reason: classification.type,
+        sourcePlayAttemptId: state.currentPlayAttemptId,
+        createdAt: Date.now(),
+        reconnectInProgress: false,
+        promptShown: true,
+      };
+
+      appState.set({
+        isPlaying: false,
+        loadingTrackId: null,
+        playbackStatus: "drive_reconnect_required",
+        currentTime: resumeTime,
+      });
+      if (navigator.mediaSession) {
+        try { navigator.mediaSession.playbackState = "paused"; } catch {}
+      }
+      updateMediaPositionState({ position: resumeTime, duration: cur?.duration });
+
+      generatePlaybackDiagnostics(session, cur, err, { disconnectDecisionSource: classification.type });
+
+      // 再接続案内を 1 回だけ表示
+      triggerDrivePlaybackReconnect().catch(() => {});
+      return;
+    }
 
     // ★ 未キャッシュDrive FLACのBlobフォールバック判定
     if (shouldAttemptBlobFallback(session, cur, err)) {
@@ -2791,6 +3122,12 @@ export function executePause() {
  * 7. NotAllowedError / AbortError 時は pendingExternalResume = true を記録し visible 復帰時に 1回だけ再開を試行する
  */
 export async function executePlay(options = {}) {
+  // ★ Drive再接続待ち状態でユーザーが明示的に再生ボタンを押した場合は再接続フローを再表示
+  if (pendingDriveResume && appState.get().playbackStatus === "drive_reconnect_required") {
+    triggerDrivePlaybackReconnect().catch(() => {});
+    return false;
+  }
+
   const fromVisibilityResume = Boolean(options && options.fromVisibilityResume);
   if (state.externalPlayInFlight && !fromVisibilityResume) {
     return false;
@@ -3547,6 +3884,34 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
         console.warn("[audio-engine] Drive ストリーム準備失敗:", driveErr);
         if (myToken === state.transitionToken) {
           state.transitioning = false;
+          if (pub.driveProxyStreamEnabled) {
+            const classification = classifyDriveStreamError(driveErr, { isMidTrack: (startTime || 0) > 0 });
+            session.isStale = true;
+            pendingDriveResume = {
+              trackId: track.id,
+              time: startTime || 0,
+              queueIndex: state.queueIndex,
+              reason: classification.type,
+              sourcePlayAttemptId: myAttemptId,
+              createdAt: Date.now(),
+              reconnectInProgress: false,
+              promptShown: true,
+            };
+            session.playbackStatus = "drive_reconnect_required";
+            appState.set({
+              isPlaying: false,
+              loadingTrackId: null,
+              playbackStatus: "drive_reconnect_required",
+              currentTime: startTime || 0,
+            });
+            if (navigator.mediaSession) {
+              try { navigator.mediaSession.playbackState = "paused"; } catch {}
+            }
+            updateMediaPositionState({ position: startTime || 0, duration: track.duration });
+            generatePlaybackDiagnostics(session, track, driveErr, { disconnectDecisionSource: classification.type });
+            triggerDrivePlaybackReconnect().catch(() => {});
+            return;
+          }
           session.playbackStatus = "error";
           appState.set({ isPlaying: false, loadingTrackId: null, playbackStatus: "error" });
           toast(driveErr.message || "Google Drive の曲を読み込めませんでした", "err", 4000);
@@ -3782,6 +4147,22 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
           clearPlayingWatchdog();
           console.warn("[audio-engine] play 失敗", err);
 
+          if (err?.name === "NotAllowedError") {
+            if (session) session.playbackStatus = "paused";
+            appState.set({
+              isPlaying: false,
+              loadingTrackId: null,
+              playbackStatus: "paused",
+              currentTime: startTime || appState.get().currentTime || 0,
+            });
+            if (navigator.mediaSession) {
+              try { navigator.mediaSession.playbackState = "paused"; } catch {}
+            }
+            updateMediaPositionState({ position: startTime || 0, duration: track.duration });
+            toast("Driveへ接続しました。再生ボタンを押すと続きから再開します", "ok", 4000);
+            return;
+          }
+
           // ★ 未キャッシュDrive FLACのBlobフォールバック判定
           if (shouldAttemptBlobFallback(session, track, err)) {
             const recovered = await attemptDriveFlacBlobFallback(session, track, myAttemptId, err);
@@ -3797,6 +4178,21 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
               }
             } catch (retryErr) {
               if (myToken === state.transitionToken) {
+                if (retryErr?.name === "NotAllowedError") {
+                  if (session) session.playbackStatus = "paused";
+                  appState.set({
+                    isPlaying: false,
+                    loadingTrackId: null,
+                    playbackStatus: "paused",
+                    currentTime: startTime || appState.get().currentTime || 0,
+                  });
+                  if (navigator.mediaSession) {
+                    try { navigator.mediaSession.playbackState = "paused"; } catch {}
+                  }
+                  updateMediaPositionState({ position: startTime || 0, duration: track.duration });
+                  toast("Driveへ接続しました。再生ボタンを押すと続きから再開します", "ok", 4000);
+                  return;
+                }
                 if (shouldAttemptBlobFallback(session, track, retryErr)) {
                   const recovered = await attemptDriveFlacBlobFallback(session, track, myAttemptId, retryErr);
                   if (recovered) return;
@@ -3819,6 +4215,21 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
       clearTransitioning();
       clearPlayingWatchdog();
       console.warn("[audio-engine] play 例外", err);
+      if (err?.name === "NotAllowedError") {
+        if (session) session.playbackStatus = "paused";
+        appState.set({
+          isPlaying: false,
+          loadingTrackId: null,
+          playbackStatus: "paused",
+          currentTime: startTime || appState.get().currentTime || 0,
+        });
+        if (navigator.mediaSession) {
+          try { navigator.mediaSession.playbackState = "paused"; } catch {}
+        }
+        updateMediaPositionState({ position: startTime || 0, duration: track.duration });
+        toast("Driveへ接続しました。再生ボタンを押すと続きから再開します", "ok", 4000);
+        return;
+      }
       if (shouldAttemptBlobFallback(session, track, err)) {
         const recovered = await attemptDriveFlacBlobFallback(session, track, myAttemptId, err);
         if (recovered) return;
@@ -3953,6 +4364,12 @@ function onPlay() {
 }
 
 function onPlaying() {
+  if (activePlaybackSession && activePlaybackSession.isStale) return;
+
+  if (pendingDriveResume) {
+    pendingDriveResume = null;
+  }
+
   if (activePlaybackSession) {
     activePlaybackSession.playingEventReceived = true;
     activePlaybackSession.playbackStatus = "playing";
@@ -3980,6 +4397,8 @@ function onPlaying() {
 }
 
 function onPause() {
+  if (activePlaybackSession && activePlaybackSession.isStale) return;
+  if (pendingDriveResume && appState.get().playbackStatus === "drive_reconnect_required") return;
   flushSessionPlayed();
 
   // ★ 遷移中 (loadAndPlay 内の src 切替に伴う audioEl.pause() 呼出) は
@@ -4006,6 +4425,7 @@ function flushSessionPlayed() {
 let lastTimeUpdateUiAt = 0;
 
 function onTimeUpdate() {
+  if (activePlaybackSession && activePlaybackSession.isStale) return;
   if (audioEl.src && audioEl.src.startsWith("data:audio/wav")) return;
   flushSessionPlayed();
   const track = appState.get().currentTrack;
@@ -4128,6 +4548,7 @@ function onTimeUpdate() {
 }
 
 function onEnded() {
+  if (activePlaybackSession && activePlaybackSession.isStale) return;
   if (state.transitioning) return;
   if (audioEl.src && audioEl.src.startsWith("data:audio/wav")) return;
 
