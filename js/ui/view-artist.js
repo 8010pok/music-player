@@ -8,7 +8,7 @@
  */
 
 import { getAllTracks } from "../store/library-db.js";
-import { groupTracksIntoArtists } from "../metadata/artist-util.js";
+import { groupTracksIntoArtists, getArtistKey, normalizeArtistText } from "../metadata/artist-util.js";
 import { sortAlbums } from "../metadata/album-util.js";
 import { setQueueAndPlay, setShuffleMode, prewarmTrack, prewarmTracks, playNextTrack, addToQueueEnd } from "../player/audio-engine.js";
 import { appState } from "../state.js";
@@ -23,19 +23,39 @@ let unsubState = null;
 
 export async function mount(root) {
   const params = parseQuery();
+  const artistKey = params.key ? decodeURIComponent(params.key) : "";
   const artistName = params.name ? decodeURIComponent(params.name) : "";
 
-  if (!artistName) {
+  if (!artistKey && !artistName) {
     back("library", { tab: "artists" });
     return () => {};
   }
 
   const allTracks = await getAllTracks();
   const allArtists = groupTracksIntoArtists(allTracks);
-  const targetLower = artistName.trim().toLowerCase();
+
+  // 1. key による高精度検索（最優先）
+  // 2. name が渡された場合は getArtistKey(name) による正規化キー照合（旧URL / ブックマーク互換）
+  // 3. フォールバック: 生の表示名一致または各曲の artist 正規化一致
+  const targetKey = artistKey || (artistName ? getArtistKey(artistName) : "");
+  const targetLower = artistName ? artistName.trim().toLowerCase() : "";
+
   artist =
-    allArtists.find((a) => a.name.trim().toLowerCase() === targetLower) ||
-    allArtists.find((a) => a.tracks.some((t) => (t.artist || "").trim().toLowerCase() === targetLower));
+    (targetKey ? allArtists.find((a) => a.key === targetKey) : null) ||
+    (targetLower
+      ? allArtists.find(
+          (a) =>
+            a.name.trim().toLowerCase() === targetLower ||
+            normalizeArtistText(a.name) === normalizeArtistText(artistName)
+        ) ||
+        allArtists.find((a) =>
+          a.tracks.some(
+            (t) =>
+              (t.artist || "").trim().toLowerCase() === targetLower ||
+              normalizeArtistText(t.artist) === normalizeArtistText(artistName)
+          )
+        )
+      : null);
 
   if (!artist) {
     toast("アーティストが見つかりません", "err");
@@ -290,9 +310,9 @@ async function onTrackClick(e, root) {
         if (updatedTrack && updatedTrack.artist && updatedTrack.artist.trim().toLowerCase() !== (artist?.name || "").trim().toLowerCase()) {
           const allTracks = await getAllTracks();
           const allArtists = groupTracksIntoArtists(allTracks);
-          const oldStillExists = allArtists.some((a) => a.name.trim().toLowerCase() === (artist?.name || "").trim().toLowerCase());
+          const oldStillExists = allArtists.some((a) => a.key === (artist?.key || ""));
           if (!oldStillExists) {
-            history.replaceState(null, "", `#/artist?name=${encodeURIComponent(updatedTrack.artist.trim())}`);
+            history.replaceState(null, "", `#/artist?key=${encodeURIComponent(getArtistKey(updatedTrack.artist.trim()))}`);
           }
         }
         await mount(root);

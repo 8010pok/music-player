@@ -246,9 +246,13 @@ export async function mount(root) {
   if (refs.artistList) {
     refs.artistList.addEventListener("click", (e) => {
       const row = e.target.closest(".artist-row");
-      if (row && row.dataset.name) {
+      if (row && (row.dataset.key || row.dataset.name)) {
         persistLibraryState();
-        go("artist", { name: row.dataset.name });
+        if (row.dataset.key) {
+          go("artist", { key: row.dataset.key });
+        } else {
+          go("artist", { name: row.dataset.name });
+        }
       }
     });
   }
@@ -1041,7 +1045,7 @@ function renderArtists(refs) {
       : `<div class="artist-row-avatar artist-avatar-placeholder">👤</div>`;
 
     htmlParts.push(`
-      <li class="artist-row" data-name="${escapeAttr(a.name)}" data-index-char="${escapeAttr(idxChar)}" role="button" tabindex="0">
+      <li class="artist-row" data-key="${escapeAttr(a.key)}" data-name="${escapeAttr(a.name)}" data-index-char="${escapeAttr(idxChar)}" role="button" tabindex="0">
         <div class="artist-row-avatar-wrap">${avatar}</div>
         <div class="artist-row-info">
           <div class="artist-row-name">${escapeHtml(a.name)}</div>

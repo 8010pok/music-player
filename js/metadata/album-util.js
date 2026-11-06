@@ -30,8 +30,8 @@ export function normalizeAlbumText(value) {
   // 4. 連続空白を単一の半角スペースへ統一
   s = s.replace(/\s+/g, " ");
 
-  // 5. スマートクォートを通常クォートへ統一
-  s = s.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
+  // 5. アポストロフィ系・スマートクォートを通常クォートへ統一
+  s = s.replace(/[\u2018\u2019\u02BC\uFF07\u2032]/g, "'").replace(/[\u201C\u201D\uFF02]/g, '"');
 
   // 6. 前後の空白を除去し、英字の大文字小文字を統一
   return s.trim().toLowerCase();
