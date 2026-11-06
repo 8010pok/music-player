@@ -218,6 +218,7 @@ export async function getDriveToken({ forceRefresh = false, allowSilentRefresh =
         }
       } catch (e) {
         console.warn("[drive-service] サイレントリフレッシュ失敗:", e);
+        _lastSilentRefreshFailure = { at: Date.now(), error: e?.message || String(e) };
       } finally {
         _refreshingPromise = null;
       }
@@ -239,11 +240,15 @@ export async function setDriveToken(token, { expiresIn = 3600, email, displayNam
   const pub = getPublic() || {};
   const prevToken = _cachedToken;
   _cachedToken = token || null;
-  const expiry = token && expiresIn ? Date.now() + expiresIn * 1000 : 0;
+  const now = Date.now();
+  const expiry = token && expiresIn ? now + expiresIn * 1000 : 0;
+  const acquiredAt = token ? now : 0;
+  _tokenAcquiredAt = acquiredAt;
   setLocalStorageToken(token, expiry);
   await setSecret({ gdriveAccessToken: token || "" });
   const patch = {
     gdriveTokenExpiry: expiry,
+    gdriveTokenAcquiredAt: acquiredAt,
   };
   // ★ email / displayName が明示的に指定された場合のみ更新する（サイレントリフレッシュ時に既存の値を空文字で消さない）
   if (typeof email === "string" && email.trim().length > 0) {
@@ -1261,7 +1266,10 @@ export async function getDriveStreamUrl(fileId, tokenOverride = null) {
 
 let _driveSessionToken = null;
 let _driveSessionExpiry = 0;
+let _driveSessionCreatedAt = 0;
 let _driveSessionPromise = null;
+let _lastSilentRefreshFailure = null;
+let _tokenAcquiredAt = 0;
 
 /**
  * ストリーミングセッションの状態を取得
@@ -1273,6 +1281,45 @@ export function getDriveStreamSessionStatus() {
   if (!_driveSessionToken || !_driveSessionExpiry) return "uninitialized";
   if (Date.now() >= _driveSessionExpiry - 30000) return "expired";
   return "ready";
+}
+
+/**
+ * 直近のサイレント更新失敗情報を取得
+ * @returns {{ at: number, error: string } | null}
+ */
+export function getLastSilentRefreshFailure() {
+  return _lastSilentRefreshFailure ? { ..._lastSilentRefreshFailure } : null;
+}
+
+/**
+ * ストリーミング中継セッションの診断情報を取得
+ * @returns {{ createdAt: string|null, expiresAt: string|null, remainingMs: number, isReady: boolean }}
+ */
+export function getDriveSessionDiagnostics() {
+  const now = Date.now();
+  return {
+    createdAt: _driveSessionCreatedAt ? new Date(_driveSessionCreatedAt).toISOString() : null,
+    expiresAt: _driveSessionExpiry ? new Date(_driveSessionExpiry).toISOString() : null,
+    remainingMs: Math.max(0, _driveSessionExpiry - now),
+    isReady: Boolean(_driveSessionToken && now < _driveSessionExpiry - 30000),
+  };
+}
+
+/**
+ * Google Drive OAuth トークンの診断情報を取得
+ * @returns {{ acquiredAt: string|null, expiresAt: string|null, remainingMs: number, expiryMarginMs: number }}
+ */
+export function getDriveTokenDiagnostics() {
+  const pub = getPublic() || {};
+  const now = Date.now();
+  const expiry = pub.gdriveTokenExpiry || 0;
+  const acquiredAt = _tokenAcquiredAt || pub.gdriveTokenAcquiredAt || (expiry ? Math.max(0, expiry - 3600 * 1000) : 0);
+  return {
+    acquiredAt: acquiredAt ? new Date(acquiredAt).toISOString() : null,
+    expiresAt: expiry ? new Date(expiry).toISOString() : null,
+    remainingMs: Math.max(0, expiry - now),
+    expiryMarginMs: 180000,
+  };
 }
 
 /**
@@ -1299,6 +1346,7 @@ export async function ensureDriveStreamSession(tokenOverride = null, { force = f
   if (!token) {
     _driveSessionToken = null;
     _driveSessionExpiry = 0;
+    _driveSessionCreatedAt = 0;
     return false;
   }
 
@@ -1337,6 +1385,7 @@ export async function ensureDriveStreamSession(tokenOverride = null, { force = f
 
       if (res.ok) {
         _driveSessionToken = token;
+        _driveSessionCreatedAt = Date.now();
         _driveSessionExpiry = Date.now() + remainingSec * 1000;
         return true;
       }
@@ -1358,6 +1407,7 @@ export async function ensureDriveStreamSession(tokenOverride = null, { force = f
 export async function clearDriveStreamSession() {
   _driveSessionToken = null;
   _driveSessionExpiry = 0;
+  _driveSessionCreatedAt = 0;
   _driveSessionPromise = null;
   if (typeof fetch === "undefined") return;
   try {

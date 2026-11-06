@@ -194,6 +194,25 @@ export function buildSafePlayRejectDiagnostics(err, curEl, session = activePlayb
   };
 }
 
+const MAX_DIAGNOSTICS_HISTORY = 50;
+let diagnosticsHistory = [];
+
+export function recordPlaybackDiagnosticsHistory(diag) {
+  if (!diag) return;
+  diagnosticsHistory.unshift(diag);
+  if (diagnosticsHistory.length > MAX_DIAGNOSTICS_HISTORY) {
+    diagnosticsHistory.length = MAX_DIAGNOSTICS_HISTORY;
+  }
+}
+
+export function getPlaybackDiagnosticsHistory() {
+  return diagnosticsHistory.slice();
+}
+
+export function clearPlaybackDiagnosticsHistory() {
+  diagnosticsHistory.length = 0;
+}
+
 /**
  * エラー発生時の安全な再生診断メタデータを生成
  * （アクセストークン、URL全文、file ID全文、秘密情報は一切含めない）
@@ -283,6 +302,21 @@ export function generatePlaybackDiagnostics(session, track, error, extra = {}) {
     sessionId: rawSid ? rawSid.slice(-4) : "",
     currentPlayAttemptIdSuffix: (state.currentPlayAttemptId || "").slice(-6),
     playRejectName: session?.lastPlayRejectInfo?.name || error?.name || null,
+
+    // ★ Section 15 必須診断項目
+    tokenAcquiredAt,
+    tokenExpiresAt,
+    tokenRemainingMs,
+    tokenRemainingMin: tokenRemainingMs !== null ? Number((tokenRemainingMs / 60000).toFixed(1)) : null,
+    expiryMarginMs: 180000,
+    proxySessionCreatedAt,
+    proxySessionExpiresAt,
+    proxySessionRemainingMs,
+    proxySessionRemainingMin: proxySessionRemainingMs !== null ? Number((proxySessionRemainingMs / 60000).toFixed(1)) : null,
+    disconnectDecisionSource: extra.disconnectDecisionSource || session?.disconnectDecisionSource || null,
+    pendingDriveTime: pendingDriveResume?.time ?? null,
+    isTrackTransition: Boolean(extra.isTrackTransition || session?.isTrackTransition),
+
     timeline: (session?.timeline && session.timeline.length > 0)
       ? session.timeline.map((item) => {
           const detailStr = item.detail
@@ -298,9 +332,11 @@ export function generatePlaybackDiagnostics(session, track, error, extra = {}) {
     artworkDiagnostics: getLastArtworkDiagnostics(),
   };
 
+  recordPlaybackDiagnosticsHistory(diag);
   lastPlaybackDiagnostics = diag;
   if (typeof window !== "undefined") {
     window.__getLastPlaybackDiagnostics = () => lastPlaybackDiagnostics;
+    window.__getPlaybackDiagnosticsHistory = () => getPlaybackDiagnosticsHistory();
   }
   return diag;
 }
