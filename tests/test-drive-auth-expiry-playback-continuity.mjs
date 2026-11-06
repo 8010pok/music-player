@@ -27,6 +27,28 @@ Object.defineProperty(globalThis, "navigator", {
   writable: true,
 });
 
+if (typeof globalThis.screen === "undefined") {
+  globalThis.screen = { width: 1920, height: 1080, colorDepth: 24 };
+}
+
+if (typeof globalThis.localStorage === "undefined") {
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => store.get(k) ?? null,
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+    clear: () => store.clear(),
+  };
+}
+
+const defaultMockFetch = async (url, opts) => {
+  if (String(url).startsWith("/")) {
+    return { ok: true, status: 200, json: async () => ({ ok: true }), text: async () => "" };
+  }
+  return { ok: true, status: 200, json: async () => ({ ok: true }) };
+};
+globalThis.fetch = defaultMockFetch;
+
 let passed = 0;
 function test(name, fn) {
   try {
@@ -58,6 +80,7 @@ test("audio-engine.js: 切断復帰および診断関連関数が漏れなく ex
   ok(aeCode.includes("export function resolveSafeResumePosition("), "resolveSafeResumePosition must be exported");
   ok(aeCode.includes("export function getPendingDriveResume("), "getPendingDriveResume must be exported");
   ok(aeCode.includes("export function clearPendingDriveResume("), "clearPendingDriveResume must be exported");
+  ok(aeCode.includes("export function shouldClearPendingDriveResume("), "shouldClearPendingDriveResume must be exported");
   ok(aeCode.includes("export async function triggerDrivePlaybackReconnect("), "triggerDrivePlaybackReconnect must be exported");
   ok(aeCode.includes("export function getPlaybackDiagnosticsHistory("), "getPlaybackDiagnosticsHistory must be exported");
   ok(aeCode.includes("export function clearPlaybackDiagnosticsHistory("), "clearPlaybackDiagnosticsHistory must be exported");
@@ -89,7 +112,7 @@ test("audio-engine.js: onPlaying, onPause, onTimeUpdate, onEnded, syncRealAudioD
 
   ok(aeCode.includes("if (activePlaybackSession && activePlaybackSession.isStale) return;"), "isStale guard must exist in event handlers");
 
-  const onPlayingMatch = aeCode.match(/function onPlaying\(\) \{([\s\S]*?)\n\}/);
+  const onPlayingMatch = aeCode.match(/function onPlaying\([^)]*\)\s*\{([\s\S]*?)\n\}/);
   ok(onPlayingMatch && onPlayingMatch[1].includes("if (activePlaybackSession && activePlaybackSession.isStale) return;"), "onPlaying must check isStale");
   ok(onPlayingMatch && onPlayingMatch[1].includes("pendingDriveResume = null;"), "onPlaying must clear pendingDriveResume on fresh session");
 
@@ -492,5 +515,364 @@ test("既存機能への副作用がないこと (Range Proxy, EQ, KeyChange, La
   const addedIntervals = aeCode.match(/setInterval\(/g) || [];
   strictEqual(addedIntervals.length <= 2, true, "Must not introduce new setInterval calls");
 });
+
+console.log("=== 7. Proxy Session 二重POST防止とPromise共有検証 ===");
+
+await (async () => {
+  const {
+    ensureDriveStreamSession,
+    clearDriveStreamSession,
+    isDriveStreamSessionReady,
+    getDriveStreamSessionStatus,
+    setDriveToken,
+  } = await import("../js/gdrive/drive-service.js");
+  const {
+    getPendingDriveResume,
+    _setPendingDriveResumeForTest,
+  } = await import("../js/player/audio-engine.js");
+  const { setPublic } = await import("../js/store/settings.js");
+  setPublic({ driveProxyStreamEnabled: true });
+
+  // テスト用 fetch モック
+  let postCount = 0;
+  let postResolve = null;
+  const origFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).includes("/api/drive-session") && opts?.method === "POST") {
+      postCount++;
+      return new Promise((res) => {
+        postResolve = () => res({ ok: true, status: 200, json: async () => ({ ok: true }) });
+      });
+    }
+    if (String(url).includes("/api/drive-session") && opts?.method === "DELETE") {
+      return { ok: true, status: 200 };
+    }
+    return origFetch ? origFetch(url, opts) : { ok: true };
+  };
+
+  try {
+    await clearDriveStreamSession();
+
+    await asyncTest("ensureDriveStreamSession: 進行中Promiseを共有し二重POSTを完全防止", async () => {
+      postCount = 0;
+      const testToken = "test_token_unique_123";
+
+      // setDriveToken によりトークンをセット（内部で ensureDriveStreamSession が呼ばれ、非同期にPOSTが開始される）
+      await setDriveToken(testToken);
+
+      strictEqual(getDriveStreamSessionStatus(), "connecting", "Status must be connecting while in-flight");
+      strictEqual(isDriveStreamSessionReady(testToken), false, "Must not be ready while connecting");
+
+      // triggerDrivePlaybackReconnect と同様に ensureDriveStreamSession(token) を実行
+      const p2 = ensureDriveStreamSession(testToken);
+
+      // 進行中Promiseが共有され、POSTが重複発行されないこと
+      strictEqual(postCount, 1, "Must make exactly 1 POST while in-flight");
+
+      // Promise を完了させる
+      if (postResolve) postResolve();
+      const res2 = await p2;
+
+      strictEqual(res2, true, "Session must resolve true");
+      strictEqual(postCount, 1, "Total POST count must strictly be 1");
+      strictEqual(isDriveStreamSessionReady(testToken), true, "Session must now be ready");
+    });
+
+    test("isDriveStreamSessionReady: トークン不一致や期限切れでは ready と誤認しないこと", () => {
+      strictEqual(isDriveStreamSessionReady("different_token_456"), false, "Must be false for different token");
+      strictEqual(isDriveStreamSessionReady(null), true, "Must be true when no token check requested and valid");
+    });
+
+    await asyncTest("Session失敗時: pendingDriveResume を維持し再試行可能状態を保つこと", async () => {
+      _setPendingDriveResumeForTest({
+        trackId: "gd-test-track",
+        time: 50,
+        reconnectInProgress: true,
+      });
+
+      // エラーレスポンスを返すモック
+      globalThis.fetch = async (url, opts) => {
+        if (String(url).includes("/api/drive-session")) {
+          return { ok: false, status: 500, json: async () => ({ error: "Server Error" }) };
+        }
+        return { ok: true };
+      };
+
+      await clearDriveStreamSession();
+      const okRes = await ensureDriveStreamSession("failing_token", { force: true });
+      strictEqual(okRes, false, "Must return false on session failure");
+
+      // pendingDriveResume が破棄されていないこと
+      const pending = getPendingDriveResume();
+      ok(pending !== null, "pendingDriveResume must be preserved");
+      strictEqual(pending.trackId, "gd-test-track", "Track ID must be preserved");
+      strictEqual(pending.time, 50, "Time must be preserved");
+    });
+  } finally {
+    globalThis.fetch = defaultMockFetch;
+  }
+})();
+
+console.log("=== 8. pendingDriveResume の厳格な解除条件の検証 ===");
+
+await (async () => {
+  const { appState } = await import("../js/state.js");
+  const {
+    shouldClearPendingDriveResume,
+    _setPendingDriveResumeForTest,
+    _setActivePlaybackSessionForTest,
+    _setTransitionTokenForTest,
+  } = await import("../js/player/audio-engine.js");
+
+  const mockTargetEl = { id: "stream-audio-el" };
+  const matchingEvent = { target: mockTargetEl, currentTarget: mockTargetEl };
+
+  const validPending = {
+    trackId: "gd-track-target",
+    time: 90,
+    resumeSessionId: "sess-valid-1",
+    resumePlayAttemptId: "att-valid-1",
+    resumeTransitionToken: 10,
+  };
+
+  test("shouldClearPendingDriveResume: 全8条件が合致した playing のみ true を返すこと", () => {
+    _setPendingDriveResumeForTest({ ...validPending });
+    appState.set({ currentTrack: { id: "gd-track-target" } });
+    _setActivePlaybackSessionForTest({
+      trackId: "gd-track-target",
+      sessionId: "sess-valid-1",
+      playAttemptId: "att-valid-1",
+      isStale: false,
+      activeElement: mockTargetEl,
+    });
+    _setTransitionTokenForTest(10);
+
+    const canClear = shouldClearPendingDriveResume(matchingEvent);
+    strictEqual(canClear, true, "Must return true when all 8 conditions match");
+  });
+
+  test("shouldClearPendingDriveResume: 別曲の playing では解除しないこと", () => {
+    _setPendingDriveResumeForTest({ ...validPending });
+    appState.set({ currentTrack: { id: "gd-track-DIFFERENT" } });
+    _setActivePlaybackSessionForTest({
+      trackId: "gd-track-target",
+      sessionId: "sess-valid-1",
+      playAttemptId: "att-valid-1",
+      isStale: false,
+      activeElement: mockTargetEl,
+    });
+    _setTransitionTokenForTest(10);
+
+    const canClear = shouldClearPendingDriveResume(matchingEvent);
+    strictEqual(canClear, false, "Must not clear on different track");
+  });
+
+  test("shouldClearPendingDriveResume: stale Session の playing では解除しないこと", () => {
+    _setPendingDriveResumeForTest({ ...validPending });
+    appState.set({ currentTrack: { id: "gd-track-target" } });
+    _setActivePlaybackSessionForTest({
+      trackId: "gd-track-target",
+      sessionId: "sess-valid-1",
+      playAttemptId: "att-valid-1",
+      isStale: true, // stale
+      activeElement: mockTargetEl,
+    });
+    _setTransitionTokenForTest(10);
+
+    const canClear = shouldClearPendingDriveResume(matchingEvent);
+    strictEqual(canClear, false, "Must not clear on stale session");
+  });
+
+  test("shouldClearPendingDriveResume: 古い playAttemptId では解除しないこと", () => {
+    _setPendingDriveResumeForTest({ ...validPending });
+    appState.set({ currentTrack: { id: "gd-track-target" } });
+    _setActivePlaybackSessionForTest({
+      trackId: "gd-track-target",
+      sessionId: "sess-valid-1",
+      playAttemptId: "att-OLD-99", // old attempt
+      isStale: false,
+      activeElement: mockTargetEl,
+    });
+    _setTransitionTokenForTest(10);
+
+    const canClear = shouldClearPendingDriveResume(matchingEvent);
+    strictEqual(canClear, false, "Must not clear on old playAttemptId");
+  });
+
+  test("shouldClearPendingDriveResume: 古い transitionToken では解除しないこと", () => {
+    _setPendingDriveResumeForTest({ ...validPending });
+    appState.set({ currentTrack: { id: "gd-track-target" } });
+    _setActivePlaybackSessionForTest({
+      trackId: "gd-track-target",
+      sessionId: "sess-valid-1",
+      playAttemptId: "att-valid-1",
+      isStale: false,
+      activeElement: mockTargetEl,
+    });
+    _setTransitionTokenForTest(999); // old token
+
+    const canClear = shouldClearPendingDriveResume(matchingEvent);
+    strictEqual(canClear, false, "Must not clear on old transitionToken");
+  });
+
+  test("shouldClearPendingDriveResume: 通常のローカル曲の playing では解除しないこと", () => {
+    _setPendingDriveResumeForTest({ ...validPending });
+    appState.set({ currentTrack: { id: "local-track-xyz" } });
+    _setActivePlaybackSessionForTest({
+      trackId: "local-track-xyz",
+      sessionId: "sess-local",
+      playAttemptId: "att-local",
+      isStale: false,
+      activeElement: { id: "audio-el" },
+    });
+    _setTransitionTokenForTest(10);
+
+    const canClear = shouldClearPendingDriveResume(matchingEvent);
+    strictEqual(canClear, false, "Must not clear on local track playing");
+  });
+
+  test("shouldClearPendingDriveResume: 非アクティブ要素からのイベントでは解除しないこと", () => {
+    _setPendingDriveResumeForTest({ ...validPending });
+    appState.set({ currentTrack: { id: "gd-track-target" } });
+    _setActivePlaybackSessionForTest({
+      trackId: "gd-track-target",
+      sessionId: "sess-valid-1",
+      playAttemptId: "att-valid-1",
+      isStale: false,
+      activeElement: mockTargetEl,
+    });
+    _setTransitionTokenForTest(10);
+
+    const wrongEvent = { target: { id: "wrong-el" }, currentTarget: { id: "wrong-el" } };
+    const canClear = shouldClearPendingDriveResume(wrongEvent);
+    strictEqual(canClear, false, "Must not clear on event from inactive audio element");
+  });
+})();
+
+console.log("=== 9. NotAllowedError 後の通常再生ボタン復帰の総合実関数検証 ===");
+
+await (async () => {
+  const { appState } = await import("../js/state.js");
+  const {
+    executePlay,
+    getPendingDriveResume,
+    clearPendingDriveResume,
+    _setPendingDriveResumeForTest,
+    _setActivePlaybackSessionForTest,
+    _setAudioElementsForTest,
+    _setTransitionTokenForTest,
+  } = await import("../js/player/audio-engine.js");
+
+  class MockPlayerAudioEl extends EventTarget {
+    constructor(id) {
+      super();
+      this.id = id;
+      this.src = "/api/drive-stream?fileId=track-1";
+      this.currentTime = 90;
+      this.duration = 200;
+      this.paused = true;
+      this.playCalls = 0;
+      this.error = null;
+    }
+    play() {
+      this.playCalls++;
+      this.paused = false;
+      return Promise.resolve();
+    }
+    pause() {
+      this.paused = true;
+    }
+  }
+
+  const mockMain = new MockPlayerAudioEl("main-el");
+  const mockStream = new MockPlayerAudioEl("stream-el");
+  _setAudioElementsForTest(mockMain, mockStream);
+
+  await asyncTest("NotAllowedError後の再生ボタン押下: Google認証を再表示せず、保持位置からplay()しpendingを維持・解除できること", async () => {
+    clearPendingDriveResume();
+
+    const trackA = { id: "gd-track-A", title: "Track A", duration: 200 };
+    appState.set({
+      currentTrack: trackA,
+      currentTime: 90,
+      playbackStatus: "paused", // NotAllowedError 着地時
+      isPlaying: false,
+    });
+
+    const pending = {
+      trackId: "gd-track-A",
+      time: 90,
+      resumeSessionId: "sess-not-allowed-1",
+      resumePlayAttemptId: "att-not-allowed-1",
+      resumeTransitionToken: 20,
+    };
+    _setPendingDriveResumeForTest(pending);
+
+    _setActivePlaybackSessionForTest({
+      trackId: "gd-track-A",
+      sessionId: "sess-not-allowed-1",
+      playAttemptId: "att-not-allowed-1",
+      isStale: false,
+      activeElement: mockStream,
+    });
+    _setTransitionTokenForTest(20);
+
+    mockStream.src = "/api/drive-stream?fileId=track-A";
+    mockStream.currentTime = 90;
+    mockStream.error = null;
+    mockStream.playCalls = 0;
+
+    // ユーザーが再生ボタンを押す (executePlay)
+    const playResult = await executePlay();
+    strictEqual(playResult, true, "executePlay must return true");
+    strictEqual(mockStream.playCalls, 1, "Must call play() on the prepared stream audio element");
+
+    // まだ playing イベント前なので pending は維持されていること
+    ok(getPendingDriveResume() !== null, "pendingDriveResume must remain before playing event");
+
+    // playing イベント到達をシミュレート
+    const { shouldClearPendingDriveResume } = await import("../js/player/audio-engine.js");
+    const canClear = shouldClearPendingDriveResume({ target: mockStream, currentTarget: mockStream });
+    strictEqual(canClear, true, "shouldClearPendingDriveResume must be true upon playing event");
+
+    // 解除
+    clearPendingDriveResume();
+    strictEqual(getPendingDriveResume(), null, "pendingDriveResume must be cleared after successful resume");
+  });
+
+  await asyncTest("再生ボタン押下時: 要素エラーまたはSession stale時は壊れたsrcを直接叩かず安全に新Session準備へ分岐すること", async () => {
+    const trackA = { id: "gd-track-A", title: "Track A", duration: 200 };
+    appState.set({
+      currentTrack: trackA,
+      currentTime: 90,
+      playbackStatus: "paused",
+      isPlaying: false,
+    });
+
+    mockStream.error = { code: 2, message: "MEDIA_ERR_NETWORK" };
+    _setActivePlaybackSessionForTest({
+      trackId: "gd-track-A",
+      sessionId: "sess-stale-1",
+      playAttemptId: "att-stale-1",
+      isStale: true, // stale
+      activeElement: mockStream,
+    });
+
+    _setPendingDriveResumeForTest({
+      trackId: "gd-track-A",
+      time: 90,
+      resumeSessionId: "sess-stale-1",
+    });
+
+    mockStream.playCalls = 0;
+
+    // executePlay は直接 mockStream.play() を呼ばない (壊れた src への直接 play を遮断)
+    try {
+      await executePlay();
+    } catch (_) {}
+    strictEqual(mockStream.playCalls, 0, "Must not call play() directly on broken/stale audio element");
+  });
+})();
 
 console.log(`\nGoogle Drive 連続再生切断・復帰テスト: 全 ${passed} 件 PASSED ✓`);

@@ -492,6 +492,79 @@ export function _setPendingDriveResumeForTest(pending) {
   pendingDriveResume = pending;
 }
 
+export function _setActivePlaybackSessionForTest(session) {
+  activePlaybackSession = session;
+  if (session && session.playAttemptId) {
+    state.currentPlayAttemptId = session.playAttemptId;
+  }
+}
+
+export function _setCurrentPlayAttemptIdForTest(id) {
+  state.currentPlayAttemptId = id;
+}
+
+export function _setTransitionTokenForTest(val) {
+  state.transitionToken = val;
+}
+
+/**
+ * pendingDriveResume の解除条件判定
+ * 解除してよいタイミング：
+ * - 同じ曲 (appState.currentTrack.id === pendingDriveResume.trackId)
+ * - 復帰用に作成された新 Session (activePlaybackSession.trackId === pendingDriveResume.trackId)
+ * - stale ではない (activePlaybackSession.isStale !== true)
+ * - 現在の active audio element から発火した playing イベント
+ * - 正しい再生試行 (currentPlayAttemptId === activePlaybackSession.playAttemptId)
+ * - 復帰試行時の世代情報 (transitionToken / sessionId / playAttemptId) が現在値と一致
+ *
+ * 解除してはいけないケース：
+ * - 古い Session の playing
+ * - 別曲の playing
+ * - 通常のローカル曲の playing
+ * - Google 認証成功時 / Proxy Session 作成成功時
+ * - loadedmetadata / startTime の seek 完了時
+ * - NotAllowedError
+ * - 再接続キャンセル / 失敗
+ * @param {Event} [event]
+ * @returns {boolean}
+ */
+export function shouldClearPendingDriveResume(event = null) {
+  if (!pendingDriveResume) return false;
+
+  const curTrack = appState.get().currentTrack;
+  if (!curTrack || curTrack.id !== pendingDriveResume.trackId) return false;
+
+  if (!activePlaybackSession) return false;
+
+  const sessionTrackId = activePlaybackSession.trackId || activePlaybackSession.track?.id;
+  if (sessionTrackId !== pendingDriveResume.trackId) return false;
+
+  if (activePlaybackSession.isStale === true) return false;
+
+  const activeEl = activePlaybackSession.activeElement || activeAudioEl || getAudioElement();
+  if (event && event.target && activeEl) {
+    if (event.target !== activeEl && event.currentTarget !== activeEl) {
+      return false;
+    }
+  }
+
+  if (state.currentPlayAttemptId !== activePlaybackSession.playAttemptId) return false;
+
+  if (pendingDriveResume.resumeTransitionToken !== undefined && pendingDriveResume.resumeTransitionToken !== null) {
+    if (pendingDriveResume.resumeTransitionToken !== state.transitionToken) return false;
+  }
+
+  if (pendingDriveResume.resumeSessionId && pendingDriveResume.resumeSessionId !== activePlaybackSession.sessionId) {
+    return false;
+  }
+
+  if (pendingDriveResume.resumePlayAttemptId && pendingDriveResume.resumePlayAttemptId !== activePlaybackSession.playAttemptId) {
+    return false;
+  }
+
+  return true;
+}
+
 /**
  * 切断時・エラー時の安全な復帰位置を決定
  * streamAudioEl.currentTime > 0 ならその値、なければ appState.currentTime > 0、無効なら 0
@@ -644,7 +717,7 @@ export async function triggerDrivePlaybackReconnect() {
 
   try {
     const curTrack = appState.get().currentTrack || state.queue[pendingDriveResume.queueIndex];
-    const { promptDriveReconnectModal, ensureDriveStreamSession } = await import("../gdrive/drive-service.js");
+    const { promptDriveReconnectModal, ensureDriveStreamSession, isDriveStreamSessionReady } = await import("../gdrive/drive-service.js");
 
     const token = await promptDriveReconnectModal({
       track: curTrack,
@@ -658,8 +731,11 @@ export async function triggerDrivePlaybackReconnect() {
       return false;
     }
 
-    const sessionOk = await ensureDriveStreamSession(token, { force: true });
-    if (!sessionOk) {
+    const sessionReady =
+      (typeof isDriveStreamSessionReady === "function" && isDriveStreamSessionReady(token)) ||
+      (await ensureDriveStreamSession(token));
+
+    if (!sessionReady) {
       toast("Drive 中継セッションの確立に失敗しました", "err");
       pendingDriveResume.reconnectInProgress = false;
       return false;
@@ -3184,11 +3260,23 @@ export async function executePlay(options = {}) {
   // ★ 要件 # 6 & # 10: 現在の PlaybackSession.activeElement を厳格に使用（別要素へ切り替えない）
   const session = activePlaybackSession;
   const targetSessionId = session ? session.sessionId : null;
-  if (session && session.isStale) {
-    return false;
+  const curEl = (session && session.activeElement) ? session.activeElement : (activeAudioEl || getAudioElement());
+
+  // ★ 再生ボタン押下時、Session が stale または要素にエラーがある場合は古い壊れた src へ play() せず、
+  //   新 Session かつ退避された再生位置から loadAndPlay で安全に準備・再生する
+  const isCurElErrored = Boolean(curEl && curEl.error);
+  const isSessionStale = Boolean(session && session.isStale);
+
+  if (isSessionStale || isCurElErrored) {
+    if (pendingDriveResume && pendingDriveResume.trackId === curTrack.id) {
+      primeAudioElement();
+      const resumeTime = pendingDriveResume.time || appState.get().currentTime || 0;
+      await loadAndPlay(curTrack, { startTime: resumeTime });
+      return true;
+    }
+    if (isSessionStale) return false;
   }
 
-  const curEl = (session && session.activeElement) ? session.activeElement : (activeAudioEl || getAudioElement());
   if (!curEl || (curEl !== mainAudioEl && curEl !== streamAudioEl)) return false;
 
   const elName = curEl === streamAudioEl ? "streamAudioEl" : "mainAudioEl";
@@ -3197,9 +3285,11 @@ export async function executePlay(options = {}) {
   // 起動時のセッション復元直後など、要素に src / currentSrc が一切ない場合のみ loadAndPlay を実行
   const hasLoadedSrc = Boolean(curEl.src || curEl.currentSrc || (!session && state.currentObjectUrl));
   if (!hasLoadedSrc) {
-    if (!session) {
+    if (!session || (pendingDriveResume && pendingDriveResume.trackId === curTrack.id)) {
       primeAudioElement();
-      const startSec = appState.get().currentTime || 0;
+      const startSec = (pendingDriveResume && pendingDriveResume.trackId === curTrack.id)
+        ? (pendingDriveResume.time || 0)
+        : (appState.get().currentTime || 0);
       await loadAndPlay(curTrack, { startTime: startSec });
       return true;
     }
@@ -3736,6 +3826,13 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
   state.userPausedExplicitly = false;
   state.isDirectStream = false;
   state.streamFallbackInProgress = false;
+
+  // ★ pendingDriveResume の復帰試行世代情報を記録
+  if (pendingDriveResume && pendingDriveResume.trackId === track?.id) {
+    pendingDriveResume.resumeSessionId = session.sessionId;
+    pendingDriveResume.resumePlayAttemptId = myAttemptId;
+    pendingDriveResume.resumeTransitionToken = myToken;
+  }
 
   appState.set({
     currentTrack: track,
@@ -4399,10 +4496,10 @@ function onPlay() {
   saveSessionState();
 }
 
-function onPlaying() {
+function onPlaying(e) {
   if (activePlaybackSession && activePlaybackSession.isStale) return;
 
-  if (pendingDriveResume) {
+  if (pendingDriveResume && shouldClearPendingDriveResume(e)) {
     pendingDriveResume = null;
   }
 

@@ -1324,9 +1324,13 @@ export function getDriveTokenDiagnostics() {
 
 /**
  * ストリーミングセッションが即座に利用可能か確認
+ * @param {string} [token] - 特定のトークンとの一致も検証する場合に指定
  * @returns {boolean}
  */
-export function isDriveStreamSessionReady() {
+export function isDriveStreamSessionReady(token = null) {
+  if (token && _driveSessionToken && _driveSessionToken !== token) {
+    return false;
+  }
   return getDriveStreamSessionStatus() === "ready";
 }
 
