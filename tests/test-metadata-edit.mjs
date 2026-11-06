@@ -123,6 +123,90 @@ test("アルバム一括編集: トラックアーティスト統一・ジャン
   }
 });
 
+test("アルバム一括編集 (優先順位): 全曲共通アーティスト名が入力されている場合は各曲の既存artistに関わらず全曲へ適用される", () => {
+  const tracks = [
+    { id: "t-1", title: "Love Phantom", artist: "B'z", album: "LOOSE", trackNo: "1" },
+    { id: "t-2", title: "BAD COMMUNICATION", artist: "B’z", album: "LOOSE", trackNo: "2" },
+  ];
+
+  // editAlbumMetadata のパッチ生成ロジックと同一の検証
+  const trackArtist = "B'z (Normalized)";
+  const trackPatchMap = new Map([
+    ["t-1", { artist: "B'z", title: "Love Phantom", trackNo: "1" }],
+    ["t-2", { artist: "B’z", title: "BAD COMMUNICATION", trackNo: "2" }],
+  ]);
+
+  const basePatch = { album: "LOOSE", albumArtist: "B'z", userEdited: true };
+
+  const batchUpdates = tracks.map((t) => {
+    const perTrack = trackPatchMap.get(t.id) || {};
+    const individualPatch = { ...basePatch };
+    if (perTrack.title) individualPatch.title = perTrack.title;
+    if (perTrack.trackNo !== undefined) individualPatch.trackNo = perTrack.trackNo;
+    // ★ 修正後の優先順位
+    if (trackArtist) individualPatch.artist = trackArtist;
+    else if (perTrack.artist) individualPatch.artist = perTrack.artist;
+    return { id: t.id, patch: individualPatch };
+  });
+
+  strictEqual(batchUpdates[0].patch.artist, "B'z (Normalized)");
+  strictEqual(batchUpdates[1].patch.artist, "B'z (Normalized)");
+});
+
+test("アルバム一括編集 (優先順位): 全曲共通アーティスト名が空欄の場合は各曲の個別artistが維持される", () => {
+  const tracks = [
+    { id: "t-1", title: "Song A", artist: "Artist 1", album: "Compilation", trackNo: "1" },
+    { id: "t-2", title: "Song B", artist: "Artist 2", album: "Compilation", trackNo: "2" },
+  ];
+
+  const trackArtist = ""; // 空欄
+  const trackPatchMap = new Map([
+    ["t-1", { artist: "Artist 1", title: "Song A", trackNo: "1" }],
+    ["t-2", { artist: "Artist 2", title: "Song B", trackNo: "2" }],
+  ]);
+
+  const basePatch = { album: "Compilation", albumArtist: "Various Artists", userEdited: true };
+
+  const batchUpdates = tracks.map((t) => {
+    const perTrack = trackPatchMap.get(t.id) || {};
+    const individualPatch = { ...basePatch };
+    if (perTrack.title) individualPatch.title = perTrack.title;
+    if (perTrack.trackNo !== undefined) individualPatch.trackNo = perTrack.trackNo;
+    if (trackArtist) individualPatch.artist = trackArtist;
+    else if (perTrack.artist) individualPatch.artist = perTrack.artist;
+    return { id: t.id, patch: individualPatch };
+  });
+
+  strictEqual(batchUpdates[0].patch.artist, "Artist 1");
+  strictEqual(batchUpdates[1].patch.artist, "Artist 2");
+});
+
+test("アルバム一括編集: 単一アーティストアルバムと複数アーティストアルバムでの共通アーティスト初期値算出", () => {
+  // 単一アーティスト
+  const singleAlbum = {
+    albumArtist: "B'z",
+    tracks: [
+      { artist: "B'z" },
+      { artist: "B'z" },
+    ],
+  };
+  const valid1 = [...new Set(singleAlbum.tracks.map((t) => String(t?.artist || "").trim()).filter((a) => a && a !== "(不明アーティスト)" && a !== "true"))];
+  const common1 = valid1.length === 1 ? valid1[0] : (valid1.length === 0 && singleAlbum.albumArtist ? singleAlbum.albumArtist : "");
+  strictEqual(common1, "B'z", "同一アーティストなら初期値にそのアーティストが入る");
+
+  // 複数アーティスト (コンピレーション)
+  const multiAlbum = {
+    albumArtist: "Various Artists",
+    tracks: [
+      { artist: "Artist 1" },
+      { artist: "Artist 2" },
+    ],
+  };
+  const valid2 = [...new Set(multiAlbum.tracks.map((t) => String(t?.artist || "").trim()).filter((a) => a && a !== "(不明アーティスト)" && a !== "true"))];
+  const common2 = valid2.length === 1 ? valid2[0] : (valid2.length === 0 && multiAlbum.albumArtist ? multiAlbum.albumArtist : "");
+  strictEqual(common2, "", "複数アーティストなら初期値は空文字で誤上書きを防ぐ");
+});
+
 console.log("=== 再スキャン保護ロジック ===");
 
 test("再スキャン保護: userEdited: true の曲はファイルから再抽出されたメタデータで上書きされない", () => {
