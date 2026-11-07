@@ -81,9 +81,12 @@ test("audio-engine.js: 切断復帰および診断関連関数が漏れなく ex
   ok(aeCode.includes("export function getPendingDriveResume("), "getPendingDriveResume must be exported");
   ok(aeCode.includes("export function clearPendingDriveResume("), "clearPendingDriveResume must be exported");
   ok(aeCode.includes("export function shouldClearPendingDriveResume("), "shouldClearPendingDriveResume must be exported");
+  ok(aeCode.includes("export function isAudioElementPlayingSilentPrimer("), "isAudioElementPlayingSilentPrimer must be exported");
+  ok(aeCode.includes("export function isDriveStreamPlaybackSuccess("), "isDriveStreamPlaybackSuccess must be exported");
   ok(aeCode.includes("export async function triggerDrivePlaybackReconnect("), "triggerDrivePlaybackReconnect must be exported");
   ok(aeCode.includes("export function getPlaybackDiagnosticsHistory("), "getPlaybackDiagnosticsHistory must be exported");
   ok(aeCode.includes("export function clearPlaybackDiagnosticsHistory("), "clearPlaybackDiagnosticsHistory must be exported");
+  ok(!aeCode.includes("timeoutMs: 1500"), "1500ms timeout override must be completely removed");
 });
 
 test("drive-service.js: 診断情報と再接続モーダル拡張関数が export されていること", () => {
@@ -91,6 +94,9 @@ test("drive-service.js: 診断情報と再接続モーダル拡張関数が expo
   ok(dsCode.includes("export function getLastSilentRefreshFailure("), "getLastSilentRefreshFailure must be exported");
   ok(dsCode.includes("export function getDriveSessionDiagnostics("), "getDriveSessionDiagnostics must be exported");
   ok(dsCode.includes("export function getDriveTokenDiagnostics("), "getDriveTokenDiagnostics must be exported");
+  ok(dsCode.includes("export function getLastDriveSessionDiagnostic("), "getLastDriveSessionDiagnostic must be exported");
+  ok(dsCode.includes("export function getDriveSessionDiagnoses("), "getDriveSessionDiagnoses must be exported");
+  ok(dsCode.includes("export function clearDriveSessionDiagnoses("), "clearDriveSessionDiagnoses must be exported");
   ok(dsCode.includes("export async function promptDriveReconnectModal("), "promptDriveReconnectModal must be exported");
 });
 
@@ -872,6 +878,268 @@ await (async () => {
       await executePlay();
     } catch (_) {}
     strictEqual(mockStream.playCalls, 0, "Must not call play() directly on broken/stale audio element");
+  });
+})();
+
+console.log("=== 10. Proxy Session タイムアウト標準化と詳細HTTP診断の検証 ===");
+
+await (async () => {
+  const {
+    ensureDriveStreamSession,
+    clearDriveStreamSession,
+    getLastDriveSessionDiagnostic,
+    clearDriveSessionDiagnoses,
+    setDriveToken,
+  } = await import("../js/gdrive/drive-service.js");
+  const {
+    classifyDriveStreamError,
+    generatePlaybackDiagnostics,
+  } = await import("../js/player/audio-engine.js");
+
+  const originalFetch = globalThis.fetch;
+
+  await asyncTest("ensureDriveStreamSession: 標準3500msが適用され、制限時間内の200応答で正常成功すること", async () => {
+    await setDriveToken("ya29.valid-token-3500ms");
+    clearDriveStreamSession();
+    clearDriveSessionDiagnoses();
+
+    let capturedSignal = null;
+    let postCalls = 0;
+    globalThis.fetch = async (url, opts) => {
+      if (String(url).includes("/api/drive-session") && opts?.method === "POST") {
+        postCalls++;
+        capturedSignal = opts.signal;
+        strictEqual(opts.credentials, "same-origin", "Must explicitly use credentials: same-origin");
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, expiresIn: 3600 }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+
+    const okResult = await ensureDriveStreamSession("ya29.valid-token-3500ms");
+    strictEqual(okResult, true, "Must succeed on 200 OK within timeout");
+    strictEqual(postCalls, 1, "Must call POST exactly once");
+    ok(capturedSignal !== null, "Must pass AbortSignal");
+
+    const diag = getLastDriveSessionDiagnostic();
+    ok(diag !== null, "Diagnostic record must be created");
+    strictEqual(diag.configuredTimeoutMs, 3500, "Must use standard 3500ms timeout");
+    strictEqual(diag.proxyTimedOut, false, "Must not be timed out");
+    strictEqual(diag.proxyResponseOk, true, "proxyResponseOk must be true");
+    strictEqual(diag.proxyResponseCode, 200, "proxyResponseCode must be 200");
+    strictEqual(diag.sessionReadyAfter, true, "sessionReadyAfter must be true");
+    strictEqual(diag.sessionTokenMatched, true, "sessionTokenMatched must be true");
+    ok(typeof diag.proxyDurationMs === "number" && diag.proxyDurationMs >= 0, "Duration must be valid");
+  });
+
+  await asyncTest("ensureDriveStreamSession: タイムアウト時に AbortError が記録され、自動再試行しないこと", async () => {
+    clearDriveStreamSession();
+    clearDriveSessionDiagnoses();
+
+    let postCalls = 0;
+    globalThis.fetch = async (url, opts) => {
+      if (String(url).includes("/api/drive-session") && opts?.method === "POST") {
+        postCalls++;
+        // AbortError をシミュレート
+        const abortErr = new Error("The operation was aborted");
+        abortErr.name = "AbortError";
+        throw abortErr;
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+
+    const failResult = await ensureDriveStreamSession("ya29.abort-token", { timeoutMs: 3500 });
+    strictEqual(failResult, false, "Must return false on AbortError");
+    strictEqual(postCalls, 1, "Must not perform automatic retry");
+
+    const diag = getLastDriveSessionDiagnostic();
+    ok(diag !== null, "Diagnostic must be recorded on failure");
+    strictEqual(diag.proxyTimedOut, true, "proxyTimedOut must be true");
+    strictEqual(diag.proxyFetchErrorName, "AbortError", "Error name must be AbortError");
+    strictEqual(diag.proxyFetchErrorCategory, "timeout_aborted", "Category must be timeout_aborted");
+    strictEqual(diag.sessionReadyAfter, false, "sessionReadyAfter must be false");
+  });
+
+  test("classifyDriveStreamError: timeout_aborted は 401 や token_expired に誤分類されず専用メッセージを返すこと", () => {
+    const timeoutErr = new Error("Drive Range 中継セッションの確立に失敗しました (Session timeout: AbortError)");
+    timeoutErr.name = "AbortError";
+
+    const classification = classifyDriveStreamError(timeoutErr, {
+      proxyFetchErrorCategory: "timeout_aborted",
+      proxyTimedOut: true,
+      tokenExpiry: Date.now() + 3600000, // トークンは十分に残っている
+    });
+
+    strictEqual(classification.type, "proxy_session_timeout", "Must classify as proxy_session_timeout");
+    strictEqual(classification.needsReconnect, true, "Must require reconnect action");
+    strictEqual(classification.title, "Drive音源の準備に時間がかかっています", "Must show correct title");
+    strictEqual(classification.message, "Google Driveとの接続準備が完了しませんでした。再度接続すると、選択した曲から再生できます。", "Must show correct message");
+  });
+
+  await asyncTest("HTTP応答診断: 400, 403, 429, 500, TypeError, offline の分類と機密情報除外の検証", async () => {
+    clearDriveStreamSession();
+
+    // 400: invalid_token
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: "Invalid token format" }),
+    });
+    await ensureDriveStreamSession("ya29.bad-token");
+    let diag = getLastDriveSessionDiagnostic();
+    strictEqual(diag.proxyResponseCode, 400);
+    strictEqual(diag.proxyFetchErrorCategory, "http_client_error");
+    strictEqual(diag.proxyResponseBodyCode, "invalid_token");
+
+    // 403: forbidden
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: "Forbidden: cross-origin requests rejected" }),
+    });
+    await ensureDriveStreamSession("ya29.forbidden-token", { force: true });
+    diag = getLastDriveSessionDiagnostic();
+    strictEqual(diag.proxyResponseCode, 403);
+    strictEqual(diag.proxyFetchErrorCategory, "http_client_error");
+    strictEqual(diag.proxyResponseBodyCode, "cross_origin_rejected");
+
+    // 500: server error
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: "Internal Server Error" }),
+    });
+    await ensureDriveStreamSession("ya29.server-err-token", { force: true });
+    diag = getLastDriveSessionDiagnostic();
+    strictEqual(diag.proxyResponseCode, 500);
+    strictEqual(diag.proxyFetchErrorCategory, "http_server_error");
+
+    // TypeError: network fetch failed
+    globalThis.fetch = async () => {
+      throw new TypeError("Failed to fetch");
+    };
+    await ensureDriveStreamSession("ya29.type-err-token", { force: true });
+    diag = getLastDriveSessionDiagnostic();
+    strictEqual(diag.proxyFetchErrorCategory, "fetch_failed");
+    strictEqual(diag.proxyFetchErrorName, "TypeError");
+
+    // Offline: navigator.onLine = false
+    const origOnLine = globalThis.navigator.onLine;
+    globalThis.navigator.onLine = false;
+    await ensureDriveStreamSession("ya29.offline-token", { force: true });
+    diag = getLastDriveSessionDiagnostic();
+    strictEqual(diag.proxyFetchErrorCategory, "network_offline");
+    globalThis.navigator.onLine = origOnLine;
+
+    // generatePlaybackDiagnostics への統合と機密情報のサニタイズ確認
+    const fullDiag = generatePlaybackDiagnostics(null, { id: "gd-test-track-123" }, new Error("Test error"));
+    strictEqual(fullDiag.proxyTimedOut, false);
+    strictEqual(fullDiag.configuredTimeoutMs, 3500);
+    ok(fullDiag.proxyFetchErrorCategory !== null);
+
+    // 機密情報チェック
+    const diagStr = JSON.stringify(fullDiag);
+    ok(!diagStr.includes("ya29."), "Must not contain OAuth token string");
+    ok(!diagStr.includes("drive_stream_token"), "Must not contain cookie key/value");
+    ok(!diagStr.includes("Authorization"), "Must not contain Authorization header");
+  });
+
+  globalThis.fetch = originalFetch;
+})();
+
+console.log("=== 11. 無音WAV primer イベントの隔離と真の playing 判定の検証 ===");
+
+await (async () => {
+  const { appState } = await import("../js/state.js");
+  const {
+    isAudioElementPlayingSilentPrimer,
+    isDriveStreamPlaybackSuccess,
+    shouldClearPendingDriveResume,
+    _setActivePlaybackSessionForTest,
+    _setPendingDriveResumeForTest,
+    _setTransitionTokenForTest,
+    _setCurrentPlayAttemptIdForTest,
+  } = await import("../js/player/audio-engine.js");
+
+  test("isAudioElementPlayingSilentPrimer: SILENT_AUDIO_URI のみ true を返し実音源では false を返すこと", () => {
+    const silentUri = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAA==";
+    ok(isAudioElementPlayingSilentPrimer({ currentSrc: silentUri }), "data:audio/wav must return true");
+    ok(isAudioElementPlayingSilentPrimer({ src: silentUri }), "src data:audio/wav must return true");
+    strictEqual(isAudioElementPlayingSilentPrimer({ currentSrc: "/api/drive-stream?fileId=abc" }), false, "/api/drive-stream must return false");
+    strictEqual(isAudioElementPlayingSilentPrimer({ currentSrc: "blob:http://localhost/1234" }), false, "blob must return false");
+    strictEqual(isAudioElementPlayingSilentPrimer(null), false, "null element must return false");
+  });
+
+  test("isDriveStreamPlaybackSuccess: 無音WAVや不一致状態を拒絶し、実音源の中継再生のみ true を返すこと", () => {
+    const validSession = {
+      trackId: "gd-track-999",
+      track: { id: "gd-track-999" },
+      sessionId: "sess-999",
+      playAttemptId: "att-999",
+      sourceType: "drive_proxy_stream",
+      isStale: false,
+    };
+
+    appState.set({ currentTrack: { id: "gd-track-999" } });
+    _setCurrentPlayAttemptIdForTest("att-999");
+
+    // 1. 無音WAV -> false
+    const silentEl = { currentSrc: "data:audio/wav;base64,abc" };
+    strictEqual(isDriveStreamPlaybackSuccess(validSession, silentEl), false, "Silent WAV must not be playback success");
+
+    // 2. /api/drive-stream 以外のURL (例: blob URL) -> false
+    const blobEl = { currentSrc: "blob:http://localhost/mock-blob" };
+    strictEqual(isDriveStreamPlaybackSuccess(validSession, blobEl), false, "Non-proxy URL must not be proxy stream success");
+
+    // 3. stale session -> false
+    const staleSession = { ...validSession, isStale: true };
+    const validStreamEl = { currentSrc: "https://music-player-gold-kappa.vercel.app/api/drive-stream?fileId=track999" };
+    strictEqual(isDriveStreamPlaybackSuccess(staleSession, validStreamEl), false, "Stale session must not be success");
+
+    // 4. 曲ID不一致 -> false
+    appState.set({ currentTrack: { id: "gd-track-OTHER" } });
+    strictEqual(isDriveStreamPlaybackSuccess(validSession, validStreamEl), false, "Track mismatch must not be success");
+    appState.set({ currentTrack: { id: "gd-track-999" } });
+
+    // 5. 全条件合致 -> true
+    strictEqual(isDriveStreamPlaybackSuccess(validSession, validStreamEl), true, "Matching proxy stream must return true");
+  });
+
+  test("shouldClearPendingDriveResume: 無音WAVの playing 発火時は pendingDriveResume を解除しないこと", () => {
+    const silentUri = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAA==";
+    const mockEl = { id: "stream-audio-el", currentSrc: silentUri, src: silentUri };
+    const matchingEvent = { target: mockEl, currentTarget: mockEl };
+
+    _setPendingDriveResumeForTest({
+      trackId: "gd-track-target",
+      time: 90,
+      resumeSessionId: "sess-valid-1",
+      resumePlayAttemptId: "att-valid-1",
+      resumeTransitionToken: 10,
+    });
+    appState.set({ currentTrack: { id: "gd-track-target" } });
+    _setActivePlaybackSessionForTest({
+      trackId: "gd-track-target",
+      sessionId: "sess-valid-1",
+      playAttemptId: "att-valid-1",
+      isStale: false,
+      sourceType: "drive_proxy_stream",
+      activeElement: mockEl,
+    });
+    _setTransitionTokenForTest(10);
+    _setCurrentPlayAttemptIdForTest("att-valid-1");
+
+    // 無音WAVが playing を発火
+    const canClear = shouldClearPendingDriveResume(matchingEvent);
+    strictEqual(canClear, false, "Must NOT clear pendingDriveResume when playing silent primer WAV");
+
+    // その後、実音源 /api/drive-stream がセットされて playing を発火
+    mockEl.currentSrc = "https://music-player-gold-kappa.vercel.app/api/drive-stream?fileId=target";
+    const canClearReal = shouldClearPendingDriveResume(matchingEvent);
+    strictEqual(canClearReal, true, "Must clear pendingDriveResume when real /api/drive-stream starts playing");
   });
 })();
 
