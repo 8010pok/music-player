@@ -65,6 +65,7 @@ import {
   getLastSilentRefreshFailure,
   getDriveSessionDiagnostics,
   getDriveTokenDiagnostics,
+  getLastDriveSessionDiagnostic,
 } from "../gdrive/drive-service.js";
 
 /**
@@ -233,6 +234,7 @@ export function generatePlaybackDiagnostics(session, track, error, extra = {}) {
 
   const tokenDiag = typeof getDriveTokenDiagnostics === "function" ? getDriveTokenDiagnostics() : {};
   const proxyDiag = typeof getDriveSessionDiagnostics === "function" ? getDriveSessionDiagnostics() : {};
+  const lastSessionDiag = typeof getLastDriveSessionDiagnostic === "function" ? getLastDriveSessionDiagnostic() : null;
   const isOnline = typeof navigator !== "undefined" ? navigator.onLine : true;
 
   const currentSrcPath = curEl?.currentSrc
@@ -316,6 +318,22 @@ export function generatePlaybackDiagnostics(session, track, error, extra = {}) {
     disconnectDecisionSource: extra.disconnectDecisionSource || session?.disconnectDecisionSource || null,
     pendingDriveTime: pendingDriveResume?.time ?? null,
     isTrackTransition: Boolean(extra.isTrackTransition || session?.isTrackTransition),
+
+    // ★ Proxy Session 詳細診断項目（秘密情報・Cookie値・トークン・URL・fileIdは一切除外）
+    proxyRequestStartedAt: lastSessionDiag?.proxyRequestStartedAt ?? null,
+    proxyRequestCompletedAt: lastSessionDiag?.proxyRequestCompletedAt ?? null,
+    proxyDurationMs: lastSessionDiag?.proxyDurationMs ?? null,
+    proxyTimedOut: Boolean(lastSessionDiag?.proxyTimedOut),
+    proxyFetchErrorName: lastSessionDiag?.proxyFetchErrorName ?? null,
+    proxyFetchErrorCategory: lastSessionDiag?.proxyFetchErrorCategory ?? null,
+    proxyResponseOk: lastSessionDiag?.proxyResponseOk ?? null,
+    proxyResponseCode: lastSessionDiag?.proxyResponseCode ?? null,
+    proxyResponseBodyCode: lastSessionDiag?.proxyResponseBodyCode ?? null,
+    sessionReadyBefore: lastSessionDiag?.sessionReadyBefore ?? null,
+    sessionReadyAfter: lastSessionDiag?.sessionReadyAfter ?? null,
+    sessionTokenMatched: lastSessionDiag?.sessionTokenMatched ?? null,
+    sessionExpiryRemainingMs: lastSessionDiag?.sessionExpiryRemainingMs ?? null,
+    configuredTimeoutMs: lastSessionDiag?.configuredTimeoutMs ?? null,
 
     timeline: (session?.timeline && session.timeline.length > 0)
       ? session.timeline.map((item) => {
@@ -630,7 +648,23 @@ export function classifyDriveStreamError(error, context = {}) {
     };
   }
 
-  // 3. トークン期限切れ (有効期限チェック または 明示的エラー)
+  // 3. タイムアウト (AbortError / timeout_aborted / proxy_session_timeout)
+  // ※ token_expired や proxy_401 に誤分類させず、専用メッセージと安全な復帰待機状態へ導く
+  const isTimeout = context.proxyFetchErrorCategory === "timeout_aborted" ||
+    context.proxyTimedOut === true ||
+    error?.name === "AbortError" ||
+    error?.isProxyTimeout === true ||
+    /timeout.*abort|AbortError|drive.*session.*timeout|中継セッション.*タイムアウト/i.test(errStr);
+  if (isTimeout) {
+    return {
+      type: "proxy_session_timeout",
+      needsReconnect: true,
+      title: "Drive音源の準備に時間がかかっています",
+      message: "Google Driveとの接続準備が完了しませんでした。再度接続すると、選択した曲から再生できます。",
+    };
+  }
+
+  // 4. トークン期限切れ (有効期限チェック または 明示的エラー)
   const pub = getPublic() || {};
   const now = Date.now();
   const tokenExpiry = context.tokenExpiry || pub.gdriveTokenExpiry || 0;
@@ -3950,11 +3984,11 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
               session.proxyRequestStarted = false;
               logPerfMark(track.id, "proxy_session_check", t0);
               const { ensureDriveStreamSession, getDriveProxyStreamUrl, isDriveStreamSessionReady } = await import("../gdrive/drive-service.js");
-              // セッションが事前確立済みなら 0ms で完了。未確立の場合のみタイムアウト付き (最大1500ms) で初期化
+              // セッションが事前確立済みなら 0ms で完了。未確立の場合のみ初期化（標準3500msタイムアウト）
               let sessionOk = isDriveStreamSessionReady();
               if (!sessionOk) {
                 logPerfMark(track.id, "proxy_session_fetch", t0);
-                sessionOk = await ensureDriveStreamSession(token, { timeoutMs: 1500 });
+                sessionOk = await ensureDriveStreamSession(token);
               }
               if (sessionOk && myToken === state.transitionToken) {
                 session.proxySessionCreated = true;
@@ -3982,7 +4016,16 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
           if (!targetUrl) {
             // ★ 要件 # 2: Beta ON の未キャッシュFLACでは、再生開始前に全量Blob取得を絶対に開始しない！
             if (pub.driveProxyStreamEnabled) {
-              throw new Error("Drive Range 中継セッションの確立に失敗しました (Session cookie)");
+              const lastDiag = typeof getLastDriveSessionDiagnostic === "function" ? getLastDriveSessionDiagnostic() : null;
+              const isTimeout = Boolean(lastDiag?.proxyTimedOut || lastDiag?.proxyFetchErrorCategory === "timeout_aborted");
+              const err = new Error(isTimeout
+                ? "Drive Range 中継セッションの確立に失敗しました (Session timeout: AbortError)"
+                : "Drive Range 中継セッションの確立に失敗しました (Session cookie)");
+              if (isTimeout) {
+                err.name = "AbortError";
+                err.isProxyTimeout = true;
+              }
+              throw err;
             }
             logPerfMark(track.id, "drive_fast_fallback", t0);
             const fastErr = new Error("Fast Drive fetch");
@@ -4018,7 +4061,12 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
         if (myToken === state.transitionToken) {
           state.transitioning = false;
           if (pub.driveProxyStreamEnabled) {
-            const classification = classifyDriveStreamError(driveErr, { isMidTrack: (startTime || 0) > 0 });
+            const lastDiag = typeof getLastDriveSessionDiagnostic === "function" ? getLastDriveSessionDiagnostic() : null;
+            const classification = classifyDriveStreamError(driveErr, {
+              isMidTrack: (startTime || 0) > 0,
+              proxyFetchErrorCategory: lastDiag?.proxyFetchErrorCategory,
+              proxyTimedOut: lastDiag?.proxyTimedOut,
+            });
             session.isStale = true;
             pendingDriveResume = {
               trackId: track.id,

@@ -1271,6 +1271,34 @@ let _driveSessionPromise = null;
 let _lastSilentRefreshFailure = null;
 let _tokenAcquiredAt = 0;
 
+const MAX_SESSION_DIAGNOSES = 50;
+const _driveSessionDiagnoses = [];
+let _lastDriveSessionDiagnostic = null;
+
+/**
+ * 直近のプロキシセッション確立試行の診断情報を取得
+ * @returns {object|null}
+ */
+export function getLastDriveSessionDiagnostic() {
+  return _lastDriveSessionDiagnostic ? { ..._lastDriveSessionDiagnostic } : null;
+}
+
+/**
+ * プロキシセッション確立試行の履歴（最大50件）を取得
+ * @returns {Array<object>}
+ */
+export function getDriveSessionDiagnoses() {
+  return [..._driveSessionDiagnoses];
+}
+
+/**
+ * プロキシセッション確立試行の履歴をクリア（テスト・検証用）
+ */
+export function clearDriveSessionDiagnoses() {
+  _driveSessionDiagnoses.length = 0;
+  _lastDriveSessionDiagnostic = null;
+}
+
 /**
  * ストリーミングセッションの状態を取得
  * @returns {"ready"|"expired"|"no_token"|"uninitialized"|"connecting"}
@@ -1365,7 +1393,19 @@ export async function ensureDriveStreamSession(tokenOverride = null, { force = f
     return _driveSessionPromise;
   }
 
+  const configuredTimeoutMs = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 3500;
+  const sessionReadyBefore = isDriveStreamSessionReady(token);
+
   _driveSessionPromise = (async () => {
+    const startedAt = Date.now();
+    let completedAt = startedAt;
+    let timedOut = false;
+    let fetchErrorName = null;
+    let fetchErrorCategory = null;
+    let responseOk = null;
+    let responseCode = null;
+    let responseBodyCode = null;
+
     try {
       const pub = getPublic() || {};
       const remainingSec = pub.gdriveTokenExpiry
@@ -1374,31 +1414,109 @@ export async function ensureDriveStreamSession(tokenOverride = null, { force = f
 
       const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
       let timer = null;
-      if (controller && timeoutMs > 0) {
-        timer = setTimeout(() => controller.abort(), timeoutMs);
+      if (controller && configuredTimeoutMs > 0) {
+        timer = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, configuredTimeoutMs);
       }
 
-      const res = await fetch("/api/drive-session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token, expiresIn: remainingSec }),
-        signal: controller ? controller.signal : undefined,
-      });
+      let res;
+      try {
+        res = await fetch("/api/drive-session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ token, expiresIn: remainingSec }),
+          signal: controller ? controller.signal : undefined,
+        });
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
 
-      if (timer) clearTimeout(timer);
+      completedAt = Date.now();
+      responseOk = Boolean(res.ok);
+      responseCode = res.status;
 
-      if (res.ok) {
+      if (responseOk) {
         _driveSessionToken = token;
         _driveSessionCreatedAt = Date.now();
         _driveSessionExpiry = Date.now() + remainingSec * 1000;
-        return true;
+      } else {
+        if (responseCode >= 400 && responseCode < 500) {
+          fetchErrorCategory = "http_client_error";
+        } else if (responseCode >= 500) {
+          fetchErrorCategory = "http_server_error";
+        } else {
+          fetchErrorCategory = "invalid_response";
+        }
+
+        // 安全な固定エラーコードの抽出（トークン・URL・メッセージ全文は一切除外）
+        try {
+          const data = await res.json();
+          const rawCode = data?.error || data?.code;
+          if (typeof rawCode === "string") {
+            const sanitized = rawCode.replace(/ya29\.[^\s"']+/g, "").replace(/https?:\/\/[^\s"']+/g, "").trim();
+            if (/cross-origin/i.test(sanitized)) {
+              responseBodyCode = "cross_origin_rejected";
+            } else if (/invalid token/i.test(sanitized)) {
+              responseBodyCode = "invalid_token";
+            } else if (/forbidden/i.test(sanitized)) {
+              responseBodyCode = "forbidden";
+            }
+          }
+        } catch (_) {}
       }
-      return false;
+
+      return responseOk;
     } catch (err) {
+      completedAt = Date.now();
+      const isAbort = timedOut || err?.name === "AbortError";
+      const isOffline = typeof navigator !== "undefined" && navigator.onLine === false;
+      fetchErrorName = isAbort ? "AbortError" : (err?.name || (err instanceof Error ? err.constructor.name : "Error"));
+
+      if (isAbort) {
+        timedOut = true;
+        fetchErrorCategory = "timeout_aborted";
+      } else if (isOffline) {
+        fetchErrorCategory = "network_offline";
+      } else if (err instanceof TypeError || err?.name === "TypeError") {
+        fetchErrorCategory = "fetch_failed";
+      } else {
+        fetchErrorCategory = "unknown";
+      }
+
       console.warn("[drive-service] drive-session 接続失敗:", err);
       return false;
     } finally {
       _driveSessionPromise = null;
+      const sessionReadyAfter = isDriveStreamSessionReady(token);
+      const sessionTokenMatched = Boolean(_driveSessionToken && _driveSessionToken === token);
+      const sessionExpiryRemainingMs = Math.max(0, _driveSessionExpiry - Date.now());
+      const durationMs = Math.max(0, completedAt - startedAt);
+
+      const record = {
+        proxyRequestStartedAt: startedAt,
+        proxyRequestCompletedAt: completedAt,
+        proxyDurationMs: durationMs,
+        proxyTimedOut: timedOut,
+        proxyFetchErrorName: fetchErrorName,
+        proxyFetchErrorCategory: fetchErrorCategory,
+        proxyResponseOk: responseOk,
+        proxyResponseCode: responseCode,
+        proxyResponseBodyCode: responseBodyCode,
+        sessionReadyBefore,
+        sessionReadyAfter,
+        sessionTokenMatched,
+        sessionExpiryRemainingMs,
+        configuredTimeoutMs,
+      };
+
+      _lastDriveSessionDiagnostic = record;
+      _driveSessionDiagnoses.unshift(record);
+      if (_driveSessionDiagnoses.length > MAX_SESSION_DIAGNOSES) {
+        _driveSessionDiagnoses.length = MAX_SESSION_DIAGNOSES;
+      }
     }
   })();
 
