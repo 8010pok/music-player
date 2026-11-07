@@ -526,6 +526,76 @@ export function _setTransitionTokenForTest(val) {
 }
 
 /**
+ * オーディオ要素がアンロック用無音WAV (SILENT_AUDIO_URI) を再生中か判定
+ * @param {HTMLAudioElement|null} el
+ * @returns {boolean}
+ */
+export function isAudioElementPlayingSilentPrimer(el) {
+  if (!el) return false;
+  const src = el.currentSrc || el.src || "";
+  if (!src) return false;
+  if (src === SILENT_AUDIO_URI || src.startsWith("data:audio/wav")) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Drive曲の実音源中継ストリームが正しく playing へ到達したか厳格に検証
+ * 最低条件：
+ * 1. activePlaybackSession が存在
+ * 2. activePlaybackSession.sourceType === "drive_proxy_stream"
+ * 3. 現在の active audio element からの playing
+ * 4. currentSrc pathname === "/api/drive-stream"
+ * 5. appState.currentTrack.id === activePlaybackSession.trackId
+ * 6. state.currentPlayAttemptId === activePlaybackSession.playAttemptId
+ * 7. activePlaybackSession.isStale !== true
+ * @param {PlaybackSession|null} session
+ * @param {HTMLAudioElement|null} targetEl
+ * @returns {boolean}
+ */
+export function isDriveStreamPlaybackSuccess(session, targetEl = null) {
+  if (!session) return false;
+  if (session.isStale === true) return false;
+  if (session.sourceType && session.sourceType !== "drive_proxy_stream") return false;
+
+  const el = targetEl || session.activeElement || activeAudioEl || getAudioElement();
+  if (!el) return false;
+
+  // 無音WAVは実音源ではない
+  if (isAudioElementPlayingSilentPrimer(el)) {
+    return false;
+  }
+
+  // pathname が /api/drive-stream であること
+  const curSrc = el.currentSrc || el.src || "";
+  if (!curSrc) return false;
+  try {
+    const base = (typeof window !== "undefined" && window.location && window.location.href)
+      ? window.location.href
+      : "https://localhost";
+    const url = new URL(curSrc, base);
+    if (url.pathname !== "/api/drive-stream") {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+
+  const curTrack = appState.get().currentTrack;
+  const trackId = session.trackId || session.track?.id;
+  if (!curTrack || !trackId || curTrack.id !== trackId) {
+    return false;
+  }
+
+  if (state.currentPlayAttemptId && session.playAttemptId && state.currentPlayAttemptId !== session.playAttemptId) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
  * pendingDriveResume の解除条件判定
  * 解除してよいタイミング：
  * - 同じ曲 (appState.currentTrack.id === pendingDriveResume.trackId)
@@ -534,8 +604,10 @@ export function _setTransitionTokenForTest(val) {
  * - 現在の active audio element から発火した playing イベント
  * - 正しい再生試行 (currentPlayAttemptId === activePlaybackSession.playAttemptId)
  * - 復帰試行時の世代情報 (transitionToken / sessionId / playAttemptId) が現在値と一致
+ * - 実音源の /api/drive-stream が playing へ到達
  *
  * 解除してはいけないケース：
+ * - 無音WAV (SILENT_AUDIO_URI) の playing
  * - 古い Session の playing
  * - 別曲の playing
  * - 通常のローカル曲の playing
@@ -577,6 +649,31 @@ export function shouldClearPendingDriveResume(event = null) {
   }
 
   if (pendingDriveResume.resumePlayAttemptId && pendingDriveResume.resumePlayAttemptId !== activePlaybackSession.playAttemptId) {
+    return false;
+  }
+
+  // ★ 要件 # 10: 無音WAV (SILENT_AUDIO_URI) では pendingDriveResume を絶対に解除しない
+  if (isAudioElementPlayingSilentPrimer(activeEl)) {
+    return false;
+  }
+
+  // 実音源URLが設定されている場合、/api/drive-stream であることを検証
+  const curSrc = activeEl?.currentSrc || activeEl?.src || "";
+  if (curSrc) {
+    try {
+      const base = (typeof window !== "undefined" && window.location && window.location.href)
+        ? window.location.href
+        : "https://localhost";
+      const url = new URL(curSrc, base);
+      if (url.pathname !== "/api/drive-stream") {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  if (activePlaybackSession.sourceType && activePlaybackSession.sourceType !== "drive_proxy_stream") {
     return false;
   }
 
@@ -4546,6 +4643,21 @@ function onPlay() {
 
 function onPlaying(e) {
   if (activePlaybackSession && activePlaybackSession.isStale) return;
+
+  const targetEl = (e && (e.target || e.currentTarget)) || activePlaybackSession?.activeElement || activeAudioEl || getAudioElement();
+
+  // ★ 要件 # 9 & 10: 無音WAV (SILENT_AUDIO_URI) の playing はオーディオ要素アンロックのみを目的とする。
+  // 実音源の再生成功として扱わず、pendingDriveResume の解除、playingEventReceived、
+  // playbackStatus="playing"、MediaSession playbackState="playing" の更新を完全抑止する。
+  if (isAudioElementPlayingSilentPrimer(targetEl)) {
+    return;
+  }
+
+  // ★ Drive音源の場合は、中継ストリーム実音源 (/api/drive-stream) が正しく playing へ到達した場合のみ成功判定
+  const isDrive = activePlaybackSession ? isDriveTrack(activePlaybackSession.track) : false;
+  if (isDrive && !isDriveStreamPlaybackSuccess(activePlaybackSession, targetEl)) {
+    return;
+  }
 
   if (pendingDriveResume && shouldClearPendingDriveResume(e)) {
     pendingDriveResume = null;
