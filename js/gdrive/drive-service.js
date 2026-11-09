@@ -201,6 +201,7 @@ export async function getDriveToken({ forceRefresh = false, allowSilentRefresh =
     (pub.gdriveUserDisplayName && String(pub.gdriveUserDisplayName).trim())
   );
   if (!allowSilentRefresh || !hasConnectedAccountIdentity) {
+    recordTokenResolution(!allowSilentRefresh ? "refresh_not_allowed" : "no_identity", pub);
     return null;
   }
 
@@ -214,20 +215,24 @@ export async function getDriveToken({ forceRefresh = false, allowSilentRefresh =
         const refreshedToken = await silentRefreshGisToken(clientId);
         if (refreshedToken) {
           _cachedToken = refreshedToken;
+          recordTokenResolution("silent_refresh_success", pub);
           return refreshedToken;
         }
       } catch (e) {
         console.warn("[drive-service] サイレントリフレッシュ失敗:", e);
         _lastSilentRefreshFailure = { at: Date.now(), error: e?.message || String(e) };
+        recordTokenResolution("silent_refresh_failed", pub);
       } finally {
         _refreshingPromise = null;
       }
       // 期限切れトークンは返さず null を返す（401 ループを防止し、必要なら再連携モーダルへ誘導）
+      recordTokenResolution("silent_refresh_null", pub);
       return null;
     })();
     return _refreshingPromise;
   }
 
+  recordTokenResolution("no_client_id", pub);
   return null;
 }
 
@@ -1319,6 +1324,36 @@ export function getLastSilentRefreshFailure() {
   return _lastSilentRefreshFailure ? { ..._lastSilentRefreshFailure } : null;
 }
 
+let _lastTokenResolution = null;
+
+/**
+ * getDriveToken の直近の解決結果を記録する（診断専用）
+ * 記録するのは結果種別と、判定材料（アカウント識別子 / Client ID）の有無だけ。
+ * メールアドレスや Client ID の値そのもの等の秘密情報は含まない（引き継ぎ資料 §16 準拠）。
+ * outcome: "refresh_not_allowed" | "no_identity" | "no_client_id" |
+ *          "silent_refresh_success" | "silent_refresh_failed" | "silent_refresh_null"
+ */
+function recordTokenResolution(outcome, pub) {
+  const p = pub || {};
+  _lastTokenResolution = {
+    at: Date.now(),
+    outcome,
+    hasIdentity: Boolean(
+      (p.gdriveUserEmail && String(p.gdriveUserEmail).trim()) ||
+      (p.gdriveUserDisplayName && String(p.gdriveUserDisplayName).trim())
+    ),
+    hasClientId: Boolean(p.gdriveClientId && String(p.gdriveClientId).trim()),
+  };
+}
+
+/**
+ * getDriveToken の直近の解決結果（診断用）を取得
+ * @returns {{ at: number, outcome: string, hasIdentity: boolean, hasClientId: boolean } | null}
+ */
+export function getLastTokenResolution() {
+  return _lastTokenResolution ? { ..._lastTokenResolution } : null;
+}
+
 /**
  * ストリーミング中継セッションの診断情報を取得
  * @returns {{ createdAt: string|null, expiresAt: string|null, remainingMs: number, isReady: boolean }}
@@ -1347,6 +1382,9 @@ export function getDriveTokenDiagnostics() {
     expiresAt: expiry ? new Date(expiry).toISOString() : null,
     remainingMs: Math.max(0, expiry - now),
     expiryMarginMs: 180000,
+    lastResolutionOutcome: _lastTokenResolution ? _lastTokenResolution.outcome : null,
+    lastResolutionHasIdentity: _lastTokenResolution ? _lastTokenResolution.hasIdentity : null,
+    lastResolutionHasClientId: _lastTokenResolution ? _lastTokenResolution.hasClientId : null,
   };
 }
 
