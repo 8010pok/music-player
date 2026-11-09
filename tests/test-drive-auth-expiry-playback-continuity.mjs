@@ -1143,4 +1143,22 @@ await (async () => {
   });
 })();
 
+console.log("=== 12. 再生開始時のトークン取得失敗が診断に記録されること (診断の穴) ===");
+
+test("audio-engine.js: loadAndPlay のトークンなし分岐で、再接続モーダル表示前に診断が生成されること", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  const branchStart = aeCode.indexOf("let token = await getDriveToken();");
+  ok(branchStart >= 0, "loadAndPlay token acquisition must exist");
+  const branch = aeCode.slice(branchStart, branchStart + 2500);
+  const diagIdx = branch.indexOf("generatePlaybackDiagnostics(session, track, diagError)");
+  const modalIdx = branch.indexOf("promptDriveReconnectModal({ track })");
+  ok(diagIdx >= 0, "token-missing branch must generate playback diagnostics");
+  ok(modalIdx >= 0, "token-missing branch must show the reconnect modal");
+  ok(diagIdx < modalIdx, "diagnostics must be generated before the reconnect modal is shown");
+  ok(branch.includes("session.tokenError = true;"), "token-missing branch must mark session.tokenError so tokenState is recorded as expired");
+  ok(branch.includes("getLastSilentRefreshFailure"), "token-missing branch must read the recorded silent refresh failure");
+  ok(branch.includes("silent_refresh_failed:"), "diagnostics error must carry the silent_refresh_failed prefix when a silent failure is recorded");
+  ok(branch.includes("drive_token_unavailable"), "diagnostics error must fall back to drive_token_unavailable when no silent failure is recorded");
+});
+
 console.log(`\nGoogle Drive 連続再生切断・復帰テスト: 全 ${passed} 件 PASSED ✓`);
