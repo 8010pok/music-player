@@ -4046,6 +4046,18 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
       try {
         let token = await getDriveToken();
         if (!token) {
+          // ★ 診断記録: トークン取得失敗 (サイレント更新失敗を含む) は、従来どの診断生成経路
+          //    (最終失敗 / 途中切断 / Proxy確立失敗) にも載らず、設定画面の診断コピーで
+          //    失敗理由を確認できなかったため、再接続モーダル表示前にここで記録する。
+          //    再生・再接続の挙動は変更しない (記録のみ)。
+          session.tokenError = true;
+          try {
+            const silentFailure = typeof getLastSilentRefreshFailure === "function" ? getLastSilentRefreshFailure() : null;
+            const diagError = new Error(silentFailure && silentFailure.error
+              ? `silent_refresh_failed: ${silentFailure.error}`
+              : "drive_token_unavailable");
+            generatePlaybackDiagnostics(session, track, diagError);
+          } catch {}
           // 未連携またはトークンなし: 再生を保留し、pending state を記録
           setPendingPlayback(track, state.queue, state.queueIndex);
           // ユーザー操作による再連携待ちの間、無音ループを一時解除してモーダルを表示
