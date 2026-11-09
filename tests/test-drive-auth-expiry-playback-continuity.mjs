@@ -1161,4 +1161,26 @@ test("audio-engine.js: loadAndPlay のトークンなし分岐で、再接続モ
   ok(branch.includes("drive_token_unavailable"), "diagnostics error must fall back to drive_token_unavailable when no silent failure is recorded");
 });
 
+console.log("=== 13. getDriveToken の解決結果が診断に記録されること (出口記録) ===");
+
+test("drive-service.js: getDriveToken の各 null 出口とサイレント更新結果が recordTokenResolution で記録されること", () => {
+  const dsCode = fs.readFileSync(path.join(__dirname, "../js/gdrive/drive-service.js"), "utf8");
+  ok(dsCode.includes("export function getLastTokenResolution("), "getLastTokenResolution must be exported");
+  ok(dsCode.includes('recordTokenResolution(!allowSilentRefresh ? "refresh_not_allowed" : "no_identity", pub)'), "blocked gate must record its outcome");
+  ok(dsCode.includes('recordTokenResolution("no_client_id", pub)'), "missing client id exit must be recorded");
+  ok(dsCode.includes('recordTokenResolution("silent_refresh_success", pub)'), "silent refresh success must be recorded");
+  ok(dsCode.includes('recordTokenResolution("silent_refresh_failed", pub)'), "silent refresh failure must be recorded alongside _lastSilentRefreshFailure");
+  ok(dsCode.includes('recordTokenResolution("silent_refresh_null", pub)'), "silent refresh null fallthrough must be recorded");
+  ok(dsCode.includes("hasIdentity: Boolean("), "resolution record must carry only the identity-presence flag, never the value");
+  ok(dsCode.includes("hasClientId: Boolean("), "resolution record must carry only the client-id-presence flag, never the value");
+});
+
+test("audio-engine.js: 診断に tokenResolution 系フィールドが含まれ、errorMessage に解決結果が付くこと", () => {
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  ok(aeCode.includes("tokenResolutionOutcome: tokenDiag.lastResolutionOutcome ?? null"), "diagnostics must include tokenResolutionOutcome");
+  ok(aeCode.includes("tokenGateHasIdentity: tokenDiag.lastResolutionHasIdentity ?? null"), "diagnostics must include tokenGateHasIdentity");
+  ok(aeCode.includes("tokenGateHasClientId: tokenDiag.lastResolutionHasClientId ?? null"), "diagnostics must include tokenGateHasClientId");
+  ok(aeCode.includes("drive_token_unavailable: ${resolution.outcome}"), "errorMessage must carry the resolution outcome when no silent refresh failure is recorded");
+});
+
 console.log(`\nGoogle Drive 連続再生切断・復帰テスト: 全 ${passed} 件 PASSED ✓`);
