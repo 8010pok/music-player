@@ -63,6 +63,7 @@ import {
   getDriveStreamSessionStatus,
   isDriveStreamSessionReady,
   getLastSilentRefreshFailure,
+  getLastTokenResolution,
   getDriveSessionDiagnostics,
   getDriveTokenDiagnostics,
   getLastDriveSessionDiagnostic,
@@ -311,6 +312,9 @@ export function generatePlaybackDiagnostics(session, track, error, extra = {}) {
     tokenRemainingMs,
     tokenRemainingMin: tokenRemainingMs !== null ? Number((tokenRemainingMs / 60000).toFixed(1)) : null,
     expiryMarginMs: 180000,
+    tokenResolutionOutcome: tokenDiag.lastResolutionOutcome ?? null,
+    tokenGateHasIdentity: tokenDiag.lastResolutionHasIdentity ?? null,
+    tokenGateHasClientId: tokenDiag.lastResolutionHasClientId ?? null,
     proxySessionCreatedAt,
     proxySessionExpiresAt,
     proxySessionRemainingMs,
@@ -4053,9 +4057,10 @@ async function loadAndPlay(track, { startTime = 0 } = {}) {
           session.tokenError = true;
           try {
             const silentFailure = typeof getLastSilentRefreshFailure === "function" ? getLastSilentRefreshFailure() : null;
+            const resolution = typeof getLastTokenResolution === "function" ? getLastTokenResolution() : null;
             const diagError = new Error(silentFailure && silentFailure.error
               ? `silent_refresh_failed: ${silentFailure.error}`
-              : "drive_token_unavailable");
+              : (resolution && resolution.outcome ? `drive_token_unavailable: ${resolution.outcome}` : "drive_token_unavailable"));
             generatePlaybackDiagnostics(session, track, diagError);
           } catch {}
           // 未連携またはトークンなし: 再生を保留し、pending state を記録
