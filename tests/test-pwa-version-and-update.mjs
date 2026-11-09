@@ -1,10 +1,10 @@
 /**
  * test-pwa-version-and-update.mjs
  *
- * 1. 画面表示バージョンが 1.11.21
- * 2. package.json が 1.11.21
- * 3. sw.js が v1.11.21
- * 4. 診断 appVersion が 1.11.21
+ * 1. 画面表示バージョンが 1.11.22
+ * 2. package.json が 1.11.22
+ * 3. sw.js が v1.11.22
+ * 4. 診断 appVersion が 1.11.22
  * 5. 古い 1.11.19 以下の表示用ハードコードが残っていない
  * 6. 更新ボタンが registration.update() を呼ぶ
  * 7. controllerchange で reload は最大1回
@@ -35,23 +35,23 @@ function test(name, fn) {
 
 console.log("=== 1. バージョン定義の一元化と完全一致 ===");
 
-test("js/version.js: APP_VERSION が 1.11.21、CACHE_VERSION が v1.11.21 であること", async () => {
+test("js/version.js: APP_VERSION が 1.11.22、CACHE_VERSION が v1.11.22 であること", async () => {
   const { APP_VERSION, CACHE_VERSION } = await import("../js/version.js");
-  strictEqual(APP_VERSION, "1.11.21", "APP_VERSION must be 1.11.21");
-  strictEqual(CACHE_VERSION, "v1.11.21", "CACHE_VERSION must be v1.11.21");
+  strictEqual(APP_VERSION, "1.11.22", "APP_VERSION must be 1.11.22");
+  strictEqual(CACHE_VERSION, "v1.11.22", "CACHE_VERSION must be v1.11.22");
 });
 
-test("package.json: version が 1.11.21 と完全一致すること", () => {
+test("package.json: version が 1.11.22 と完全一致すること", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "../package.json"), "utf-8"));
-  strictEqual(pkg.version, "1.11.21", "package.json version must be 1.11.21");
+  strictEqual(pkg.version, "1.11.22", "package.json version must be 1.11.22");
 });
 
-test("sw.js: CACHE_VERSION が v1.11.21 と完全一致すること", () => {
+test("sw.js: CACHE_VERSION が v1.11.22 と完全一致すること", () => {
   const sw = fs.readFileSync(path.join(__dirname, "../sw.js"), "utf-8");
-  ok(sw.includes('const CACHE_VERSION = "v1.11.21";'), "sw.js CACHE_VERSION must be v1.11.21");
+  ok(sw.includes('const CACHE_VERSION = "v1.11.22";'), "sw.js CACHE_VERSION must be v1.11.22");
 });
 
-test("audio-engine.js: 診断情報 appVersion が APP_VERSION (1.11.21) を参照していること", () => {
+test("audio-engine.js: 診断情報 appVersion が APP_VERSION (1.11.22) を参照していること", () => {
   const ae = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf-8");
   ok(ae.includes('import { APP_VERSION } from "../version.js";'), "audio-engine must import APP_VERSION");
   ok(ae.includes("appVersion: APP_VERSION,"), "audio-engine appVersion must use APP_VERSION");
