@@ -425,9 +425,37 @@ export async function testConnection(token) {
       return { ok: false, error: errorMsg };
     }
     const data = await res.json();
+    let user = data.user || null;
+    // 一部アカウントでは about.get の user に表示名・メールが含まれず、接続アカウントの
+    // 識別子を保存できない（サイレント更新の同一アカウント検証が成立しなくなる）。
+    // 両方とも欠けている場合のみ OpenID Connect の userinfo から補完する。
+    // 補完に失敗しても従来通り、接続テスト自体は成功として返す。
+    const aboutEmail = user && typeof user.emailAddress === "string" ? user.emailAddress.trim() : "";
+    const aboutName = user && typeof user.displayName === "string" ? user.displayName.trim() : "";
+    if (!aboutEmail && !aboutName) {
+      try {
+        const uiRes = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (uiRes.ok) {
+          const ui = await uiRes.json();
+          const uiEmail = ui && typeof ui.email === "string" ? ui.email.trim() : "";
+          const uiName = ui && typeof ui.name === "string" ? ui.name.trim() : "";
+          if (uiEmail || uiName) {
+            user = {
+              ...(user || {}),
+              emailAddress: aboutEmail || uiEmail,
+              displayName: aboutName || uiName,
+            };
+          }
+        }
+      } catch {
+        // userinfo 補完の失敗では接続テスト自体を失敗にしない（従来挙動を維持）
+      }
+    }
     return {
       ok: true,
-      user: data.user,
+      user,
       quota: data.storageQuota,
     };
   } catch (err) {
@@ -509,7 +537,7 @@ export function silentRefreshGisToken(clientId) {
           const emailHint = expectedEmail.includes("@") ? expectedEmail : undefined;
           const client = window.google.accounts.oauth2.initTokenClient({
             client_id: clientId,
-            scope: "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file",
+            scope: "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file openid email profile",
             ...(emailHint ? { hint: emailHint } : {}),
             callback: async (resp) => {
               if (resp.error) {
@@ -584,7 +612,7 @@ export function requestGisToken(clientId) {
         try {
           const client = window.google.accounts.oauth2.initTokenClient({
             client_id: resolvedClientId,
-            scope: "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file",
+            scope: "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file openid email profile",
             prompt: "select_account",
             callback: async (resp) => {
               if (resp.error) {
@@ -1634,7 +1662,7 @@ export async function promptDriveReconnectModal({
     const modalTitle = title || "☁ Google Drive の再連携";
     const modalBodyIntro = bodyText || "Google Drive の認証有効期限が切れているか未連携のため、Google アカウントを選択してログインするとそのまま再生を開始します。";
     const redirectUri = (typeof window !== "undefined" && window.location) ? (window.location.origin + window.location.pathname) : "";
-    const oauthDirectUrl = savedClientId ? `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(savedClientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent("https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file")}&prompt=select_account` : "";
+    const oauthDirectUrl = savedClientId ? `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(savedClientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent("https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file openid email profile")}&prompt=select_account` : "";
 
     const container = document.createElement("div");
     container.className = "gdrive-reconnect-modal";
