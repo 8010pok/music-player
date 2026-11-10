@@ -1275,4 +1275,110 @@ await (async () => {
   });
 })();
 
+console.log("=== 15. testConnection の識別子取得過程が診断に記録されること (プローブ) ===");
+
+test("drive-service.js / audio-engine.js: 識別子プローブの記録と診断フィールドが存在すること", () => {
+  const dsCode = fs.readFileSync(path.join(__dirname, "../js/gdrive/drive-service.js"), "utf8");
+  ok(dsCode.includes("export function getLastIdentityProbe("), "getLastIdentityProbe must be exported");
+  ok(dsCode.includes("saveIdentityProbe(probe)"), "testConnection must save the identity probe");
+  ok(dsCode.includes("identityUserinfoStatus: _lastIdentityProbe"), "token diagnostics must carry the userinfo status");
+  ok(dsCode.includes("identityAboutHasEmail: _lastIdentityProbe"), "token diagnostics must carry the about identity flags");
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  ok(aeCode.includes("identityUserinfoStatus: tokenDiag.identityUserinfoStatus ?? null"), "playback diagnostics must include identityUserinfoStatus");
+  ok(aeCode.includes("identityAboutOk: tokenDiag.identityAboutOk ?? null"), "playback diagnostics must include identityAboutOk");
+});
+
+await (async () => {
+  const { testConnection, getLastIdentityProbe } = await import("../js/gdrive/drive-service.js");
+
+  const jsonRes = (okFlag, status, body) => ({
+    ok: okFlag,
+    status,
+    statusText: okFlag ? "OK" : "Error",
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  });
+
+  const withFetch = async (router, fn) => {
+    const prev = globalThis.fetch;
+    globalThis.fetch = router;
+    try {
+      await fn();
+    } finally {
+      globalThis.fetch = prev;
+    }
+  };
+
+  await asyncTest("プローブ: about が空で userinfo が成功した場合に全過程が記録されること", async () => {
+    await withFetch(async (url) => {
+      if (String(url).includes("drive/v3/about")) return jsonRes(true, 200, { user: {}, storageQuota: {} });
+      if (String(url).includes("openidconnect.googleapis.com/v1/userinfo")) return jsonRes(true, 200, { email: "user@example.com", name: "Test User" });
+      throw new Error("unexpected url: " + url);
+    }, async () => {
+      await testConnection("dummy-token");
+      const p = getLastIdentityProbe();
+      ok(p, "probe must be recorded");
+      strictEqual(p.aboutOk, true);
+      strictEqual(p.aboutStatus, 200);
+      strictEqual(p.aboutHasEmail, false);
+      strictEqual(p.aboutHasName, false);
+      strictEqual(p.userinfoAttempted, true);
+      strictEqual(p.userinfoStatus, 200);
+      strictEqual(p.userinfoHasEmail, true);
+      strictEqual(p.userinfoHasName, true);
+    });
+  });
+
+  await asyncTest("プローブ: about に識別子があれば userinfo 未試行として記録されること", async () => {
+    await withFetch(async (url) => {
+      if (String(url).includes("drive/v3/about")) return jsonRes(true, 200, { user: { emailAddress: "a@example.com", displayName: "A" }, storageQuota: {} });
+      throw new Error("userinfo must not be called");
+    }, async () => {
+      await testConnection("dummy-token");
+      const p = getLastIdentityProbe();
+      strictEqual(p.aboutHasEmail, true);
+      strictEqual(p.userinfoAttempted, false);
+      strictEqual(p.userinfoStatus, null);
+    });
+  });
+
+  await asyncTest("プローブ: userinfo が 403 の場合はステータスが記録されること", async () => {
+    await withFetch(async (url) => {
+      if (String(url).includes("drive/v3/about")) return jsonRes(true, 200, { user: {}, storageQuota: {} });
+      if (String(url).includes("openidconnect.googleapis.com/v1/userinfo")) return jsonRes(false, 403, {});
+      throw new Error("unexpected url: " + url);
+    }, async () => {
+      await testConnection("dummy-token");
+      const p = getLastIdentityProbe();
+      strictEqual(p.userinfoAttempted, true);
+      strictEqual(p.userinfoStatus, 403);
+      strictEqual(p.userinfoHasEmail, false);
+      strictEqual(p.userinfoNetworkError, false);
+    });
+  });
+
+  await asyncTest("プローブ: userinfo が通信例外の場合はネットワークエラーとして記録されること", async () => {
+    await withFetch(async (url) => {
+      if (String(url).includes("drive/v3/about")) return jsonRes(true, 200, { user: {}, storageQuota: {} });
+      throw new Error("network down");
+    }, async () => {
+      await testConnection("dummy-token");
+      const p = getLastIdentityProbe();
+      strictEqual(p.userinfoAttempted, true);
+      strictEqual(p.userinfoStatus, null);
+      strictEqual(p.userinfoNetworkError, true);
+    });
+  });
+
+  await asyncTest("プローブ: about が 401 の場合は失敗として記録され userinfo は未試行のこと", async () => {
+    await withFetch(async () => jsonRes(false, 401, {}), async () => {
+      await testConnection("dummy-token");
+      const p = getLastIdentityProbe();
+      strictEqual(p.aboutOk, false);
+      strictEqual(p.aboutStatus, 401);
+      strictEqual(p.userinfoAttempted, false);
+    });
+  });
+})();
+
 console.log(`\nGoogle Drive 連続再生切断・復帰テスト: 全 ${passed} 件 PASSED ✓`);
