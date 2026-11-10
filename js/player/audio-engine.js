@@ -315,6 +315,7 @@ export function generatePlaybackDiagnostics(session, track, error, extra = {}) {
     tokenResolutionOutcome: tokenDiag.lastResolutionOutcome ?? null,
     tokenGateHasIdentity: tokenDiag.lastResolutionHasIdentity ?? null,
     tokenGateHasClientId: tokenDiag.lastResolutionHasClientId ?? null,
+    identityProbeAt: tokenDiag.identityProbeAt ?? null,
     identityAboutOk: tokenDiag.identityAboutOk ?? null,
     identityAboutStatus: tokenDiag.identityAboutStatus ?? null,
     identityAboutNetworkError: tokenDiag.identityAboutNetworkError ?? null,
