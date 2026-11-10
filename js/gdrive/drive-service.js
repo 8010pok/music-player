@@ -408,13 +408,43 @@ export async function parseGoogleApiError(res, defaultMsg = "Google API エラ�
 
 let _lastIdentityProbe = null;
 
+const IDENTITY_PROBE_STORAGE_KEY = "music-player.identity-probe";
+
 /**
  * testConnection の識別子取得の過程を記録する（診断専用）
  * 記録するのは各取得の成否・HTTPステータス・値の有無だけで、
  * メールアドレスや表示名の値そのものは含まない（引き継ぎ資料 §16 準拠）。
+ * iOS PWA ではプロセス終了でメモリ上の記録が消えるため、localStorage にも
+ * 保存して再起動後の診断でも参照できるようにする。公開設定（同期対象）とは
+ * 別の専用キーに保存し、端末の外へは出さない。
  */
 function saveIdentityProbe(probe) {
   _lastIdentityProbe = { at: Date.now(), ...probe };
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(IDENTITY_PROBE_STORAGE_KEY, JSON.stringify(_lastIdentityProbe));
+    }
+  } catch {
+    // 永続化に失敗してもメモリ上の記録は残る
+  }
+}
+
+function loadIdentityProbe() {
+  if (_lastIdentityProbe) return _lastIdentityProbe;
+  try {
+    if (typeof localStorage !== "undefined") {
+      const raw = localStorage.getItem(IDENTITY_PROBE_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object" && typeof parsed.at === "number") {
+          _lastIdentityProbe = parsed;
+        }
+      }
+    }
+  } catch {
+    // 読み出しに失敗した場合は未記録として扱う
+  }
+  return _lastIdentityProbe;
 }
 
 /**
@@ -422,7 +452,8 @@ function saveIdentityProbe(probe) {
  * @returns {object | null}
  */
 export function getLastIdentityProbe() {
-  return _lastIdentityProbe ? { ..._lastIdentityProbe } : null;
+  const probe = loadIdentityProbe();
+  return probe ? { ...probe } : null;
 }
 
 /**
@@ -1444,6 +1475,7 @@ export function getDriveTokenDiagnostics() {
   const now = Date.now();
   const expiry = pub.gdriveTokenExpiry || 0;
   const acquiredAt = _tokenAcquiredAt || pub.gdriveTokenAcquiredAt || (expiry ? Math.max(0, expiry - 3600 * 1000) : 0);
+  const idProbe = loadIdentityProbe();
   return {
     acquiredAt: acquiredAt ? new Date(acquiredAt).toISOString() : null,
     expiresAt: expiry ? new Date(expiry).toISOString() : null,
@@ -1452,16 +1484,17 @@ export function getDriveTokenDiagnostics() {
     lastResolutionOutcome: _lastTokenResolution ? _lastTokenResolution.outcome : null,
     lastResolutionHasIdentity: _lastTokenResolution ? _lastTokenResolution.hasIdentity : null,
     lastResolutionHasClientId: _lastTokenResolution ? _lastTokenResolution.hasClientId : null,
-    identityAboutOk: _lastIdentityProbe ? _lastIdentityProbe.aboutOk : null,
-    identityAboutStatus: _lastIdentityProbe ? _lastIdentityProbe.aboutStatus : null,
-    identityAboutNetworkError: _lastIdentityProbe ? _lastIdentityProbe.aboutNetworkError : null,
-    identityAboutHasEmail: _lastIdentityProbe ? _lastIdentityProbe.aboutHasEmail : null,
-    identityAboutHasName: _lastIdentityProbe ? _lastIdentityProbe.aboutHasName : null,
-    identityUserinfoAttempted: _lastIdentityProbe ? _lastIdentityProbe.userinfoAttempted : null,
-    identityUserinfoStatus: _lastIdentityProbe ? _lastIdentityProbe.userinfoStatus : null,
-    identityUserinfoNetworkError: _lastIdentityProbe ? _lastIdentityProbe.userinfoNetworkError : null,
-    identityUserinfoHasEmail: _lastIdentityProbe ? _lastIdentityProbe.userinfoHasEmail : null,
-    identityUserinfoHasName: _lastIdentityProbe ? _lastIdentityProbe.userinfoHasName : null,
+    identityProbeAt: idProbe && idProbe.at ? new Date(idProbe.at).toISOString() : null,
+    identityAboutOk: idProbe ? idProbe.aboutOk : null,
+    identityAboutStatus: idProbe ? idProbe.aboutStatus : null,
+    identityAboutNetworkError: idProbe ? idProbe.aboutNetworkError : null,
+    identityAboutHasEmail: idProbe ? idProbe.aboutHasEmail : null,
+    identityAboutHasName: idProbe ? idProbe.aboutHasName : null,
+    identityUserinfoAttempted: idProbe ? idProbe.userinfoAttempted : null,
+    identityUserinfoStatus: idProbe ? idProbe.userinfoStatus : null,
+    identityUserinfoNetworkError: idProbe ? idProbe.userinfoNetworkError : null,
+    identityUserinfoHasEmail: idProbe ? idProbe.userinfoHasEmail : null,
+    identityUserinfoHasName: idProbe ? idProbe.userinfoHasName : null,
   };
 }
 
