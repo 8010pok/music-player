@@ -1437,4 +1437,52 @@ await (async () => {
   }
 })();
 
+console.log("=== 17. about.get の fields 訂正（picture → photoLink）の回帰防止 ===");
+
+test("drive-service.js: about.get の fields に photoLink が使われ picture が残っていないこと", () => {
+  const dsCode = fs.readFileSync(path.join(__dirname, "../js/gdrive/drive-service.js"), "utf8");
+  ok(dsCode.includes("user(displayName,emailAddress,photoLink)"), "about fields must use photoLink (Drive user resource field)");
+  ok(!dsCode.includes("user(displayName,emailAddress,picture)"), "about fields must not use picture (invalid field -> HTTP 400)");
+});
+
+await (async () => {
+  const { testConnection, getLastIdentityProbe } = await import("../js/gdrive/drive-service.js");
+
+  const jsonRes = (okFlag, status, body) => ({
+    ok: okFlag,
+    status,
+    statusText: okFlag ? "OK" : "Error",
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  });
+
+  await asyncTest("testConnection: Google のフィールド検証を模したモックでも 200 で識別子が取れること", async () => {
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes("drive/v3/about")) {
+        // Google は無効なフィールド選択に HTTP 400 を返す（公式ドキュメント準拠の模倣）
+        if (u.includes("picture")) return jsonRes(false, 400, { error: { message: "Invalid field selection picture" } });
+        return jsonRes(true, 200, {
+          user: { displayName: "Test User", emailAddress: "user@example.com", photoLink: "https://example.com/photo" },
+          storageQuota: { limit: "1" },
+        });
+      }
+      throw new Error("unexpected url: " + url);
+    };
+    try {
+      const res = await testConnection("dummy-token");
+      strictEqual(res.ok, true, "about.get must succeed with the corrected fields");
+      strictEqual(res.user.emailAddress, "user@example.com");
+      strictEqual(res.user.displayName, "Test User");
+      const p = getLastIdentityProbe();
+      strictEqual(p.aboutOk, true);
+      strictEqual(p.aboutStatus, 200);
+      strictEqual(p.userinfoAttempted, false, "about で識別子が取れれば userinfo は不要");
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+  });
+})();
+
 console.log(`\nGoogle Drive 連続再生切断・復帰テスト: 全 ${passed} 件 PASSED ✓`);
