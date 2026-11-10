@@ -470,7 +470,7 @@ export async function testConnection(token) {
     userinfoHasEmail: false, userinfoHasName: false,
   };
   try {
-    const res = await fetch("https://www.googleapis.com/drive/v3/about?fields=user(displayName,emailAddress,picture),storageQuota", {
+    const res = await fetch("https://www.googleapis.com/drive/v3/about?fields=user(displayName,emailAddress,photoLink),storageQuota", {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) {
