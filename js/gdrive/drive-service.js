@@ -406,6 +406,25 @@ export async function parseGoogleApiError(res, defaultMsg = "Google API エラ�
   return `${defaultMsg}: ${res.status} ${res.statusText || ""}`.trim();
 }
 
+let _lastIdentityProbe = null;
+
+/**
+ * testConnection の識別子取得の過程を記録する（診断専用）
+ * 記録するのは各取得の成否・HTTPステータス・値の有無だけで、
+ * メールアドレスや表示名の値そのものは含まない（引き継ぎ資料 §16 準拠）。
+ */
+function saveIdentityProbe(probe) {
+  _lastIdentityProbe = { at: Date.now(), ...probe };
+}
+
+/**
+ * testConnection の直近の識別子取得の過程（診断用）を取得
+ * @returns {object | null}
+ */
+export function getLastIdentityProbe() {
+  return _lastIdentityProbe ? { ..._lastIdentityProbe } : null;
+}
+
 /**
  * トークンの有効性とユーザー情報をテスト
  * @param {string} token
@@ -413,11 +432,19 @@ export async function parseGoogleApiError(res, defaultMsg = "Google API エラ�
  */
 export async function testConnection(token) {
   if (!token) return { ok: false, error: "トークンが指定されていません" };
+  const probe = {
+    aboutOk: false, aboutStatus: null, aboutNetworkError: false,
+    aboutHasEmail: false, aboutHasName: false,
+    userinfoAttempted: false, userinfoStatus: null, userinfoNetworkError: false,
+    userinfoHasEmail: false, userinfoHasName: false,
+  };
   try {
     const res = await fetch("https://www.googleapis.com/drive/v3/about?fields=user(displayName,emailAddress,picture),storageQuota", {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) {
+      probe.aboutStatus = res.status;
+      saveIdentityProbe(probe);
       if (res.status === 401) {
         return { ok: false, error: "アクセストークンが無効または期限切れです (401)" };
       }
@@ -432,15 +459,23 @@ export async function testConnection(token) {
     // 補完に失敗しても従来通り、接続テスト自体は成功として返す。
     const aboutEmail = user && typeof user.emailAddress === "string" ? user.emailAddress.trim() : "";
     const aboutName = user && typeof user.displayName === "string" ? user.displayName.trim() : "";
+    probe.aboutOk = true;
+    probe.aboutStatus = res.status;
+    probe.aboutHasEmail = Boolean(aboutEmail);
+    probe.aboutHasName = Boolean(aboutName);
     if (!aboutEmail && !aboutName) {
       try {
+        probe.userinfoAttempted = true;
         const uiRes = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
           headers: { Authorization: `Bearer ${token}` },
         });
+        probe.userinfoStatus = uiRes.status;
         if (uiRes.ok) {
           const ui = await uiRes.json();
           const uiEmail = ui && typeof ui.email === "string" ? ui.email.trim() : "";
           const uiName = ui && typeof ui.name === "string" ? ui.name.trim() : "";
+          probe.userinfoHasEmail = Boolean(uiEmail);
+          probe.userinfoHasName = Boolean(uiName);
           if (uiEmail || uiName) {
             user = {
               ...(user || {}),
@@ -451,14 +486,18 @@ export async function testConnection(token) {
         }
       } catch {
         // userinfo 補完の失敗では接続テスト自体を失敗にしない（従来挙動を維持）
+        probe.userinfoNetworkError = true;
       }
     }
+    saveIdentityProbe(probe);
     return {
       ok: true,
       user,
       quota: data.storageQuota,
     };
   } catch (err) {
+    probe.aboutNetworkError = true;
+    saveIdentityProbe(probe);
     return { ok: false, error: `通信エラー: ${err.message}` };
   }
 }
@@ -1413,6 +1452,16 @@ export function getDriveTokenDiagnostics() {
     lastResolutionOutcome: _lastTokenResolution ? _lastTokenResolution.outcome : null,
     lastResolutionHasIdentity: _lastTokenResolution ? _lastTokenResolution.hasIdentity : null,
     lastResolutionHasClientId: _lastTokenResolution ? _lastTokenResolution.hasClientId : null,
+    identityAboutOk: _lastIdentityProbe ? _lastIdentityProbe.aboutOk : null,
+    identityAboutStatus: _lastIdentityProbe ? _lastIdentityProbe.aboutStatus : null,
+    identityAboutNetworkError: _lastIdentityProbe ? _lastIdentityProbe.aboutNetworkError : null,
+    identityAboutHasEmail: _lastIdentityProbe ? _lastIdentityProbe.aboutHasEmail : null,
+    identityAboutHasName: _lastIdentityProbe ? _lastIdentityProbe.aboutHasName : null,
+    identityUserinfoAttempted: _lastIdentityProbe ? _lastIdentityProbe.userinfoAttempted : null,
+    identityUserinfoStatus: _lastIdentityProbe ? _lastIdentityProbe.userinfoStatus : null,
+    identityUserinfoNetworkError: _lastIdentityProbe ? _lastIdentityProbe.userinfoNetworkError : null,
+    identityUserinfoHasEmail: _lastIdentityProbe ? _lastIdentityProbe.userinfoHasEmail : null,
+    identityUserinfoHasName: _lastIdentityProbe ? _lastIdentityProbe.userinfoHasName : null,
   };
 }
 
