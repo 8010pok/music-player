@@ -1183,4 +1183,96 @@ test("audio-engine.js: 診断に tokenResolution 系フィールドが含まれ�
   ok(aeCode.includes("drive_token_unavailable: ${resolution.outcome}"), "errorMessage must carry the resolution outcome when no silent refresh failure is recorded");
 });
 
+console.log("=== 14. testConnection の userinfo 補完（識別子が空のアカウント対策） ===");
+
+test("drive-service.js: GIS スコープ3箇所すべてに openid email profile が含まれること", () => {
+  const dsCode = fs.readFileSync(path.join(__dirname, "../js/gdrive/drive-service.js"), "utf8");
+  const scopeStr = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file openid email profile";
+  strictEqual(dsCode.split(scopeStr).length - 1, 3, "identity scopes を含むスコープ文字列がちょうど3箇所あること");
+  ok(dsCode.includes("https://openidconnect.googleapis.com/v1/userinfo"), "testConnection は OIDC userinfo へ補完しに行くこと");
+});
+
+await (async () => {
+  const { testConnection } = await import("../js/gdrive/drive-service.js");
+
+  const jsonRes = (okFlag, status, body) => ({
+    ok: okFlag,
+    status,
+    statusText: okFlag ? "OK" : "Error",
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  });
+
+  const withFetch = async (router, fn) => {
+    const prev = globalThis.fetch;
+    globalThis.fetch = router;
+    try {
+      await fn();
+    } finally {
+      globalThis.fetch = prev;
+    }
+  };
+
+  await asyncTest("testConnection: about の user が空なら userinfo でメール・表示名を補完すること", async () => {
+    const calls = [];
+    await withFetch(async (url) => {
+      calls.push(String(url));
+      if (String(url).includes("drive/v3/about")) return jsonRes(true, 200, { user: {}, storageQuota: { limit: "1" } });
+      if (String(url).includes("openidconnect.googleapis.com/v1/userinfo")) return jsonRes(true, 200, { email: "user@example.com", name: "Test User" });
+      throw new Error("unexpected url: " + url);
+    }, async () => {
+      const res = await testConnection("dummy-token");
+      strictEqual(res.ok, true);
+      strictEqual(res.user.emailAddress, "user@example.com");
+      strictEqual(res.user.displayName, "Test User");
+      strictEqual(calls.length, 2, "about の次に userinfo を引くこと");
+    });
+  });
+
+  await asyncTest("testConnection: about の user に識別子があれば userinfo を呼ばないこと", async () => {
+    const calls = [];
+    await withFetch(async (url) => {
+      calls.push(String(url));
+      if (String(url).includes("drive/v3/about")) return jsonRes(true, 200, { user: { emailAddress: "a@example.com", displayName: "A" }, storageQuota: {} });
+      throw new Error("userinfo must not be called");
+    }, async () => {
+      const res = await testConnection("dummy-token");
+      strictEqual(res.ok, true);
+      strictEqual(res.user.emailAddress, "a@example.com");
+      strictEqual(calls.length, 1, "about のみで完了すること");
+    });
+  });
+
+  await asyncTest("testConnection: userinfo が失敗しても接続成功のまま識別子なしで返ること", async () => {
+    await withFetch(async (url) => {
+      if (String(url).includes("drive/v3/about")) return jsonRes(true, 200, { user: {}, storageQuota: {} });
+      if (String(url).includes("openidconnect.googleapis.com/v1/userinfo")) return jsonRes(false, 403, {});
+      throw new Error("unexpected url: " + url);
+    }, async () => {
+      const res = await testConnection("dummy-token");
+      strictEqual(res.ok, true, "userinfo が HTTP 失敗でも接続テストは成功のまま");
+      ok(!res.user || (!res.user.emailAddress && !res.user.displayName), "識別子は空のまま");
+    });
+    await withFetch(async (url) => {
+      if (String(url).includes("drive/v3/about")) return jsonRes(true, 200, { user: {}, storageQuota: {} });
+      throw new Error("network down");
+    }, async () => {
+      const res = await testConnection("dummy-token");
+      strictEqual(res.ok, true, "userinfo が通信例外でも接続テストは成功のまま");
+    });
+  });
+
+  await asyncTest("testConnection: about が 401 の場合は従来通り失敗し userinfo を呼ばないこと", async () => {
+    const calls = [];
+    await withFetch(async (url) => {
+      calls.push(String(url));
+      return jsonRes(false, 401, {});
+    }, async () => {
+      const res = await testConnection("dummy-token");
+      strictEqual(res.ok, false);
+      strictEqual(calls.length, 1, "about のみで終了すること");
+    });
+  });
+})();
+
 console.log(`\nGoogle Drive 連続再生切断・復帰テスト: 全 ${passed} 件 PASSED ✓`);
