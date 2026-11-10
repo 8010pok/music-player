@@ -1281,8 +1281,8 @@ test("drive-service.js / audio-engine.js: 識別子プローブの記録と診�
   const dsCode = fs.readFileSync(path.join(__dirname, "../js/gdrive/drive-service.js"), "utf8");
   ok(dsCode.includes("export function getLastIdentityProbe("), "getLastIdentityProbe must be exported");
   ok(dsCode.includes("saveIdentityProbe(probe)"), "testConnection must save the identity probe");
-  ok(dsCode.includes("identityUserinfoStatus: _lastIdentityProbe"), "token diagnostics must carry the userinfo status");
-  ok(dsCode.includes("identityAboutHasEmail: _lastIdentityProbe"), "token diagnostics must carry the about identity flags");
+  ok(dsCode.includes("identityUserinfoStatus: idProbe ? idProbe.userinfoStatus : null"), "token diagnostics must carry the userinfo status");
+  ok(dsCode.includes("identityAboutHasEmail: idProbe ? idProbe.aboutHasEmail : null"), "token diagnostics must carry the about identity flags");
   const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
   ok(aeCode.includes("identityUserinfoStatus: tokenDiag.identityUserinfoStatus ?? null"), "playback diagnostics must include identityUserinfoStatus");
   ok(aeCode.includes("identityAboutOk: tokenDiag.identityAboutOk ?? null"), "playback diagnostics must include identityAboutOk");
@@ -1379,6 +1379,62 @@ await (async () => {
       strictEqual(p.userinfoAttempted, false);
     });
   });
+})();
+
+console.log("=== 16. 識別子プローブの永続化（再起動後も診断で参照できること） ===");
+
+test("drive-service.js / audio-engine.js: プローブ永続化と記録時刻フィールドが存在すること", () => {
+  const dsCode = fs.readFileSync(path.join(__dirname, "../js/gdrive/drive-service.js"), "utf8");
+  ok(dsCode.includes('"music-player.identity-probe"'), "probe must persist under its own localStorage key");
+  ok(dsCode.includes("function loadIdentityProbe("), "loadIdentityProbe must exist");
+  ok(dsCode.includes("identityProbeAt: idProbe && idProbe.at"), "token diagnostics must carry the probe timestamp");
+  const aeCode = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  ok(aeCode.includes("identityProbeAt: tokenDiag.identityProbeAt ?? null"), "playback diagnostics must include identityProbeAt");
+});
+
+await (async () => {
+  const { testConnection } = await import("../js/gdrive/drive-service.js");
+
+  const jsonRes = (okFlag, status, body) => ({
+    ok: okFlag,
+    status,
+    statusText: okFlag ? "OK" : "Error",
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  });
+
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("drive/v3/about")) return jsonRes(true, 200, { user: {}, storageQuota: {} });
+    if (String(url).includes("openidconnect.googleapis.com/v1/userinfo")) return jsonRes(true, 200, { email: "user@example.com", name: "Test User" });
+    throw new Error("unexpected url: " + url);
+  };
+  try {
+    await asyncTest("プローブが専用キーに永続化され、公開設定には混ざらないこと", async () => {
+      localStorage.removeItem("music-player.identity-probe");
+      await testConnection("dummy-token");
+      const raw = localStorage.getItem("music-player.identity-probe");
+      ok(raw, "probe must be written to localStorage");
+      const parsed = JSON.parse(raw);
+      strictEqual(parsed.userinfoStatus, 200);
+      strictEqual(parsed.userinfoHasEmail, true);
+      strictEqual(typeof parsed.at, "number");
+      const settingsRaw = localStorage.getItem("music-player.settings") || "";
+      ok(!settingsRaw.includes("identityUserinfoStatus"), "probe must not leak into public settings");
+    });
+
+    await asyncTest("再起動相当（新規モジュール）でも永続化プローブが読み出せること", async () => {
+      const fresh = await import("../js/gdrive/drive-service.js?probe-restart=1");
+      const p = fresh.getLastIdentityProbe();
+      ok(p, "fresh module instance must read the persisted probe");
+      strictEqual(p.userinfoStatus, 200);
+      const diag = fresh.getDriveTokenDiagnostics();
+      ok(typeof diag.identityProbeAt === "string" && diag.identityProbeAt.length > 0, "diagnostics must expose the persisted probe timestamp");
+      strictEqual(diag.identityUserinfoStatus, 200);
+    });
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
 })();
 
 console.log(`\nGoogle Drive 連続再生切断・復帰テスト: 全 ${passed} 件 PASSED ✓`);
