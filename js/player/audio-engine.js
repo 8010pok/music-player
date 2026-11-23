@@ -3428,10 +3428,14 @@ export async function executePlay(options = {}) {
   const elName = curEl === streamAudioEl ? "streamAudioEl" : "mainAudioEl";
   recordSessionDiagEvent("media_session_play_active_element_resolved", elName);
 
-  // 起動時のセッション復元直後など、要素に src / currentSrc が一切ない場合のみ loadAndPlay を実行
+  // 要素に src / currentSrc が一切ない場合は、保存位置から loadAndPlay で復帰する。
+  // 起動時のセッション復元直後（セッションなし）に加え、セッションが残っていても
+  // 要素の読み込みだけ落ちた場合（iOS が放置中にメディアリソースを破棄した場合など）
+  // も対象とする。従来は後者で何もせず終了し、再生ボタンで二度と復帰できなかった。
+  // 別トラックへの遷移中（state.transitioning）は競合を避けて対象外とする。
   const hasLoadedSrc = Boolean(curEl.src || curEl.currentSrc || (!session && state.currentObjectUrl));
   if (!hasLoadedSrc) {
-    if (!session || (pendingDriveResume && pendingDriveResume.trackId === curTrack.id)) {
+    if (!session || (pendingDriveResume && pendingDriveResume.trackId === curTrack.id) || !state.transitioning) {
       primeAudioElement();
       const startSec = (pendingDriveResume && pendingDriveResume.trackId === curTrack.id)
         ? (pendingDriveResume.time || 0)

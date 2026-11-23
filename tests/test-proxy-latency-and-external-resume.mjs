@@ -135,6 +135,15 @@ test("executePlay: 現在の PlaybackSession.activeElement を厳格に使用し
   ok(engineContent.includes("hasLoadedSrc"), "executePlay must check existing loaded src before re-loading");
 });
 
+test("executePlay: 要素に src が無く遷移中でもない場合は、セッションが残っていても保存位置から loadAndPlay で復帰すること", () => {
+  const engineContent = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf-8");
+  const execPlayIdx = engineContent.indexOf("export async function executePlay");
+  const togglePlayIdx = engineContent.indexOf("export async function togglePlay");
+  const execPlayBlock = engineContent.slice(execPlayIdx, togglePlayIdx);
+  ok(execPlayBlock.includes("|| !state.transitioning"), "no-src recovery must apply even when a session remains, unless a transition is in flight");
+  ok(execPlayBlock.includes("await loadAndPlay(curTrack, { startTime: startSec });"), "no-src recovery must loadAndPlay from the saved position");
+});
+
 test("executePlay: mainAudioEl 再生時は AudioContext を resume し、streamAudioEl 再生時は Web Audio を操作しないこと", () => {
   const engineContent = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf-8");
   ok(engineContent.includes("if (curEl === mainAudioEl)"), "AudioContext resume must be restricted to mainAudioEl");
@@ -650,6 +659,24 @@ await (async () => {
     const proxyUrlMp3 = getDriveProxyStreamUrl({ id: "gd-1A2B3C4D5E", driveFileId: "1A2B3C4D5E", format: "mp3" });
     strictEqual(proxyUrlFlac, "/api/drive-stream?fileId=1A2B3C4D5E&ext=flac", "FLAC proxy URL must remain intact");
     strictEqual(proxyUrlMp3, "/api/drive-stream?fileId=1A2B3C4D5E&ext=mp3", "MP3 proxy URL must remain intact");
+  });
+
+  await asyncTest("23. セッションが残っていても要素の src が失われていれば、保存位置から loadAndPlay で復帰を試みること", async () => {
+    _setAudioContextForTest(null, null);
+    const track = { id: "local-nosrc", title: "No Src Track", duration: 200 };
+    appState.set({ currentTrack: track, duration: 200, currentTime: 42, isPlaying: false, playbackStatus: "paused" });
+    const session = beginPlaybackSession(track, 0, 0);
+    session.activeElement = mockMainEl;
+    session.sourceType = "cached_blob";
+    mockMainEl.src = "";
+    mockMainEl.currentTime = 0;
+    mockMainEl.paused = true;
+    mockMainEl.playCalls = 0;
+
+    const res = await executePlay();
+    strictEqual(res, true, "executePlay must enter the loadAndPlay recovery instead of silently returning false");
+    ok(getCurrentPlaybackSession() !== session, "loadAndPlay must begin a new playback session");
+    strictEqual(session.isStale, true, "previous session must be superseded by the recovery loadAndPlay");
   });
 })();
 

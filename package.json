@@ -1,6 +1,6 @@
 {
   "name": "music-player",
-  "version": "1.11.27",
+  "version": "1.11.28",
   "private": true,
   "type": "module",
   "scripts": {
