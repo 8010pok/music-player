@@ -180,6 +180,16 @@ runTest("settings: enableGaplessStandby のデフォルトと設定画面トグ�
   assert.ok(viewCode.includes("enableGaplessStandby: refs.gaplessChk.checked"), "トグルが setPublic に反映されること");
 });
 
+runTest("audio-engine.js: 曲間遷移の診断記録 (noteTransition / transition* フィールド) が存在する", () => {
+  const code = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  assert.match(code, /function noteTransition\(via, type, track\)/);
+  assert.match(code, /TRANSITION_DIAG_KEY = "music-player\.transition-diag"/);
+  assert.match(code, /transitionType: transitionDiag\?\.type/);
+  assert.match(code, /transitionGapMs: transitionDiag\?\.gapMs/);
+  assert.ok(code.includes('noteTransition("ended", "standby", track)'), "advanceFromEnded のスタンバイ分岐で記録すること");
+  assert.ok(code.includes('noteTransition("next", "standby", t)'), "playNext のスタンバイ分岐で記録すること");
+});
+
 console.log("\n============================================================");
 console.log(`合計: ${total} / 成功: ${passed} / 失敗: ${total - passed}`);
 if (total === passed) {
