@@ -34,6 +34,7 @@ import {
   applyKeyShift,
   resetPitchShifter,
   getCurrentKeyShift,
+  isEqWired,
   setAudioOutputDevice,
   resumeEqContext,
   getEqContextState,
@@ -2885,6 +2886,12 @@ export async function playNext() {
   }
   const t = state.queue[next];
   if (!t) return;
+  // ギャップレス: スタンバイ要素が次曲を読み込み済みなら要素切替だけで遷移
+  const sb = consumeStandby(t);
+  if (sb) {
+    playPreloadedSync(next, t, sb.url, { standbyEl: sb.el });
+    return;
+  }
   // プリロード済みの曲なら同期高速パスで即再生 (ロック画面の「次へ」操作でも
   // 音が途切れないように)。それ以外は通常の loadAndPlay。
   if (state.preloadUrl && state.preloadTrackId === t.id) {
@@ -2943,6 +2950,7 @@ function computeNextIndex() {
  * in-flight の getBlob を無効化するため token も進める。
  */
 function clearPreload() {
+  teardownStandby();
   if (state.preloadUrl) {
     try { URL.revokeObjectURL(state.preloadUrl); } catch {}
   }
@@ -2950,6 +2958,127 @@ function clearPreload() {
   state.preloadTrackId = null;
   state.preloadingId = null;
   state.preloadToken++; // in-flight の getBlob を stale 化して破棄させる
+}
+
+/* ============ ギャップレス用スタンバイ要素 (次曲の先読み再生) ============ */
+
+// 次曲を「非アクティブ側の要素」に src セット + load() 済みの状態で待機させる
+// ための記録。URL プリロード (state.preloadUrl) と対になる仕組みで、
+// 遷移時は要素を切り替えて play() するだけで次曲が鳴る (読み込み時間が消える)。
+// 制約:
+//   - Web Audio グラフ (EQ / キーチェンジ) が未接続のときだけ有効。
+//     グラフは createMediaElementSource で要素に固定されるため、接続済みの
+//     セッションでは従来の playPreloadedSync (同一要素への src 差替) に任せる。
+//   - 対象は blob 経路 (ローカル / キャッシュ済み) のみ。Drive ストリームは対象外。
+let standbyState = null; // { trackId, el, url, ready, onReady, onError } | null
+
+/**
+ * スタンバイを破棄する。待機要素がアクティブ要素でなければ src を外して
+ * デコーダを解放し、object URL を revoke する。
+ * 消費済み (standbyState = null 化済み) の場合は何もしない。
+ */
+function teardownStandby() {
+  const rec = standbyState;
+  if (!rec) return;
+  standbyState = null;
+  const el = rec.el;
+  if (el) {
+    try { el.removeEventListener("canplay", rec.onReady); } catch {}
+    try { el.removeEventListener("error", rec.onError); } catch {}
+    if (el !== activeAudioEl) {
+      try { el.pause(); } catch {}
+      try { el.removeAttribute("src"); } catch {}
+      try { el.currentTime = 0; } catch {}
+      try { el.load(); } catch {}
+    }
+  }
+  if (rec.url) {
+    try { URL.revokeObjectURL(rec.url); } catch {}
+  }
+}
+
+/**
+ * 次曲を非アクティブ要素へ先読みする (schedulePreload の getBlob 完了時に呼ぶ)。
+ * blob からスタンバイ専用の object URL を作るため、state.preloadUrl の
+ * ライフサイクルとは独立に破棄できる。
+ */
+function prepareStandby(track, blob) {
+  teardownStandby();
+  if (!track || !track.id || !blob) return;
+  const pub = getPublic() || {};
+  if (pub.enableGaplessStandby === false) return;
+  if (pub.enableAudioEffects) return;
+  if (isEqWired()) return;
+  const shift = (typeof track.keyShift === "number" && !isNaN(track.keyShift)) ? track.keyShift : 0;
+  if (shift !== 0) return;
+  const el = activeAudioEl === mainAudioEl ? streamAudioEl : mainAudioEl;
+  if (!el || el === activeAudioEl) return;
+  let url;
+  try {
+    url = URL.createObjectURL(blob);
+  } catch {
+    return;
+  }
+  const rec = { trackId: track.id, el, url, ready: false, onReady: null, onError: null };
+  rec.onReady = () => { if (standbyState === rec) rec.ready = true; };
+  rec.onError = () => { if (standbyState === rec) teardownStandby(); };
+  standbyState = rec;
+  try {
+    el.addEventListener("canplay", rec.onReady);
+    el.addEventListener("error", rec.onError);
+    el.preload = "auto";
+    el.src = url;
+    el.load();
+  } catch {
+    teardownStandby();
+  }
+}
+
+/**
+ * 遷移先トラックに対するスタンバイが使えるか検証し、使える場合は記録を
+ * 消費 (URL の所有権は遷移先の currentObjectUrl へ移るため revoke しない)
+ * して { el, url } を返す。使えない場合は null。
+ * ゲートは準備時と同じ条件を遷移直前に再確認する (途中で EQ を有効化した等)。
+ */
+function consumeStandby(track) {
+  const rec = standbyState;
+  if (!rec || !track || rec.trackId !== track.id) return null;
+  const pub = getPublic() || {};
+  const shift = (typeof track.keyShift === "number" && !isNaN(track.keyShift)) ? track.keyShift : 0;
+  const usable =
+    rec.ready &&
+    rec.el &&
+    rec.el !== activeAudioEl &&
+    rec.el.src === rec.url &&
+    pub.enableGaplessStandby !== false &&
+    !pub.enableAudioEffects &&
+    !isEqWired() &&
+    shift === 0;
+  if (!usable) {
+    // 要素の src が差し替わっている等、記録が実態とずれた場合は掃除する
+    if (rec.el && rec.el.src !== rec.url) teardownStandby();
+    return null;
+  }
+  standbyState = null;
+  try { rec.el.removeEventListener("canplay", rec.onReady); } catch {}
+  try { rec.el.removeEventListener("error", rec.onError); } catch {}
+  return { el: rec.el, url: rec.url };
+}
+
+/** テスト専用: スタンバイ準備を直接駆動し、現在の記録を返す */
+export function _prepareStandbyForTest(track, blob) {
+  prepareStandby(track, blob);
+  return standbyState;
+}
+
+/** テスト専用: 現在のスタンバイ記録を返す */
+export function _getStandbyForTest() {
+  return standbyState;
+}
+
+/** テスト専用: スタンバイを破棄する */
+export function _teardownStandbyForTest() {
+  teardownStandby();
 }
 
 /**
@@ -2993,6 +3122,8 @@ function schedulePreload() {
       }
       state.preloadTrackId = targetId;
       state.preloadUrl = url;
+      // ギャップレス: 同じ blob で非アクティブ要素も先読みしておく
+      prepareStandby(track, blob);
     })
     .catch((e) => console.warn("[audio-engine] 次曲プリロード失敗", e))
     .finally(() => {
@@ -3015,7 +3146,7 @@ function schedulePreload() {
  *   必要でバックグラウンドで遅延するため)。duration はパース済みの
  *   track.duration を使って MediaSession に渡すので loadedmetadata 待ちは不要。
  */
-function playPreloadedSync(index, track, url, { isDirectStream = false } = {}) {
+function playPreloadedSync(index, track, url, { isDirectStream = false, standbyEl = null } = {}) {
   // 防御: url が無い場合は同期再生できないので通常パスへフォールバック。
   // (呼び出し側は state.preloadUrl を真偽判定済みだが、念のため)
   if (!url) {
@@ -3024,6 +3155,8 @@ function playPreloadedSync(index, track, url, { isDirectStream = false } = {}) {
     loadAndPlay(track).catch((e) => console.warn("[audio-engine] loadAndPlay 失敗", e));
     return;
   }
+
+  const useStandby = !!standbyEl;
 
   const session = beginPlaybackSession(track, index, 0);
   const myAttemptId = session.playAttemptId;
@@ -3041,6 +3174,10 @@ function playPreloadedSync(index, track, url, { isDirectStream = false } = {}) {
   state.isDirectStream = !!isDirectStream;
   state.streamFallbackInProgress = false;
   // プリロード枠を消費 (URL は currentObjectUrl に移譲したので revoke しない)
+  // ただしスタンバイ経路では preloadUrl は冗長な別 URL になるため revoke してリークを防ぐ
+  if (useStandby && state.preloadUrl && state.preloadUrl !== url) {
+    try { URL.revokeObjectURL(state.preloadUrl); } catch {}
+  }
   state.preloadUrl = null;
   state.preloadTrackId = null;
   state.preloadingId = null;
@@ -3055,7 +3192,18 @@ function playPreloadedSync(index, track, url, { isDirectStream = false } = {}) {
   const isKeyShiftActive = trackKeyShift !== 0;
   const needsWebAudio = isEffectsActive || isKeyShiftActive;
 
-  if (isDirectStream) {
+  if (useStandby) {
+    // ★ ギャップレス: スタンバイ要素は次曲を読み込み済み。src は差し替えず、
+    //    アクティブ要素を切り替えるだけで即座に鳴らせる。
+    //    呼出側 (consumeStandby) で EQ / キーチェンジ未使用を再確認済みのため
+    //    Web Audio への接続は行わない (keyShift は 0 固定)。
+    setActiveAudioElement(standbyEl);
+    session.activeElement = standbyEl;
+    session.sourceType = "cached_blob";
+    session.appliedKeyShift = 0;
+    applyKeyShift(0, standbyEl);
+    appState.set({ currentKeyShift: 0 });
+  } else if (isDirectStream) {
     setActiveAudioElement(streamAudioEl);
     session.activeElement = streamAudioEl;
     session.sourceType = "drive_stream";
@@ -3097,7 +3245,7 @@ function playPreloadedSync(index, track, url, { isDirectStream = false } = {}) {
 
   state.userPausedExplicitly = false;
 
-  audioEl.src = url;
+  if (!useStandby) audioEl.src = url;
   audioEl.loop = false;
   audioEl.playbackRate = getEffectivePlaybackRate();
   applyTrackVolume(audioEl, track);
@@ -3238,6 +3386,12 @@ function advanceFromEnded() {
   const track = state.queue[next];
   if (!track) return;
 
+  // ★ ギャップレス: スタンバイ要素が次曲を読み込み済みなら要素切替だけで遷移
+  const sb = consumeStandby(track);
+  if (sb) {
+    playPreloadedSync(next, track, sb.url, { standbyEl: sb.el });
+    return;
+  }
   // ★ プリロード済みなら同期高速パス (iOS バックグラウンドで音が途切れない)
   if (state.preloadUrl && state.preloadTrackId === track.id) {
     playPreloadedSync(next, track, state.preloadUrl);

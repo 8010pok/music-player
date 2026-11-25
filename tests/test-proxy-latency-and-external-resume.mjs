@@ -266,7 +266,14 @@ await (async () => {
     handleVisibilityChange,
     generatePlaybackDiagnostics,
     buildSafePlayRejectDiagnostics,
+    _prepareStandbyForTest,
+    _getStandbyForTest,
+    _teardownStandbyForTest,
+    getAudioElement,
+    setQueueAndPlay,
   } = await import("../js/player/audio-engine.js");
+  const { putMemoryBlob } = await import("../js/store/library-db.js");
+  const { setPublic } = await import("../js/store/settings.js");
 
   class MockAudioElement extends EventTarget {
     constructor(id) {
@@ -677,6 +684,92 @@ await (async () => {
     strictEqual(res, true, "executePlay must enter the loadAndPlay recovery instead of silently returning false");
     ok(getCurrentPlaybackSession() !== session, "loadAndPlay must begin a new playback session");
     strictEqual(session.isStale, true, "previous session must be superseded by the recovery loadAndPlay");
+  });
+
+  await asyncTest("24. ギャップレス: 次曲を非アクティブ要素へ先読みし canplay で ready になること", async () => {
+    _setAudioContextForTest(null, null);
+    _teardownStandbyForTest();
+    const inactiveEl = getAudioElement() === mockMainEl ? mockStreamEl : mockMainEl;
+    const trackB = { id: "gapless-b", title: "B", duration: 180 };
+    const loadCallsBefore = inactiveEl.loadCalls;
+    const rec = _prepareStandbyForTest(trackB, new Blob(["audio-b"]));
+    ok(rec, "standby must be prepared when all gates are open");
+    strictEqual(rec.trackId, "gapless-b");
+    strictEqual(rec.el, inactiveEl, "standby must use the inactive element");
+    ok(typeof rec.url === "string" && rec.url.startsWith("blob:"), "standby url must be an object URL");
+    strictEqual(inactiveEl.src, rec.url, "standby element src must be the standby url");
+    ok(inactiveEl.loadCalls > loadCallsBefore, "standby element must be load()ed");
+    strictEqual(rec.ready, false, "standby must not be ready before canplay");
+    inactiveEl.dispatchEvent(new Event("canplay"));
+    strictEqual(rec.ready, true, "canplay must mark the standby ready");
+    _teardownStandbyForTest();
+    strictEqual(_getStandbyForTest(), null, "teardown must clear the standby record");
+    strictEqual(inactiveEl.src, "", "teardown must clear the standby element src");
+  });
+
+  await asyncTest("25. ギャップレス: 自然終了時にスタンバイ要素へ切り替えて次曲を再生すること", async () => {
+    _setAudioContextForTest(null, null);
+    _teardownStandbyForTest();
+    const trackA = { id: "gapless-a", title: "A", duration: 180 };
+    const trackB = { id: "gapless-b2", title: "B2", duration: 200 };
+    putMemoryBlob(trackA.id, new Blob(["audio-a"]));
+    putMemoryBlob(trackB.id, new Blob(["audio-b2"]));
+    await setQueueAndPlay([trackA, trackB], 0);
+    await new Promise((r) => setTimeout(r, 10));
+    // A が main で再生中の状態を整える (loadAndPlay の結果に依存しないよう再構築)
+    const session = beginPlaybackSession(trackA, 0, 0);
+    session.activeElement = mockMainEl;
+    session.sourceType = "cached_blob";
+    mockMainEl.src = "blob:track-a";
+    mockMainEl.paused = false;
+    appState.set({ currentTrack: trackA, isPlaying: true, scrobbledForCurrent: true });
+    const rec = _prepareStandbyForTest(trackB, new Blob(["audio-b2"]));
+    ok(rec && rec.el === mockStreamEl, "standby must be prepared on the inactive element");
+    mockStreamEl.dispatchEvent(new Event("canplay"));
+    strictEqual(rec.ready, true);
+    mockStreamEl.playCalls = 0;
+    mockMainEl.dispatchEvent(new Event("ended"));
+    strictEqual(getAudioElement(), mockStreamEl, "active element must switch to the standby element");
+    ok(mockStreamEl.playCalls >= 1, "standby element must be played");
+    strictEqual(appState.get().currentTrack?.id, trackB.id, "current track must advance to B");
+    strictEqual(_getStandbyForTest(), null, "standby must be consumed");
+    strictEqual(mockMainEl.src, "", "previous element must be cleared by the switch");
+    _teardownStandbyForTest();
+  });
+
+  await asyncTest("26. ギャップレス: エフェクト有効時・キーチェンジ曲・設定OFFではスタンバイを準備しないこと", async () => {
+    _teardownStandbyForTest();
+    // settings は localStorage 永続化 (Node では未定義で setPublic が反映されない) ため Map モックを用意する
+    const lsStore = new Map();
+    Object.defineProperty(globalThis, "localStorage", {
+      value: {
+        getItem: (k) => (lsStore.has(k) ? lsStore.get(k) : null),
+        setItem: (k, v) => { lsStore.set(k, String(v)); },
+        removeItem: (k) => { lsStore.delete(k); },
+      },
+      configurable: true,
+      writable: true,
+    });
+    try {
+      const trackB = { id: "gapless-b3", title: "B3", duration: 180 };
+      setPublic({ enableAudioEffects: true });
+      try {
+        strictEqual(_prepareStandbyForTest(trackB, new Blob(["x"])), null, "no standby while audio effects are enabled");
+      } finally {
+        setPublic({ enableAudioEffects: false });
+      }
+      const shifted = { id: "gapless-b4", title: "B4", duration: 180, keyShift: 2 };
+      strictEqual(_prepareStandbyForTest(shifted, new Blob(["x"])), null, "no standby for key-shifted tracks");
+      setPublic({ enableGaplessStandby: false });
+      try {
+        strictEqual(_prepareStandbyForTest(trackB, new Blob(["x"])), null, "no standby when the setting is off");
+      } finally {
+        setPublic({ enableGaplessStandby: true });
+      }
+    } finally {
+      _teardownStandbyForTest();
+      delete globalThis.localStorage;
+    }
   });
 })();
 

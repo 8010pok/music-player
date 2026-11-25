@@ -129,6 +129,57 @@ runTest("library-db.js & view-library.js: ingestFile および ensureTrackMetada
   assert.match(ldbCode, /patch\.artworkDataUrl = await blobToDataUrl\(track\.artworkBlob, 500\);/);
 });
 
+console.log("\n=== 4. ギャップレス・スタンバイ要素 (次曲の先読み再生) の検証 ===");
+
+runTest("audio-engine.js: prepareStandby が存在し、設定・EQ・キーチェンジのゲートを持つ", () => {
+  const code = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  assert.match(code, /function prepareStandby\(track, blob\)/);
+  assert.match(code, /pub\.enableGaplessStandby === false/);
+  assert.match(code, /if \(pub\.enableAudioEffects\) return;/);
+  assert.match(code, /if \(isEqWired\(\)\) return;/);
+  assert.match(code, /if \(shift !== 0\) return;/);
+});
+
+runTest("audio-engine.js: schedulePreload が getBlob 完了時に prepareStandby を呼び、clearPreload が teardownStandby を呼ぶ", () => {
+  const code = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  assert.match(code, /state\.preloadUrl = url;\s*\n\s*\/\/ ギャップレス: 同じ blob で非アクティブ要素も先読みしておく\s*\n\s*prepareStandby\(track, blob\);/);
+  const cpMatch = code.match(/function clearPreload\(\) \{[\s\S]*?\n\}/);
+  assert.ok(cpMatch, "clearPreload が見つかること");
+  assert.ok(cpMatch[0].includes("teardownStandby();"), "clearPreload 内で teardownStandby を呼ぶこと");
+});
+
+runTest("audio-engine.js: advanceFromEnded / playNext が preloadUrl パスより前に consumeStandby を確認する", () => {
+  const code = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  const advMatch = code.match(/function advanceFromEnded\(\) \{[\s\S]*?\n\}/);
+  assert.ok(advMatch, "advanceFromEnded が見つかること");
+  const adv = advMatch[0];
+  assert.ok(adv.indexOf("consumeStandby(track)") >= 0, "advanceFromEnded が consumeStandby を使うこと");
+  assert.ok(adv.indexOf("consumeStandby(track)") < adv.indexOf("state.preloadUrl && state.preloadTrackId === track.id"), "スタンバイ確認が preloadUrl パスより前であること");
+  const pnMatch = code.match(/export async function playNext\(\) \{[\s\S]*?\n\}/);
+  assert.ok(pnMatch, "playNext が見つかること");
+  const pn = pnMatch[0];
+  assert.ok(pn.indexOf("consumeStandby(t)") >= 0, "playNext が consumeStandby を使うこと");
+  assert.ok(pn.indexOf("consumeStandby(t)") < pn.indexOf("state.preloadUrl && state.preloadTrackId === t.id"), "スタンバイ確認が preloadUrl パスより前であること");
+});
+
+runTest("audio-engine.js: playPreloadedSync は standbyEl 指定時に src を差し替えず要素切替のみで再生する", () => {
+  const code = fs.readFileSync(path.join(__dirname, "../js/player/audio-engine.js"), "utf8");
+  assert.match(code, /function playPreloadedSync\(index, track, url, \{ isDirectStream = false, standbyEl = null \} = \{\}\)/);
+  assert.match(code, /if \(!useStandby\) audioEl\.src = url;/);
+  const ppsMatch = code.match(/function playPreloadedSync\([\s\S]*?\n\}/);
+  assert.ok(ppsMatch, "playPreloadedSync が見つかること");
+  assert.ok(ppsMatch[0].includes("setActiveAudioElement(standbyEl);"), "スタンバイ時は standbyEl をアクティブ化すること");
+  assert.ok(ppsMatch[0].includes('session.sourceType = "cached_blob";'), "スタンバイ時は blob 経路として扱うこと");
+});
+
+runTest("settings: enableGaplessStandby のデフォルトと設定画面トグルが存在する", () => {
+  const settingsCode = fs.readFileSync(path.join(__dirname, "../js/store/settings.js"), "utf8");
+  assert.match(settingsCode, /enableGaplessStandby: true/);
+  const viewCode = fs.readFileSync(path.join(__dirname, "../js/ui/view-settings.js"), "utf8");
+  assert.ok(viewCode.includes('id="gapless-chk"'), "設定画面に gapless-chk トグルがあること");
+  assert.ok(viewCode.includes("enableGaplessStandby: refs.gaplessChk.checked"), "トグルが setPublic に反映されること");
+});
+
 console.log("\n============================================================");
 console.log(`合計: ${total} / 成功: ${passed} / 失敗: ${total - passed}`);
 if (total === passed) {

@@ -15,6 +15,7 @@ const PUBLIC_DEFAULTS = {
   shuffleMode: false,
   repeatMode: "none",         // "none" | "one" | "all"
   enableAudioEffects: false,  // iOS バックグラウンド再生と非互換のためデフォルトOFF
+  enableGaplessStandby: true, // 次曲を待機要素へ先読みするギャップレス再生（実験的）。EQ/キーチェンジ使用時は自動で無効
   // 10 バンドグラフィック EQ ゲイン (dB)
   eqGains: { 31: 0, 62: 0, 125: 0, 250: 0, 500: 0, 1000: 0, 2000: 0, 4000: 0, 8000: 0, 16000: 0 },
   eqPreset: "flat",           // 現在のプリセット名

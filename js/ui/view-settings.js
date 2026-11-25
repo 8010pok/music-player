@@ -164,6 +164,14 @@ export async function mount(root) {
     }
   });
 
+  // ===== ギャップレス再生 ON/OFF =====
+  if (refs.gaplessChk) {
+    refs.gaplessChk.checked = pub.enableGaplessStandby !== false;
+    refs.gaplessChk.addEventListener("change", () => {
+      setPublic({ enableGaplessStandby: refs.gaplessChk.checked });
+    });
+  }
+
   // ===== プリセット =====
   if (refs.eqPresetSel) {
     refs.eqPresetSel.value = pub.eqPreset || "flat";
@@ -1250,6 +1258,13 @@ function render(pub, authMode, qCount, isIOS, outputSupported, outputDevices, dr
           </div>
           <label class="switch"><input type="checkbox" id="fx-chk" /><span class="slider"></span></label>
         </div>
+        <div class="settings-row">
+          <div>
+            <div class="label">ギャップレス再生（実験的）</div>
+            <div class="help">次の曲を待機中のプレイヤーに先読みし、曲のつなぎ目の無音をなくします（ローカル／キャッシュ済み曲のみ）。<br/>※ オーディオエフェクトやキーチェンジ使用時は自動で無効になります。</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="gapless-chk" ${pub.enableGaplessStandby !== false ? "checked" : ""} /><span class="slider"></span></label>
+        </div>
 
         ${pub.enableAudioEffects ? renderEffectsControls(pub, outputSupported, outputDevices) : `<div class="help" style="font-size:11px;color:var(--fg-muted);margin-top:8px;">エフェクトを有効化すると、10バンドEQ・プリアンプ・低音ブースト・コンプレッサー・ヴォーカル除去・ノイズ除去・ステレオ幅・パン・モノラル化${outputSupported ? "・出力デバイス選択" : ""}が表示されます。</div>`}
       </div>
@@ -1432,6 +1447,7 @@ function collect(root) {
   return {
     themeSel: root.querySelector("#theme-sel"),
     fxChk: root.querySelector("#fx-chk"),
+    gaplessChk: root.querySelector("#gapless-chk"),
     eqPresetSel: root.querySelector("#eq-preset-sel"),
     eqSliders,
     eqVals,
