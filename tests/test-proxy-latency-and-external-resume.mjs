@@ -269,6 +269,7 @@ await (async () => {
     _prepareStandbyForTest,
     _getStandbyForTest,
     _teardownStandbyForTest,
+    _getLastTransitionDiagForTest,
     getAudioElement,
     setQueueAndPlay,
   } = await import("../js/player/audio-engine.js");
@@ -770,6 +771,33 @@ await (async () => {
       _teardownStandbyForTest();
       delete globalThis.localStorage;
     }
+  });
+
+  await asyncTest("27. gapless transition diagnostics: standby consumption is recorded and gapMs fills on playing", async () => {
+    _teardownStandbyForTest();
+    const trackA = { id: "gapless-a5", title: "A5", duration: 180 };
+    const trackB = { id: "gapless-b5", title: "B5", duration: 180 };
+    putMemoryBlob(trackA.id, new Blob(["audio-a5"]));
+    putMemoryBlob(trackB.id, new Blob(["audio-b5"]));
+    await setQueueAndPlay([trackA, trackB], 0);
+    const sessionA = beginPlaybackSession(trackA, { queueIndex: 0, sourceType: "cached_blob" });
+    sessionA.playingAt = Date.now();
+    const activeBefore = getAudioElement();
+    const rec = _prepareStandbyForTest(trackB, new Blob(["audio-b5"]));
+    ok(rec, "standby for B5 should be prepared");
+    rec.el.dispatchEvent(new Event("canplay"));
+    strictEqual(rec.ready, true, "standby for B5 should be ready after canplay");
+    activeBefore.dispatchEvent(new Event("ended"));
+    await new Promise((r) => setTimeout(r, 0));
+    const diag1 = _getLastTransitionDiagForTest();
+    ok(diag1 && diag1.type === "standby" && diag1.via === "ended", "transition recorded as standby via ended");
+    strictEqual(diag1.standbyReady, true, "standbyReady captured from the pre-consume peek");
+    getAudioElement().dispatchEvent(new Event("playing"));
+    const diag2 = _getLastTransitionDiagForTest();
+    ok(typeof diag2.gapMs === "number" && diag2.gapMs >= 0, "gapMs filled when the next track reaches playing");
+    const full = generatePlaybackDiagnostics(getCurrentPlaybackSession(), trackB, null);
+    strictEqual(full.transitionType, "standby", "diagnostics expose transitionType");
+    ok(typeof full.transitionGapMs === "number", "diagnostics expose transitionGapMs");
   });
 })();
 

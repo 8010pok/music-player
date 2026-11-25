@@ -237,6 +237,7 @@ export function generatePlaybackDiagnostics(session, track, error, extra = {}) {
   const tokenDiag = typeof getDriveTokenDiagnostics === "function" ? getDriveTokenDiagnostics() : {};
   const proxyDiag = typeof getDriveSessionDiagnostics === "function" ? getDriveSessionDiagnostics() : {};
   const lastSessionDiag = typeof getLastDriveSessionDiagnostic === "function" ? getLastDriveSessionDiagnostic() : null;
+  const transitionDiag = loadTransitionDiag();
   const isOnline = typeof navigator !== "undefined" ? navigator.onLine : true;
 
   const currentSrcPath = curEl?.currentSrc
@@ -327,6 +328,13 @@ export function generatePlaybackDiagnostics(session, track, error, extra = {}) {
     identityUserinfoNetworkError: tokenDiag.identityUserinfoNetworkError ?? null,
     identityUserinfoHasEmail: tokenDiag.identityUserinfoHasEmail ?? null,
     identityUserinfoHasName: tokenDiag.identityUserinfoHasName ?? null,
+    // 曲間遷移の診断 (記録のみ): 最後の遷移の方式・ギャップ時間・スタンバイ状態
+    transitionVia: transitionDiag?.via ?? null,
+    transitionType: transitionDiag?.type ?? null,
+    transitionGapMs: transitionDiag?.gapMs ?? null,
+    transitionStandbyPrepared: transitionDiag?.standbyPrepared ?? null,
+    transitionStandbyReady: transitionDiag?.standbyReady ?? null,
+    transitionAt: transitionDiag?.at ?? null,
     proxySessionCreatedAt,
     proxySessionExpiresAt,
     proxySessionRemainingMs,
@@ -2193,6 +2201,11 @@ export function attachElementListeners(el) {
   el.addEventListener("playing", (e) => {
     if (!isFromActive(e)) return;
     state.isWaitingOrStalled = false;
+    // 曲間遷移の診断: 次曲の playing 到達でギャップ時間を確定する (記録のみ)
+    if (lastTransitionDiag && lastTransitionDiag.gapMs == null && lastTransitionDiag.startedAtMs) {
+      lastTransitionDiag.gapMs = Date.now() - lastTransitionDiag.startedAtMs;
+      saveTransitionDiag();
+    }
     logPlaybackEvent("playing", { targetEl: e.currentTarget || el });
     clearPlayingWatchdog();
     if (stallRecoveryTimer) {
@@ -2889,17 +2902,20 @@ export async function playNext() {
   // ギャップレス: スタンバイ要素が次曲を読み込み済みなら要素切替だけで遷移
   const sb = consumeStandby(t);
   if (sb) {
+    noteTransition("next", "standby", t);
     playPreloadedSync(next, t, sb.url, { standbyEl: sb.el });
     return;
   }
   // プリロード済みの曲なら同期高速パスで即再生 (ロック画面の「次へ」操作でも
   // 音が途切れないように)。それ以外は通常の loadAndPlay。
   if (state.preloadUrl && state.preloadTrackId === t.id) {
+    noteTransition("next", "preloaded", t);
     playPreloadedSync(next, t, state.preloadUrl);
     return;
   }
   const memBlob = getMemoryBlob(t.id);
   if (memBlob) {
+    noteTransition("next", "preloaded", t);
     const objectUrl = URL.createObjectURL(memBlob);
     playPreloadedSync(next, t, objectUrl);
     return;
@@ -2910,10 +2926,12 @@ export async function playNext() {
       prewarmCache.delete(t.id);
     } else {
       prewarmCache.delete(t.id);
+      noteTransition("next", "preloaded", t);
       playPreloadedSync(next, t, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
       return;
     }
   }
+  noteTransition("next", "load", t);
   state.queueIndex = next;
   appState.set({ queueIndex: next });
   primeAudioElement();
@@ -3042,6 +3060,12 @@ function prepareStandby(track, blob) {
  */
 function consumeStandby(track) {
   const rec = standbyState;
+  // 診断用: 消費前のスタンバイ状態を覗き見として残す (noteTransition が参照する)
+  lastStandbyPeek = {
+    trackId: track?.id ?? null,
+    prepared: !!(rec && track && rec.trackId === track.id),
+    ready: !!(rec && track && rec.trackId === track.id && rec.ready),
+  };
   if (!rec || !track || rec.trackId !== track.id) return null;
   const pub = getPublic() || {};
   const shift = (typeof track.keyShift === "number" && !isNaN(track.keyShift)) ? track.keyShift : 0;
@@ -3079,6 +3103,63 @@ export function _getStandbyForTest() {
 /** テスト専用: スタンバイを破棄する */
 export function _teardownStandbyForTest() {
   teardownStandby();
+}
+
+/* ============ 曲間遷移の診断記録 (記録のみ・再生挙動は変更しない) ============ */
+
+// 最後の曲間遷移について、方式と所要時間を記録する。
+// 「スタンバイが使われたか / 使われなかったなら準備はできていたか /
+//   終了から次曲の playing まで何 ms か」を実機で切り分けるための証拠。
+// 記録するのは方式・真偽値・ミリ秒・時刻のみ (§16: 秘密情報は含めない)。
+// プロセスが死んでも残るよう localStorage の専用キーにも保存する
+// (同期される設定とは分離した診断専用キー)。
+const TRANSITION_DIAG_KEY = "music-player.transition-diag";
+let lastTransitionDiag = null; // { via, type, gapMs, standbyPrepared, standbyReady, at, startedAtMs }
+let lastStandbyPeek = null; // consumeStandby が最後に見たスタンバイ状態 { trackId, prepared, ready }
+
+function saveTransitionDiag() {
+  if (!lastTransitionDiag) return;
+  try {
+    const { via, type, gapMs, standbyPrepared, standbyReady, at } = lastTransitionDiag;
+    localStorage.setItem(TRANSITION_DIAG_KEY, JSON.stringify({ via, type, gapMs, standbyPrepared, standbyReady, at }));
+  } catch {}
+}
+
+function loadTransitionDiag() {
+  if (lastTransitionDiag) return lastTransitionDiag;
+  try {
+    const raw = localStorage.getItem(TRANSITION_DIAG_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && typeof parsed.type === "string") {
+      lastTransitionDiag = { ...parsed, startedAtMs: null };
+      return lastTransitionDiag;
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * 曲間遷移の開始を記録する (advanceFromEnded / playNext の各分岐から呼ぶ)。
+ * gapMs は次曲の 'playing' イベント受信時に埋まる。
+ */
+function noteTransition(via, type, track) {
+  const peek = lastStandbyPeek && track && lastStandbyPeek.trackId === track.id ? lastStandbyPeek : null;
+  lastTransitionDiag = {
+    via,
+    type,
+    gapMs: null,
+    standbyPrepared: peek ? peek.prepared : false,
+    standbyReady: peek ? peek.ready : false,
+    at: new Date().toISOString(),
+    startedAtMs: Date.now(),
+  };
+  saveTransitionDiag();
+}
+
+/** テスト専用: 最後の曲間遷移の診断記録を返す */
+export function _getLastTransitionDiagForTest() {
+  return loadTransitionDiag();
 }
 
 /**
@@ -3389,16 +3470,19 @@ function advanceFromEnded() {
   // ★ ギャップレス: スタンバイ要素が次曲を読み込み済みなら要素切替だけで遷移
   const sb = consumeStandby(track);
   if (sb) {
+    noteTransition("ended", "standby", track);
     playPreloadedSync(next, track, sb.url, { standbyEl: sb.el });
     return;
   }
   // ★ プリロード済みなら同期高速パス (iOS バックグラウンドで音が途切れない)
   if (state.preloadUrl && state.preloadTrackId === track.id) {
+    noteTransition("ended", "preloaded", track);
     playPreloadedSync(next, track, state.preloadUrl);
     return;
   }
   const memBlob = getMemoryBlob(track.id);
   if (memBlob) {
+    noteTransition("ended", "preloaded", track);
     const objectUrl = URL.createObjectURL(memBlob);
     playPreloadedSync(next, track, objectUrl);
     return;
@@ -3409,6 +3493,7 @@ function advanceFromEnded() {
       prewarmCache.delete(track.id);
     } else {
       prewarmCache.delete(track.id);
+      noteTransition("ended", "preloaded", track);
       playPreloadedSync(next, track, prewarmed.objectUrl, { isDirectStream: prewarmed.isStream });
       return;
     }
@@ -3417,6 +3502,7 @@ function advanceFromEnded() {
   // フォールバック: プリロード未完了 (プリロードが間に合わなかった / blob 無し等)。
   // フォアグラウンドなら問題なく動作する。バックグラウンドで間に合わなかった
   // 場合は従来同様のリスクが残るが、通常は曲の長さに対し十分先読みが間に合う。
+  noteTransition("ended", "load", track);
   state.queueIndex = next;
   appState.set({ queueIndex: next });
   loadAndPlay(track).catch((e) => console.warn("[audio-engine] loadAndPlay 失敗", e));
